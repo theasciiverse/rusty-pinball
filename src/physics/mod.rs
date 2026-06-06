@@ -723,15 +723,21 @@ impl PhysicsWorld {
         true
     }
 
-    /// True when the ball is in the dead zone and hasn't yet cleared the gate —
-    /// the player should be allowed to relaunch.
+    /// True when the ball is in the shooter lane and should be re-parked:
+    /// - before gate clears: ball is inside the dead-zone y-range
+    /// - after gate clears: ball returned down the lane and is sitting at or
+    ///   below gate level (trapped on the gate or falling back toward it)
     pub fn is_ball_in_dead_zone(&self) -> bool {
-        if self.gate_cleared { return false; }
         let dz = match self.dead_zone { Some(d) => d, None => return false };
         let [xmin, ymin, xmax, ymax] = dz;
-        self.ball_position()
-            .map(|p| p.x >= xmin - 0.2 && p.x <= xmax + 0.2 && p.y >= ymin && p.y <= ymax)
-            .unwrap_or(false)
+        let pos = match self.ball_position() { Some(p) => p, None => return false };
+        if !(pos.x >= xmin - 0.2 && pos.x <= xmax + 0.2) { return false; }
+        if self.gate_cleared {
+            // Ball returned down the lane and is at or below gate level.
+            pos.y <= self.gate_y + self.ball_radius + 0.2
+        } else {
+            pos.y >= ymin && pos.y <= ymax
+        }
     }
 
     pub fn drain_score_events(&self) -> Vec<u64> {
