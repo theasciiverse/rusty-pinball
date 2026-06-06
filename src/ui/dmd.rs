@@ -62,8 +62,8 @@ pub fn draw_dmd(frame: &mut Frame, area: Rect, game: &GameState) {
     let status_span = match game.phase {
         crate::game::Phase::WaitingToLaunch => Span::styled("PRESS SPACE", Style::default().fg(Color::Green)),
         crate::game::Phase::Playing         => Span::styled(format!("×{}", game.multiplier), score_style),
-        crate::game::Phase::BallLost        => Span::styled("BALL LOST",   Style::default().fg(Color::Red)),
-        crate::game::Phase::GameOver        => Span::styled("GAME OVER",   Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        crate::game::Phase::BallLost        => Span::styled("BALL LOST  SPACE", Style::default().fg(Color::Red)),
+        crate::game::Phase::GameOver        => Span::styled("GAME OVER  SPACE", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
     };
     let hint_span = Span::styled("<esc> to menu", hint_style);
     let rw = cols[2].width as usize;

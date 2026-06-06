@@ -133,28 +133,9 @@ impl App {
 
         input.handle_key(k);
 
-        if k.kind == KeyEventKind::Press
-            && k.code == KeyCode::Char(' ')
-            && game.phase == Phase::WaitingToLaunch
-        {
-            physics.launch_ball();
-            game.phase = Phase::Playing;
-            if self.sound_enabled {
-                if let Some(a) = &mut self.audio { a.play(SoundTrigger::BallLaunch); }
-            }
-        }
-
-        if k.kind == KeyEventKind::Press && self.sound_enabled {
-            let is_left  = matches!(k.code, KeyCode::Char('z') | KeyCode::Left);
-            let is_right = matches!(k.code, KeyCode::Char('x') | KeyCode::Right);
-            if (is_left || is_right) && game.phase == Phase::Playing {
-                if let Some(a) = &mut self.audio { a.play(SoundTrigger::FlipperUp); }
-            }
-        }
-
-        if k.kind == KeyEventKind::Press && k.code == KeyCode::Enter {
+        if k.kind == KeyEventKind::Press && k.code == KeyCode::Char(' ') {
             match game.phase {
-                Phase::BallLost => {
+                Phase::WaitingToLaunch | Phase::BallLost => {
                     physics.launch_ball();
                     game.phase = Phase::Playing;
                     if self.sound_enabled {
@@ -171,6 +152,14 @@ impl App {
                     }
                 }
                 _ => {}
+            }
+        }
+
+        if k.kind == KeyEventKind::Press && self.sound_enabled {
+            let is_left  = matches!(k.code, KeyCode::Char('z') | KeyCode::Left);
+            let is_right = matches!(k.code, KeyCode::Char('x') | KeyCode::Right);
+            if (is_left || is_right) && game.phase == Phase::Playing {
+                if let Some(a) = &mut self.audio { a.play(SoundTrigger::FlipperUp); }
             }
         }
     }
