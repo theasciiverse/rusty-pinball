@@ -436,7 +436,7 @@
       "upspeed": "7"
     }
   ],
-  "gravity": "4",
+  "gravity": "6",
   "height": "30",
   "launchDeadZone": ["18.8", "0", "20", "1.4"],
   "launchPosition": ["19.3", "3.0"],

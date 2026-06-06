@@ -952,7 +952,7 @@
             "position": [0.28, 19.04, 2.24, 19.34]
         }
     ],
-    "gravity": "4.5",
+    "gravity": "6.75",
     "height": "30",
     "launchDeadZone": ["16.8", "0", "18", "1.4"],
     "launchPosition": ["17.3", "3.0"],
