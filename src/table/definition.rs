@@ -210,11 +210,15 @@ pub struct WallArcDef {
     #[serde(deserialize_with = "de_xy")]
     pub center: [f32; 2],
 
-    #[serde(deserialize_with = "de_numstr")]
-    pub xradius: f32,
+    // Elliptical arcs supply xradius + yradius; circular arcs supply radius.
+    #[serde(default, deserialize_with = "de_numstr_opt")]
+    pub xradius: Option<f32>,
 
-    #[serde(deserialize_with = "de_numstr")]
-    pub yradius: f32,
+    #[serde(default, deserialize_with = "de_numstr_opt")]
+    pub yradius: Option<f32>,
+
+    #[serde(default, deserialize_with = "de_numstr_opt")]
+    pub radius: Option<f32>,
 
     #[serde(deserialize_with = "de_numstr")]
     pub minangle: f32,
@@ -227,6 +231,9 @@ pub struct WallArcDef {
 }
 
 impl WallArcDef {
+    fn xr(&self) -> f32 { self.xradius.or(self.radius).unwrap_or(1.0) }
+    fn yr(&self) -> f32 { self.yradius.or(self.radius).unwrap_or(1.0) }
+
     /// Generate the line-segment endpoints that approximate this arc.
     pub fn to_segments(&self) -> Vec<([f32; 2], [f32; 2])> {
         let n = self.segments.unwrap_or(16) as usize;
@@ -236,8 +243,8 @@ impl WallArcDef {
         let pts: Vec<[f32; 2]> = (0..=n).map(|i| {
             let a = min_rad + step * i as f32;
             [
-                self.center[0] + self.xradius * a.cos(),
-                self.center[1] + self.yradius * a.sin(),
+                self.center[0] + self.xr() * a.cos(),
+                self.center[1] + self.yr() * a.sin(),
             ]
         }).collect();
         pts.windows(2).map(|w| (w[0], w[1])).collect()

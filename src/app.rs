@@ -209,8 +209,15 @@ impl App {
                 *camera_y += (target - *camera_y) * 0.15;
             }
 
+            // Ball fell back into the shooter lane without clearing the gate.
+            if game.phase == Phase::Playing && physics.is_ball_in_dead_zone() {
+                game.phase = Phase::WaitingToLaunch;
+                physics.park_ball();
+            }
+
             let events: Vec<_> = physics.drain_sound_events().into_iter().collect();
             let drained = prev_phase == Phase::Playing && game.phase != Phase::Playing;
+            if drained { physics.park_ball(); }
             (events, drained)
         } else {
             return;

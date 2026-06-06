@@ -45,6 +45,7 @@ pub struct FieldSnapshot {
     pub kick_walls: Vec<WallSnapshot>,
     pub bumpers: Vec<BumperSnapshot>,
     pub flippers: Vec<FlipperSnapshot>,
+    pub drop_targets: Vec<WallSnapshot>,
     pub field_width: f32,
     pub field_height: f32,
 }
@@ -81,10 +82,24 @@ struct KickWallInfo {
     kick_force: f32,
     score: u64,
     debounce: u8,
+    retract_when_hit: bool,
+    active: bool,
 }
 
-const BUMPER_LIT_TICKS:   u8 = 6;
-const KICK_WALL_DEBOUNCE: u8 = 6;
+struct DropTargetInfo {
+    x1: f32, y1: f32, x2: f32, y2: f32,
+    collider: ColliderHandle,
+    active: bool,
+}
+
+struct DropTargetGroupInfo {
+    targets: Vec<DropTargetInfo>,
+    score:   u64,
+}
+
+const BUMPER_LIT_TICKS:   u8  = 6;
+const KICK_WALL_DEBOUNCE: u8  = 6;
+const DROP_CLEAR_BONUS:   u64 = 2_000;
 
 #[derive(Clone)]
 pub enum PhysicsSound {
@@ -114,10 +129,11 @@ pub struct PhysicsWorld {
 
     // Game objects
     ball_handle:   Option<RigidBodyHandle>,
-    ball_radius:   f32,
-    flippers:      Vec<FlipperInfo>,
-    bumpers:       Vec<BumperInfo>,
-    kick_walls:    Vec<KickWallInfo>,
+    ball_radius:        f32,
+    flippers:           Vec<FlipperInfo>,
+    bumpers:            Vec<BumperInfo>,
+    kick_walls:         Vec<KickWallInfo>,
+    drop_target_groups: Vec<DropTargetGroupInfo>,
 
     // Pre-computed wall segments for rendering (no physics body needed to query)
     wall_segments: Vec<WallSnapshot>,
@@ -126,11 +142,17 @@ pub struct PhysicsWorld {
     score_events:  RefCell<Vec<u64>>,
     sound_events:  RefCell<Vec<PhysicsSound>>,
 
-    drain_y:       f32,         // y < this → ball drained
+    drain_y:       f32,
     field_width:   f32,
     field_height:  f32,
     launch_pos:    [f32; 2],
     launch_vel:    [f32; 2],
+
+    // Shooter-lane gate: closes once ball escapes, preventing it falling back.
+    dead_zone:     Option<[f32; 4]>,   // [xmin, ymin, xmax, ymax]
+    gate_y:        f32,                // threshold ball must cross to clear lane
+    gate_collider: Option<ColliderHandle>,
+    gate_cleared:  bool,
 }
 
 impl PhysicsWorld {
@@ -140,10 +162,11 @@ impl PhysicsWorld {
         let mut impulse_joints = ImpulseJointSet::new();
         let multibody_joints  = MultibodyJointSet::new();
 
-        let mut flippers     = Vec::new();
-        let mut bumpers_info = Vec::new();
-        let mut kick_walls   = Vec::new();
-        let mut wall_segs    = Vec::new();
+        let mut flippers           = Vec::new();
+        let mut bumpers_info       = Vec::new();
+        let mut kick_walls         = Vec::new();
+        let mut drop_target_groups = Vec::new();
+        let mut wall_segs          = Vec::new();
 
         // Gravity points downward in rapier (negative y)
         let g = table.gravity_magnitude();
@@ -161,6 +184,8 @@ impl PhysicsWorld {
                                 kick_force: kick,
                                 score: w.score.unwrap_or(0),
                                 debounce: 0,
+                                retract_when_hit: w.retract_when_hit == Some(true),
+                                active: true,
                             });
                         }
                     }
@@ -169,7 +194,9 @@ impl PhysicsWorld {
                 ElementDef::WallPathElement(p)  => Self::add_path(p, &mut bodies, &mut colliders, &mut wall_segs),
                 ElementDef::BumperElement(b)    => Self::add_bumper(b, &mut bodies, &mut colliders, &mut bumpers_info),
                 ElementDef::FlipperElement(f)   => Self::add_flipper(f, &mut bodies, &mut colliders, &mut flippers),
-                ElementDef::DropTargetGroupElement(d) => Self::add_drop_targets(d, &mut bodies, &mut colliders, &mut wall_segs),
+                ElementDef::DropTargetGroupElement(d) => {
+                    drop_target_groups.push(Self::build_drop_target_group(d, &mut bodies, &mut colliders));
+                }
                 _ => {}
             }
         }
@@ -190,6 +217,40 @@ impl PhysicsWorld {
             let _ = w; // suppress warning
         }
 
+        // Shooter-lane gate: a horizontal wall across the lane that starts
+        // disabled and is enabled once the ball escapes upward.
+        let dead_zone  = table.launch_dead_zone;
+        let gate_y     = launch_pos[1] + 1.0;   // just above the launch point
+        let gate_collider = dead_zone.map(|[dz_xmin, _, dz_xmax, _]| {
+            let cx     = (dz_xmin + dz_xmax) / 2.0;
+            let half_w = (dz_xmax - dz_xmin) / 2.0;
+            let bh = bodies.insert(
+                RigidBodyBuilder::fixed().translation(vector![cx, gate_y]).build()
+            );
+            let col = ColliderBuilder::cuboid(half_w, 0.05)
+                .collision_groups(InteractionGroups::none())  // disabled until ball clears
+                .build();
+            colliders.insert_with_parent(col, bh, &mut bodies)
+        });
+
+        // Place the ball at the launch position with gravity disabled so it
+        // sits visibly in the shooter lane before the player fires it.
+        let [lx, ly] = launch_pos;
+        let idle_rb = RigidBodyBuilder::dynamic()
+            .translation(vector![lx, ly])
+            .gravity_scale(0.0)
+            .build();
+        let idle_h = bodies.insert(idle_rb);
+        let idle_col = ColliderBuilder::ball(ball_radius)
+            .restitution(0.8)
+            .restitution_combine_rule(CoefficientCombineRule::Max)
+            .friction(0.0)
+            .density(1.0)
+            .active_events(ActiveEvents::COLLISION_EVENTS)
+            .build();
+        colliders.insert_with_parent(idle_col, idle_h, &mut bodies);
+        let ball_handle = Some(idle_h);
+
         PhysicsWorld {
             bodies,
             colliders,
@@ -202,19 +263,24 @@ impl PhysicsWorld {
             ccd_solver: CCDSolver::new(),
             query_pipeline: QueryPipeline::new(),
             gravity,
-            ball_handle: None,
+            ball_handle,
             ball_radius,
             flippers,
             bumpers: bumpers_info,
             kick_walls,
+            drop_target_groups,
             wall_segments: wall_segs,
             score_events: RefCell::new(Vec::new()),
             sound_events: RefCell::new(Vec::new()),
-            drain_y: 1.0,   // ball center < 1.0 → fell past the flipper tips
+            drain_y: 1.0,
             field_width:  table.width,
             field_height: table.height,
             launch_pos,
             launch_vel,
+            dead_zone,
+            gate_y,
+            gate_collider,
+            gate_cleared: false,
         }
     }
 
@@ -363,15 +429,29 @@ impl PhysicsWorld {
         }
     }
 
-    fn add_drop_targets(d: &DropTargetGroupDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, segs: &mut Vec<WallSnapshot>) {
-        for pos in &d.positions {
-            let dummy = WallDef {
-                position: Some(*pos),
-                id: None, color: None, kick: None, restitution: Some(0.1),
-                kill: None, disabled: None, retract_when_hit: None, score: None,
-            };
-            Self::add_wall(&dummy, bodies, colliders, segs);
-        }
+    fn build_drop_target_group(d: &DropTargetGroupDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet) -> DropTargetGroupInfo {
+        let targets = d.positions.iter().map(|&[x1, y1, x2, y2]| {
+            let cx    = (x1 + x2) / 2.0;
+            let cy    = (y1 + y2) / 2.0;
+            let dx    = x2 - x1;
+            let dy    = y2 - y1;
+            let len   = (dx * dx + dy * dy).sqrt();
+            let angle = dy.atan2(dx);
+            let bh = bodies.insert(
+                RigidBodyBuilder::fixed()
+                    .translation(vector![cx, cy])
+                    .rotation(angle)
+                    .build()
+            );
+            let col = ColliderBuilder::cuboid(len / 2.0, 0.05)
+                .restitution(0.5)
+                .restitution_combine_rule(CoefficientCombineRule::Max)
+                .friction(0.0)
+                .build();
+            let ch = colliders.insert_with_parent(col, bh, bodies);
+            DropTargetInfo { x1, y1, x2, y2, collider: ch, active: true }
+        }).collect();
+        DropTargetGroupInfo { targets, score: d.score.unwrap_or(0) }
     }
 
     // -----------------------------------------------------------------------
@@ -379,27 +459,46 @@ impl PhysicsWorld {
     // -----------------------------------------------------------------------
 
     pub fn launch_ball(&mut self) {
-        // Remove any previous ball body before launching a new one
-        if let Some(old) = self.ball_handle.take() {
-            self.bodies.remove(old, &mut self.islands, &mut self.colliders, &mut self.impulse_joints, &mut self.multibody_joints, false);
-        }
-
         let [lx, ly] = self.launch_pos;
         let [vx, vy] = self.launch_vel;
-        let rb = RigidBodyBuilder::dynamic()
-            .translation(vector![lx, ly])
-            .linvel(vector![vx, vy])
-            .build();
-        let h = self.bodies.insert(rb);
-        let col = ColliderBuilder::ball(self.ball_radius)
-            .restitution(0.8)
-            .restitution_combine_rule(CoefficientCombineRule::Max)
-            .friction(0.0)
-            .density(1.0)
-            .active_events(ActiveEvents::COLLISION_EVENTS)
-            .build();
-        self.colliders.insert_with_parent(col, h, &mut self.bodies);
-        self.ball_handle = Some(h);
+
+        // Small jitter so every launch feels slightly different.
+        // Seeds from nanosecond wall-clock time via a one-step LCG.
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let lcg  = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let frac = (lcg >> 8) as f32 / (1u32 << 24) as f32; // 0..1
+        let jitter = (frac - 0.5) * 0.08;                    // ±4 % of launch speed
+        let actual_vy = vy * (1.0 + jitter);
+        let actual_vx = vx + vy * jitter * 0.1;              // tiny lateral nudge
+
+        if let Some(h) = self.ball_handle {
+            if let Some(body) = self.bodies.get_mut(h) {
+                body.set_translation(vector![lx, ly], true);
+                body.set_linvel(vector![actual_vx, actual_vy], true);
+                body.set_angvel(0.0, true);
+                body.set_gravity_scale(1.0, true);
+                body.enable_ccd(true);
+            }
+        } else {
+            let rb = RigidBodyBuilder::dynamic()
+                .translation(vector![lx, ly])
+                .linvel(vector![actual_vx, actual_vy])
+                .ccd_enabled(true)
+                .build();
+            let h = self.bodies.insert(rb);
+            let col = ColliderBuilder::ball(self.ball_radius)
+                .restitution(0.8)
+                .restitution_combine_rule(CoefficientCombineRule::Max)
+                .friction(0.0)
+                .density(1.0)
+                .active_events(ActiveEvents::COLLISION_EVENTS)
+                .build();
+            self.colliders.insert_with_parent(col, h, &mut self.bodies);
+            self.ball_handle = Some(h);
+        }
     }
 
     pub fn step(&mut self, dt: f32, input: &InputState) {
@@ -484,16 +583,20 @@ impl PhysicsWorld {
                 if let Some(ball_body) = self.bodies.get(ball_h) {
                     let bp = *ball_body.translation();
                     for (i, kw) in self.kick_walls.iter().enumerate() {
-                        if kw.debounce > 0 { continue; }
+                        if !kw.active || kw.debounce > 0 { continue; }
                         let (dist, nx, ny) = Self::point_to_segment_dist(bp.x, bp.y, kw.x1, kw.y1, kw.x2, kw.y2);
-                        if dist < self.ball_radius + 0.08 {
+                        if dist < self.ball_radius + 0.25 {
                             hits.push((i, nx, ny));
                         }
                     }
                 }
             }
             for (i, nx, ny) in hits {
-                self.kick_walls[i].debounce = KICK_WALL_DEBOUNCE;
+                if self.kick_walls[i].retract_when_hit {
+                    self.kick_walls[i].active = false;
+                } else {
+                    self.kick_walls[i].debounce = KICK_WALL_DEBOUNCE;
+                }
                 if self.kick_walls[i].score > 0 {
                     self.score_events.borrow_mut().push(self.kick_walls[i].score);
                 }
@@ -509,6 +612,69 @@ impl PhysicsWorld {
         // Tick kick-wall debounce timers
         for kw in &mut self.kick_walls {
             if kw.debounce > 0 { kw.debounce -= 1; }
+        }
+
+        // Drop-target hit detection
+        {
+            let mut hits: Vec<(usize, usize)> = Vec::new();
+            if let Some(ball_h) = self.ball_handle {
+                if let Some(ball_body) = self.bodies.get(ball_h) {
+                    let bp = *ball_body.translation();
+                    for (gi, group) in self.drop_target_groups.iter().enumerate() {
+                        for (ti, target) in group.targets.iter().enumerate() {
+                            if !target.active { continue; }
+                            let (dist, _, _) = Self::point_to_segment_dist(
+                                bp.x, bp.y,
+                                target.x1, target.y1, target.x2, target.y2,
+                            );
+                            if dist < self.ball_radius + 0.05 {
+                                hits.push((gi, ti));
+                            }
+                        }
+                    }
+                }
+            }
+            for (gi, ti) in hits {
+                let score = self.drop_target_groups[gi].score;
+                if score > 0 { self.score_events.borrow_mut().push(score); }
+
+                self.drop_target_groups[gi].targets[ti].active = false;
+                let ch = self.drop_target_groups[gi].targets[ti].collider;
+                if let Some(col) = self.colliders.get_mut(ch) {
+                    col.set_collision_groups(InteractionGroups::none());
+                }
+
+                let all_clear = self.drop_target_groups[gi].targets.iter().all(|t| !t.active);
+                if all_clear {
+                    self.score_events.borrow_mut().push(DROP_CLEAR_BONUS);
+                    for target in &mut self.drop_target_groups[gi].targets {
+                        target.active = true;
+                        if let Some(col) = self.colliders.get_mut(target.collider) {
+                            col.set_collision_groups(InteractionGroups::all());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Shooter-lane gate: enable once the ball clears gate_y going upward.
+        if !self.gate_cleared {
+            if let (Some(ball_h), Some(gate_col_h)) = (self.ball_handle, self.gate_collider) {
+                let in_lane = self.dead_zone.map(|[xmin, _, xmax, _]| {
+                    self.bodies.get(ball_h)
+                        .map(|b| { let x = b.translation().x; x >= xmin - 0.2 && x <= xmax + 0.2 })
+                        .unwrap_or(false)
+                }).unwrap_or(false);
+                if in_lane {
+                    let ball_y = self.bodies.get(ball_h).map(|b| b.translation().y).unwrap_or(0.0);
+                    if ball_y > self.gate_y {
+                        self.gate_cleared = true;
+                        if let Some(col) = self.colliders.get_mut(gate_col_h) {
+                            col.set_collision_groups(InteractionGroups::all());
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -545,8 +711,23 @@ impl PhysicsWorld {
     }
 
     pub fn is_ball_drained(&self) -> bool {
+        let pos = match self.ball_position() { Some(p) => p, None => return false };
+        if pos.y >= self.drain_y { return false; }
+        // Ball sitting in the shooter-lane dead zone is not a drain.
+        if let Some([xmin, _, xmax, _]) = self.dead_zone {
+            if pos.x >= xmin - 0.2 && pos.x <= xmax + 0.2 { return false; }
+        }
+        true
+    }
+
+    /// True when the ball is in the dead zone and hasn't yet cleared the gate —
+    /// the player should be allowed to relaunch.
+    pub fn is_ball_in_dead_zone(&self) -> bool {
+        if self.gate_cleared { return false; }
+        let dz = match self.dead_zone { Some(d) => d, None => return false };
+        let [xmin, ymin, xmax, ymax] = dz;
         self.ball_position()
-            .map(|p| p.y < self.drain_y)
+            .map(|p| p.x >= xmin - 0.2 && p.x <= xmax + 0.2 && p.y >= ymin && p.y <= ymax)
             .unwrap_or(false)
     }
 
@@ -568,6 +749,34 @@ impl PhysicsWorld {
                 &mut self.multibody_joints,
                 false,
             );
+        }
+    }
+
+    /// Freeze the ball at the launch position with gravity off so it appears
+    /// waiting in the shooter lane between balls.  Also reactivates any
+    /// retract-when-hit walls (ball savers) for the new ball.
+    pub fn park_ball(&mut self) {
+        let [lx, ly] = self.launch_pos;
+        if let Some(h) = self.ball_handle {
+            if let Some(body) = self.bodies.get_mut(h) {
+                body.set_translation(vector![lx, ly], true);
+                body.set_linvel(vector![0.0, 0.0], true);
+                body.set_angvel(0.0, true);
+                body.set_gravity_scale(0.0, true);
+            }
+        }
+        // Re-open the shooter-lane gate for the next launch attempt.
+        self.gate_cleared = false;
+        if let Some(gate_col_h) = self.gate_collider {
+            if let Some(col) = self.colliders.get_mut(gate_col_h) {
+                col.set_collision_groups(InteractionGroups::none());
+            }
+        }
+        // Reactivate ball-saver walls.
+        for kw in &mut self.kick_walls {
+            if kw.retract_when_hit {
+                kw.active = true;
+            }
         }
     }
 
@@ -601,7 +810,13 @@ impl PhysicsWorld {
         }).collect();
 
         let kick_walls = self.kick_walls.iter()
+            .filter(|kw| kw.active)
             .map(|kw| WallSnapshot { x1: kw.x1, y1: kw.y1, x2: kw.x2, y2: kw.y2 })
+            .collect();
+
+        let drop_targets: Vec<WallSnapshot> = self.drop_target_groups.iter()
+            .flat_map(|g| g.targets.iter().filter(|t| t.active))
+            .map(|t| WallSnapshot { x1: t.x1, y1: t.y1, x2: t.x2, y2: t.y2 })
             .collect();
 
         FieldSnapshot {
@@ -610,6 +825,7 @@ impl PhysicsWorld {
             kick_walls,
             bumpers,
             flippers,
+            drop_targets,
             field_width:  self.field_width,
             field_height: self.field_height,
         }

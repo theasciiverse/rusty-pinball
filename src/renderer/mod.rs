@@ -15,13 +15,14 @@ use crate::physics::FieldSnapshot;
 
 // ── Palette ───────────────────────────────────────────────────────────────────
 
-const COL_WALL:       Color = Color::Gray;
-const COL_KICK_WALL:  Color = Color::LightGreen;
-const COL_BUMPER:     Color = Color::Blue;
-const COL_BUMPER_LIT: Color = Color::LightYellow;
-const COL_FLIPPER:    Color = Color::Cyan;
-const COL_BALL:       Color = Color::White;
-const COL_BACKGROUND: Color = Color::DarkGray;
+const COL_WALL:        Color = Color::Gray;
+const COL_KICK_WALL:   Color = Color::LightGreen;
+const COL_DROP_TARGET: Color = Color::Yellow;
+const COL_BUMPER:      Color = Color::Blue;
+const COL_BUMPER_LIT:  Color = Color::LightYellow;
+const COL_FLIPPER:     Color = Color::Cyan;
+const COL_BALL:        Color = Color::White;
+const COL_BACKGROUND:  Color = Color::DarkGray;
 
 // ── Public output type ────────────────────────────────────────────────────────
 
@@ -82,6 +83,12 @@ impl FieldRenderer {
             draw_line(&mut pixels, &mut grid,
                 to_cx(kw.x1), to_cy(kw.y1), to_cx(kw.x2), to_cy(kw.y2),
                 COL_KICK_WALL);
+        }
+
+        for dt in &snap.drop_targets {
+            draw_line(&mut pixels, &mut grid,
+                to_cx(dt.x1), to_cy(dt.y1), to_cx(dt.x2), to_cy(dt.y2),
+                COL_DROP_TARGET);
         }
 
         for b in &snap.bumpers {
