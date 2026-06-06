@@ -142,6 +142,9 @@ pub struct TableDef {
     #[serde(rename = "launchVelocity", default, deserialize_with = "de_xy_opt")]
     pub launch_velocity: Option<[f32; 2]>,
 
+    #[serde(rename = "launchVelocityRandomDelta", default, deserialize_with = "de_xy_opt")]
+    pub launch_velocity_random_delta: Option<[f32; 2]>,
+
     #[serde(rename = "launchDeadZone", default, deserialize_with = "de_xxyy_opt")]
     pub launch_dead_zone: Option<[f32; 4]>,
 

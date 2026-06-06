@@ -145,8 +145,9 @@ pub struct PhysicsWorld {
     drain_y:       f32,
     field_width:   f32,
     field_height:  f32,
-    launch_pos:    [f32; 2],
-    launch_vel:    [f32; 2],
+    launch_pos:       [f32; 2],
+    launch_vel:       [f32; 2],
+    launch_vel_delta: [f32; 2],
 
     // Shooter-lane gate: closes once ball escapes, preventing it falling back.
     dead_zone:     Option<[f32; 4]>,   // [xmin, ymin, xmax, ymax]
@@ -202,8 +203,9 @@ impl PhysicsWorld {
         }
 
         let ball_radius = table.ball_radius();
-        let launch_pos  = table.launch_position.unwrap_or([table.width * 0.95, ball_radius + 0.5]);
-        let launch_vel  = table.launch_velocity.unwrap_or([0.0, g * 3.0]);
+        let launch_pos        = table.launch_position.unwrap_or([table.width * 0.95, ball_radius + 0.5]);
+        let launch_vel        = table.launch_velocity.unwrap_or([0.0, g * 3.0]);
+        let launch_vel_delta  = table.launch_velocity_random_delta.unwrap_or([0.0, 0.0]);
 
         // No physical floor — the kill wall at y≈0 is detected via drain_y.
 
@@ -277,6 +279,7 @@ impl PhysicsWorld {
             field_height: table.height,
             launch_pos,
             launch_vel,
+            launch_vel_delta,
             dead_zone,
             gate_y,
             gate_collider,
@@ -461,18 +464,18 @@ impl PhysicsWorld {
     pub fn launch_ball(&mut self) {
         let [lx, ly] = self.launch_pos;
         let [vx, vy] = self.launch_vel;
+        let [dx, dy] = self.launch_vel_delta;
 
-        // Small jitter so every launch feels slightly different.
-        // Seeds from nanosecond wall-clock time via a one-step LCG.
+        // Random top-up in [0, delta]: base is always enough to clear the lane;
+        // the delta is the table's launchVelocityRandomDelta (additive only).
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos())
             .unwrap_or(0);
         let lcg  = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         let frac = (lcg >> 8) as f32 / (1u32 << 24) as f32; // 0..1
-        let jitter = (frac - 0.5) * 0.08;                    // ±4 % of launch speed
-        let actual_vy = vy * (1.0 + jitter);
-        let actual_vx = vx + vy * jitter * 0.1;              // tiny lateral nudge
+        let actual_vy = vy + frac * dy;
+        let actual_vx = vx + (frac - 0.5) * dx.max(0.1);    // tiny centred lateral nudge
 
         if let Some(h) = self.ball_handle {
             if let Some(body) = self.bodies.get_mut(h) {
