@@ -85,9 +85,9 @@ struct KickWallInfo {
     retract_when_hit: bool,
     active: bool,
     // Perpendicular direction pointing toward the field interior (precomputed).
-    // Kick is only applied when the ball is on this side of the wall, preventing
-    // wrong-direction impulses when the ball enters the pocket behind a slingshot.
     interior_normal: [f32; 2],
+    // Rapier collider handle — used for collision-event-based kick detection.
+    collider_handle: ColliderHandle,
 }
 
 struct DropTargetInfo {
@@ -132,12 +132,21 @@ pub struct PhysicsWorld {
     gravity:       Vector<f32>,
 
     // Game objects
-    ball_handle:   Option<RigidBodyHandle>,
+    ball_handle:    Option<RigidBodyHandle>,
+    ball_collider:  Option<ColliderHandle>,   // collider for the ball body
     ball_radius:        f32,
     flippers:           Vec<FlipperInfo>,
     bumpers:            Vec<BumperInfo>,
     kick_walls:         Vec<KickWallInfo>,
     drop_target_groups: Vec<DropTargetGroupInfo>,
+
+    // Collision-event channel: pipeline writes Started/Stopped events here.
+    kick_evt_send: rapier2d::crossbeam::channel::Sender<CollisionEvent>,
+    kick_evt_recv: rapier2d::crossbeam::channel::Receiver<CollisionEvent>,
+    // Force-event channel: we don't use force events but must keep the sender
+    // alive so the channel doesn't disconnect and cause silent errors.
+    _force_send:   rapier2d::crossbeam::channel::Sender<rapier2d::geometry::ContactForceEvent>,
+    _force_recv:   rapier2d::crossbeam::channel::Receiver<rapier2d::geometry::ContactForceEvent>,
 
     // Pre-computed wall segments for rendering (no physics body needed to query)
     wall_segments: Vec<WallSnapshot>,
@@ -180,12 +189,14 @@ impl PhysicsWorld {
         for elem in &table.elements {
             match elem {
                 ElementDef::WallElement(w) => {
-                    Self::add_wall(w, &mut bodies, &mut colliders, &mut wall_segs);
+                    let wall_col = Self::add_wall(w, &mut bodies, &mut colliders, &mut wall_segs);
                     // Register slingshot / kicker if this wall has a kick value.
                     if w.disabled != Some(true) && w.kill != Some(true) {
-                        if let (Some(kick), Some([x1, y1, x2, y2])) = (w.kick, w.position) {
-                            // Perpendicular pointing toward field centre — the side the ball
-                            // should be on for a valid kick.
+                        if let (Some(kick), Some([x1, y1, x2, y2]), Some(col)) =
+                            (w.kick, w.position, wall_col)
+                        {
+                            // Perpendicular pointing toward field centre — always kick
+                            // the ball toward the interior regardless of approach angle.
                             let dx = x2 - x1;
                             let dy = y2 - y1;
                             let len = (dx * dx + dy * dy).sqrt().max(1e-6);
@@ -208,6 +219,7 @@ impl PhysicsWorld {
                                 retract_when_hit: w.retract_when_hit == Some(true),
                                 active: true,
                                 interior_normal,
+                                collider_handle: col,
                             });
                         }
                     }
@@ -271,8 +283,14 @@ impl PhysicsWorld {
             .density(1.0)
             .active_events(ActiveEvents::COLLISION_EVENTS)
             .build();
-        colliders.insert_with_parent(idle_col, idle_h, &mut bodies);
-        let ball_handle = Some(idle_h);
+        let ball_col_h = colliders.insert_with_parent(idle_col, idle_h, &mut bodies);
+        let ball_handle   = Some(idle_h);
+        let ball_collider = Some(ball_col_h);
+
+        let (kick_evt_send, kick_evt_recv) =
+            rapier2d::crossbeam::channel::unbounded::<CollisionEvent>();
+        let (_force_send, _force_recv) =
+            rapier2d::crossbeam::channel::unbounded::<rapier2d::geometry::ContactForceEvent>();
 
         PhysicsWorld {
             bodies,
@@ -287,6 +305,7 @@ impl PhysicsWorld {
             query_pipeline: QueryPipeline::new(),
             gravity,
             ball_handle,
+            ball_collider,
             ball_radius,
             flippers,
             bumpers: bumpers_info,
@@ -305,6 +324,10 @@ impl PhysicsWorld {
             gate_y,
             gate_collider,
             gate_cleared: false,
+            kick_evt_send,
+            kick_evt_recv,
+            _force_send,
+            _force_recv,
         }
     }
 
@@ -312,9 +335,9 @@ impl PhysicsWorld {
     // Element builders
     // -----------------------------------------------------------------------
 
-    fn add_wall(w: &WallDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, segs: &mut Vec<WallSnapshot>) {
-        let pos = match &w.position { Some(p) => *p, None => return };
-        if w.disabled == Some(true) || w.kill == Some(true) { return; }
+    fn add_wall(w: &WallDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, segs: &mut Vec<WallSnapshot>) -> Option<ColliderHandle> {
+        let pos = match &w.position { Some(p) => *p, None => return None };
+        if w.disabled == Some(true) || w.kill == Some(true) { return None; }
 
         let [x1, y1, x2, y2] = pos;
         let cx = (x1 + x2) / 2.0;
@@ -338,8 +361,9 @@ impl PhysicsWorld {
             .restitution_combine_rule(CoefficientCombineRule::Max)
             .friction(0.0)
             .build();
-        colliders.insert_with_parent(col, h, bodies);
+        let col_h = colliders.insert_with_parent(col, h, bodies);
         segs.push(WallSnapshot { x1, y1, x2, y2 });
+        Some(col_h)
     }
 
     fn add_arc(a: &WallArcDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, segs: &mut Vec<WallSnapshot>) {
@@ -349,7 +373,7 @@ impl PhysicsWorld {
                 id: None, color: None, kick: None, restitution: Some(0.8),
                 kill: None, disabled: None, retract_when_hit: None, score: None,
             };
-            Self::add_wall(&dummy_def, bodies, colliders, segs);
+            let _ = Self::add_wall(&dummy_def, bodies, colliders, segs);
         }
     }
 
@@ -360,7 +384,7 @@ impl PhysicsWorld {
                 id: None, color: None, kick: None, restitution: None,
                 kill: None, disabled: None, retract_when_hit: None, score: None,
             };
-            Self::add_wall(&dummy, bodies, colliders, segs);
+            let _ = Self::add_wall(&dummy, bodies, colliders, segs);
         }
     }
 
@@ -548,6 +572,10 @@ impl PhysicsWorld {
         let mut params = IntegrationParameters::default();
         params.dt = dt;
 
+        let evt_handler = ChannelEventCollector::new(
+            self.kick_evt_send.clone(),
+            self._force_send.clone(),
+        );
         self.pipeline.step(
             &self.gravity,
             &params,
@@ -561,7 +589,7 @@ impl PhysicsWorld {
             &mut self.ccd_solver,
             Some(&mut self.query_pipeline),
             &(),
-            &(),
+            &evt_handler,
         );
 
         // Bumper proximity detection: collect hits, then apply kicks + score
@@ -600,34 +628,34 @@ impl PhysicsWorld {
             if b.lit_ticks > 0 { b.lit_ticks -= 1; }
         }
 
-        // Kick-wall (slingshot / ball-saver) proximity detection.
+        // Kick-wall (slingshot / ball-saver) collision-event detection.
         //
-        // Only fire when the ball is on the interior (field) side of the wall.
-        // This prevents a ball that drifts into the pocket behind a slingshot from
-        // being kicked deeper into the pocket.
-        //
-        // RetractWhenHit walls (ball-savers) use ball_radius as the trigger distance
-        // so they only fire on genuine contact, not when the ball passes nearby in
-        // the shooter lane.
+        // Rapier emits CollisionEvent::Started when the ball first contacts a
+        // kick-wall collider.  This matches the original Vector-Pinball approach
+        // (Box2D handleCollision) and fires reliably regardless of ball speed.
+        // Kick direction is always the precomputed interior_normal so the ball
+        // is pushed away from the pocket and into the field.
         {
+            let ball_col = self.ball_collider;
+            // Drain all collision events queued during the step above.
+            let events: Vec<CollisionEvent> = {
+                let mut v = Vec::new();
+                while let Ok(e) = self.kick_evt_recv.try_recv() { v.push(e); }
+                v
+            };
             let mut hits: Vec<(usize, f32, f32)> = Vec::new();
-            if let Some(ball_h) = self.ball_handle {
-                if let Some(ball_body) = self.bodies.get(ball_h) {
-                    let bp = *ball_body.translation();
-                    for (i, kw) in self.kick_walls.iter().enumerate() {
-                        if !kw.active || kw.debounce > 0 { continue; }
-                        let (dist, nx, ny) = Self::point_to_segment_dist(bp.x, bp.y, kw.x1, kw.y1, kw.x2, kw.y2);
-                        // Ball must be on the interior (field) side of the kick wall.
-                        let on_interior = nx * kw.interior_normal[0] + ny * kw.interior_normal[1] > 0.0;
-                        // Tighter threshold for retract-when-hit walls: fire only on genuine contact.
-                        let threshold = if kw.retract_when_hit {
-                            self.ball_radius
-                        } else {
-                            self.ball_radius + 0.25
-                        };
-                        if dist < threshold && on_interior {
-                            hits.push((i, kw.interior_normal[0], kw.interior_normal[1]));
-                        }
+            for event in events {
+                if let CollisionEvent::Started(h1, h2, _) = event {
+                    let other = match ball_col {
+                        Some(bc) if bc == h1 => h2,
+                        Some(bc) if bc == h2 => h1,
+                        _ => continue,
+                    };
+                    if let Some(ki) = self.kick_walls.iter().position(|kw| {
+                        kw.active && kw.debounce == 0 && kw.collider_handle == other
+                    }) {
+                        let kw = &self.kick_walls[ki];
+                        hits.push((ki, kw.interior_normal[0], kw.interior_normal[1]));
                     }
                 }
             }
