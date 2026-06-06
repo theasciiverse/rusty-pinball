@@ -733,8 +733,14 @@ impl PhysicsWorld {
         let pos = match self.ball_position() { Some(p) => p, None => return false };
         if !(pos.x >= xmin - 0.2 && pos.x <= xmax + 0.2) { return false; }
         if self.gate_cleared {
-            // Ball returned down the lane and is at or below gate level.
-            pos.y <= self.gate_y + self.ball_radius + 0.2
+            // Ball returned down the lane: must be descending (vy ≤ 0) so a
+            // freshly launched ball — still rising through the gate region —
+            // is never mistaken for a returning one.
+            let vy = self.ball_handle
+                .and_then(|h| self.bodies.get(h))
+                .map(|b| b.linvel().y)
+                .unwrap_or(0.0);
+            vy <= 0.0 && pos.y <= self.gate_y + self.ball_radius + 0.2
         } else {
             pos.y >= ymin && pos.y <= ymax
         }
