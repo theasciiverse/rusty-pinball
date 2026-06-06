@@ -5,7 +5,7 @@
     192,
     224
   ],
-  "ballradius": "0.5",
+  "ballradius": "0.46",
   "elements": [
     {
       "class": "WallElement",
