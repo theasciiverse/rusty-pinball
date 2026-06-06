@@ -46,6 +46,13 @@ impl App {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen)?;
+        // Request key-release events on terminals that support the Kitty keyboard protocol.
+        // Silently ignored on terminals that don't.
+        let _ = execute!(stdout,
+            crossterm::event::PushKeyboardEnhancementFlags(
+                crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+            )
+        );
         let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
 
         Ok(Self {
@@ -84,7 +91,7 @@ impl App {
     fn handle_key(&mut self, k: KeyEvent) -> Result<bool> {
         // Escape from playing → back to menu
         if matches!(&self.screen, Screen::Playing { .. }) {
-            if k.code == KeyCode::Esc {
+            if k.code == KeyCode::Esc || k.code == KeyCode::Char('q') {
                 self.screen = Screen::Menu;
                 return Ok(false);
             }
@@ -106,7 +113,12 @@ impl App {
             KeyCode::Enter => {
                 match self.menu.select() {
                     MenuAction::StartTable(n) => self.start_table(n)?,
-                    MenuAction::ToggleSound   => self.sound_enabled = !self.sound_enabled,
+                    MenuAction::ToggleSound   => {
+                        self.sound_enabled = !self.sound_enabled;
+                        if let Some(a) = &mut self.audio {
+                            a.set_enabled(self.sound_enabled);
+                        }
+                    }
                     MenuAction::Exit          => return Ok(true),
                     MenuAction::None          => {}
                 }
@@ -244,6 +256,9 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        let _ = execute!(self.terminal.backend_mut(),
+            crossterm::event::PopKeyboardEnhancementFlags
+        );
         let _ = disable_raw_mode();
         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
     }

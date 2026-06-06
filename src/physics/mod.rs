@@ -42,6 +42,7 @@ pub struct FlipperSnapshot {
 pub struct FieldSnapshot {
     pub ball: Option<BallSnapshot>,
     pub walls: Vec<WallSnapshot>,
+    pub kick_walls: Vec<WallSnapshot>,
     pub bumpers: Vec<BumperSnapshot>,
     pub flippers: Vec<FlipperSnapshot>,
     pub field_width: f32,
@@ -70,10 +71,20 @@ struct BumperInfo {
     outer_radius: Option<f32>,
     score: u64,
     kick_force: f32,
-    lit_ticks: u8,          // count down from BUMPER_LIT_TICKS on hit
+    lit_ticks: u8,
 }
 
-const BUMPER_LIT_TICKS: u8 = 6;
+// Slingshot / kicker wall: a WallElement with a non-zero kick value.
+struct KickWallInfo {
+    x1: f32, y1: f32,
+    x2: f32, y2: f32,
+    kick_force: f32,
+    score: u64,
+    debounce: u8,
+}
+
+const BUMPER_LIT_TICKS:   u8 = 6;
+const KICK_WALL_DEBOUNCE: u8 = 6;
 
 #[derive(Clone)]
 pub enum PhysicsSound {
@@ -106,6 +117,7 @@ pub struct PhysicsWorld {
     ball_radius:   f32,
     flippers:      Vec<FlipperInfo>,
     bumpers:       Vec<BumperInfo>,
+    kick_walls:    Vec<KickWallInfo>,
 
     // Pre-computed wall segments for rendering (no physics body needed to query)
     wall_segments: Vec<WallSnapshot>,
@@ -130,6 +142,7 @@ impl PhysicsWorld {
 
         let mut flippers     = Vec::new();
         let mut bumpers_info = Vec::new();
+        let mut kick_walls   = Vec::new();
         let mut wall_segs    = Vec::new();
 
         // Gravity points downward in rapier (negative y)
@@ -138,7 +151,20 @@ impl PhysicsWorld {
 
         for elem in &table.elements {
             match elem {
-                ElementDef::WallElement(w)      => Self::add_wall(w, &mut bodies, &mut colliders, &mut wall_segs),
+                ElementDef::WallElement(w) => {
+                    Self::add_wall(w, &mut bodies, &mut colliders, &mut wall_segs);
+                    // Register slingshot / kicker if this wall has a kick value.
+                    if w.disabled != Some(true) && w.kill != Some(true) {
+                        if let (Some(kick), Some([x1, y1, x2, y2])) = (w.kick, w.position) {
+                            kick_walls.push(KickWallInfo {
+                                x1, y1, x2, y2,
+                                kick_force: kick,
+                                score: w.score.unwrap_or(0),
+                                debounce: 0,
+                            });
+                        }
+                    }
+                }
                 ElementDef::WallArcElement(a)   => Self::add_arc(a, &mut bodies, &mut colliders, &mut wall_segs),
                 ElementDef::WallPathElement(p)  => Self::add_path(p, &mut bodies, &mut colliders, &mut wall_segs),
                 ElementDef::BumperElement(b)    => Self::add_bumper(b, &mut bodies, &mut colliders, &mut bumpers_info),
@@ -180,6 +206,7 @@ impl PhysicsWorld {
             ball_radius,
             flippers,
             bumpers: bumpers_info,
+            kick_walls,
             wall_segments: wall_segs,
             score_events: RefCell::new(Vec::new()),
             sound_events: RefCell::new(Vec::new()),
@@ -449,6 +476,66 @@ impl PhysicsWorld {
         for b in &mut self.bumpers {
             if b.lit_ticks > 0 { b.lit_ticks -= 1; }
         }
+
+        // Kick-wall (slingshot) proximity detection
+        {
+            let mut hits: Vec<(usize, f32, f32)> = Vec::new();
+            if let Some(ball_h) = self.ball_handle {
+                if let Some(ball_body) = self.bodies.get(ball_h) {
+                    let bp = *ball_body.translation();
+                    for (i, kw) in self.kick_walls.iter().enumerate() {
+                        if kw.debounce > 0 { continue; }
+                        let (dist, nx, ny) = Self::point_to_segment_dist(bp.x, bp.y, kw.x1, kw.y1, kw.x2, kw.y2);
+                        if dist < self.ball_radius + 0.08 {
+                            hits.push((i, nx, ny));
+                        }
+                    }
+                }
+            }
+            for (i, nx, ny) in hits {
+                self.kick_walls[i].debounce = KICK_WALL_DEBOUNCE;
+                if self.kick_walls[i].score > 0 {
+                    self.score_events.borrow_mut().push(self.kick_walls[i].score);
+                }
+                let kick = self.kick_walls[i].kick_force;
+                if let Some(ball_h) = self.ball_handle {
+                    if let Some(body) = self.bodies.get_mut(ball_h) {
+                        body.apply_impulse(vector![nx * kick, ny * kick], true);
+                    }
+                }
+            }
+        }
+
+        // Tick kick-wall debounce timers
+        for kw in &mut self.kick_walls {
+            if kw.debounce > 0 { kw.debounce -= 1; }
+        }
+    }
+
+    /// Distance from point (px,py) to segment (x1,y1)-(x2,y2), plus the unit
+    /// normal pointing from the closest point on the segment toward (px,py).
+    fn point_to_segment_dist(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> (f32, f32, f32) {
+        let dx = x2 - x1;
+        let dy = y2 - y1;
+        let len_sq = dx * dx + dy * dy;
+        let (cx, cy) = if len_sq < 1e-10 {
+            (x1, y1)
+        } else {
+            let t = ((px - x1) * dx + (py - y1) * dy) / len_sq;
+            let t = t.clamp(0.0, 1.0);
+            (x1 + t * dx, y1 + t * dy)
+        };
+        let ex = px - cx;
+        let ey = py - cy;
+        let dist = (ex * ex + ey * ey).sqrt();
+        let (nx, ny) = if dist > 1e-6 {
+            (ex / dist, ey / dist)
+        } else {
+            // Ball centre exactly on segment; use the segment's left-hand normal.
+            let l = len_sq.sqrt().max(1e-6);
+            (-dy / l, dx / l)
+        };
+        (dist, nx, ny)
     }
 
     pub fn ball_position(&self) -> Option<nalgebra::Vector2<f32>> {
@@ -469,6 +556,19 @@ impl PhysicsWorld {
 
     pub fn drain_sound_events(&self) -> Vec<PhysicsSound> {
         self.sound_events.borrow_mut().drain(..).collect()
+    }
+
+    pub fn remove_ball(&mut self) {
+        if let Some(old) = self.ball_handle.take() {
+            self.bodies.remove(
+                old,
+                &mut self.islands,
+                &mut self.colliders,
+                &mut self.impulse_joints,
+                &mut self.multibody_joints,
+                false,
+            );
+        }
     }
 
     pub fn field_height(&self) -> f32 { self.field_height }
@@ -500,9 +600,14 @@ impl PhysicsWorld {
             lit: b.lit_ticks > 0,
         }).collect();
 
+        let kick_walls = self.kick_walls.iter()
+            .map(|kw| WallSnapshot { x1: kw.x1, y1: kw.y1, x2: kw.x2, y2: kw.y2 })
+            .collect();
+
         FieldSnapshot {
             ball,
             walls: self.wall_segments.clone(),
+            kick_walls,
             bumpers,
             flippers,
             field_width:  self.field_width,

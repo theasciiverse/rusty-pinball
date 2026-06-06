@@ -54,14 +54,40 @@ fn draw_play_area(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let snap = physics.snapshot();
-    let braille = renderer.render(&snap, camera_y, inner.width, inner.height);
+    let snap     = physics.snapshot();
+    let rendered = renderer.render(&snap, camera_y, inner.width, inner.height);
 
-    let text: Text = braille
-        .lines()
-        .map(|l| Line::from(Span::styled(l.to_owned(), Style::default().fg(Color::White))))
-        .collect::<Vec<_>>()
-        .into();
+    let cols = rendered.char_cols as usize;
+    let rows = rendered.char_rows as usize;
+
+    let text: Text = (0..rows).map(|cy| {
+        let start = cy * cols;
+        let row_chars  = &rendered.chars [start..start + cols];
+        let row_colors = &rendered.colors[start..start + cols];
+
+        // Group adjacent same-color characters into one Span each.
+        let mut spans: Vec<Span> = Vec::new();
+        let mut cur_color = Color::Reset;
+        let mut cur_text  = String::new();
+
+        for (&ch, &color) in row_chars.iter().zip(row_colors.iter()) {
+            if color != cur_color {
+                if !cur_text.is_empty() {
+                    spans.push(Span::styled(
+                        std::mem::take(&mut cur_text),
+                        Style::default().fg(cur_color),
+                    ));
+                }
+                cur_color = color;
+            }
+            cur_text.push(ch);
+        }
+        if !cur_text.is_empty() {
+            spans.push(Span::styled(cur_text, Style::default().fg(cur_color)));
+        }
+
+        Line::from(spans)
+    }).collect::<Vec<_>>().into();
 
     frame.render_widget(Paragraph::new(text), inner);
 }

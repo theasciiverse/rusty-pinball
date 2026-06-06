@@ -24,10 +24,10 @@ static MUSIC:          &[u8] = include_bytes!("../../assets/audio/music/drumbass
 
 pub struct AudioManager {
     // _sink keeps the OS audio stream alive; must outlive mixer / player.
-    _sink:       rodio::stream::MixerDeviceSink,
-    mixer:       Mixer,
-    _music:      Player,       // keeps the looping background music alive
-    bumper_idx:  usize,
+    _sink:      rodio::stream::MixerDeviceSink,
+    mixer:      Mixer,
+    music:      Player,
+    bumper_idx: usize,
 }
 
 impl AudioManager {
@@ -48,9 +48,17 @@ impl AudioManager {
         Some(Self {
             _sink:      sink,
             mixer,
-            _music:     music,
+            music,
             bumper_idx: 0,
         })
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        if enabled {
+            self.music.play();
+        } else {
+            self.music.pause();
+        }
     }
 
     pub fn play(&mut self, trigger: SoundTrigger) {

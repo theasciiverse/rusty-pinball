@@ -147,38 +147,48 @@ fn draw_list(frame: &mut Frame, area: Rect, state: &MenuState, sound_enabled: bo
         .add_modifier(Modifier::BOLD);
     let dim    = Style::default().fg(Color::DarkGray);
 
-    let mut lines: Vec<Line> = Vec::new();
+    // Build (text, style) pairs first so we can measure the longest line
+    // and pad everything to the same width, giving a left-aligned block
+    // that is then centred as a whole in the window.
+    let sound_label = if sound_enabled { "Sound: [ ON ]" } else { "Sound: [OFF]" };
+    let hint        = "↑↓  Navigate    Enter  Select";
 
+    let mut items: Vec<(String, Style)> = Vec::new();
     for (i, &name) in TABLE_NAMES.iter().enumerate() {
-        let style = if state.selected == i { sel } else { normal };
         let cursor = if state.selected == i { "▶" } else { " " };
-        lines.push(Line::from(Span::styled(
-            format!(" {}  {:>2}. {}", cursor, i + 1, name),
-            style,
-        )));
+        items.push((
+            format!("{}  {:>2}. {}", cursor, i + 1, name),
+            if state.selected == i { sel } else { normal },
+        ));
     }
-
-    lines.push(Line::from(Span::styled(
-        "    ────────────────────────",
-        dim,
-    )));
-
-    let sound_label = if sound_enabled { "  Sound: [ ON ]" } else { "  Sound: [OFF]" };
-    lines.push(Line::from(Span::styled(
-        format!(" {}  {}", if state.selected == ITEM_SOUND { "▶" } else { " " }, sound_label),
+    items.push(("────────────────────────".to_owned(), dim));
+    items.push((
+        format!("{}  {}", if state.selected == ITEM_SOUND { "▶" } else { " " }, sound_label),
         if state.selected == ITEM_SOUND { sel } else { normal },
-    )));
-
-    lines.push(Line::from(Span::styled(
-        format!(" {}  Exit", if state.selected == ITEM_EXIT { "▶" } else { " " }),
+    ));
+    items.push((
+        format!("{}  Exit", if state.selected == ITEM_EXIT { "▶" } else { " " }),
         if state.selected == ITEM_EXIT { sel } else { normal },
-    )));
+    ));
+
+    let max_w = items.iter()
+        .map(|(s, _)| s.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(hint.chars().count());
+
+    let mut lines: Vec<Line> = items
+        .into_iter()
+        .map(|(s, style)| {
+            Line::from(Span::styled(format!("{:<width$}", s, width = max_w), style))
+        })
+        .collect();
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "  ↑↓  Navigate    Enter  Select",
+        format!("{:<width$}", hint, width = max_w),
         dim,
     )));
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
 }

@@ -1,11 +1,19 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
+// Ticks a flipper hold lasts without a new key event before it retracts.
+// At 30 fps this is ~100 ms — enough to bridge the gap between terminal
+// key-repeat events on terminals that don't send Release events.
+// On terminals that do (Kitty protocol), Release zeroes the counter immediately.
+const FLIPPER_HOLD_TICKS: u8 = 3;
+
 #[derive(Default, Debug, Clone)]
 pub struct InputState {
-    pub left_flipper: bool,
+    pub left_flipper:  bool,
     pub right_flipper: bool,
-    pub plunger_held: bool,
-    plunger_ticks: u32,
+    pub plunger_held:  bool,
+    left_ticks:        u8,
+    right_ticks:       u8,
+    plunger_ticks:     u32,
 }
 
 impl InputState {
@@ -14,8 +22,13 @@ impl InputState {
         (self.plunger_ticks as f32 / 60.0).min(1.0)
     }
 
-    /// Call once per game tick to advance plunger charging.
+    /// Call once per game tick to advance plunger charging and decay flipper counters.
     pub fn tick(&mut self) {
+        if self.left_ticks  > 0 { self.left_ticks  -= 1; }
+        if self.right_ticks > 0 { self.right_ticks -= 1; }
+        self.left_flipper  = self.left_ticks  > 0;
+        self.right_flipper = self.right_ticks > 0;
+
         if self.plunger_held {
             self.plunger_ticks = (self.plunger_ticks + 1).min(60);
         } else {
@@ -25,22 +38,22 @@ impl InputState {
 
     /// Process a crossterm key event.  Returns true if the event was consumed.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
-        let pressed = matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat);
+        let pressed  = matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat);
         let released = key.kind == KeyEventKind::Release;
 
         match key.code {
             KeyCode::Char('z') | KeyCode::Left | KeyCode::Char('Z') => {
-                if pressed { self.left_flipper = true; }
-                if released { self.left_flipper = false; }
+                if pressed  { self.left_ticks = FLIPPER_HOLD_TICKS; }
+                if released { self.left_ticks = 0; }
                 true
             }
             KeyCode::Char('x') | KeyCode::Right | KeyCode::Char('X') => {
-                if pressed { self.right_flipper = true; }
-                if released { self.right_flipper = false; }
+                if pressed  { self.right_ticks = FLIPPER_HOLD_TICKS; }
+                if released { self.right_ticks = 0; }
                 true
             }
             KeyCode::Char(' ') => {
-                if pressed { self.plunger_held = true; }
+                if pressed  { self.plunger_held = true; }
                 if released { self.plunger_held = false; }
                 true
             }
