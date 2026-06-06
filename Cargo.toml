@@ -1,0 +1,29 @@
+[package]
+name = "rusty-pin"
+version = "0.1.0"
+edition = "2021"
+description = "TUI pinball — Rust + Rapier physics, Braille vector graphics"
+
+[[bin]]
+name = "rusty-pin"
+path = "src/main.rs"
+
+[dependencies]
+# TUI layout and terminal backend
+ratatui    = "0.28"
+crossterm  = "0.27"
+
+# 2-D physics (Box2D equivalent)
+rapier2d   = { version = "0.22", features = ["default"] }
+nalgebra   = "0.33"
+
+# Braille-pixel vector graphics
+drawille   = "0.2"
+
+# Table definition parsing
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+anyhow = "1"
+rodio = { version = "0.22.2", features = ["symphonia-vorbis"] }
