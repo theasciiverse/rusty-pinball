@@ -84,6 +84,10 @@ struct KickWallInfo {
     debounce: u8,
     retract_when_hit: bool,
     active: bool,
+    // Perpendicular direction pointing toward the field interior (precomputed).
+    // Kick is only applied when the ball is on this side of the wall, preventing
+    // wrong-direction impulses when the ball enters the pocket behind a slingshot.
+    interior_normal: [f32; 2],
 }
 
 struct DropTargetInfo {
@@ -180,6 +184,22 @@ impl PhysicsWorld {
                     // Register slingshot / kicker if this wall has a kick value.
                     if w.disabled != Some(true) && w.kill != Some(true) {
                         if let (Some(kick), Some([x1, y1, x2, y2])) = (w.kick, w.position) {
+                            // Perpendicular pointing toward field centre — the side the ball
+                            // should be on for a valid kick.
+                            let dx = x2 - x1;
+                            let dy = y2 - y1;
+                            let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+                            let nx = dy / len;   // right-hand normal candidate
+                            let ny = -dx / len;
+                            let midx = (x1 + x2) / 2.0;
+                            let midy = (y1 + y2) / 2.0;
+                            let fcx  = table.width  / 2.0;
+                            let fcy  = table.height / 2.0;
+                            let interior_normal = if (fcx - midx) * nx + (fcy - midy) * ny >= 0.0 {
+                                [nx, ny]
+                            } else {
+                                [-nx, -ny]
+                            };
                             kick_walls.push(KickWallInfo {
                                 x1, y1, x2, y2,
                                 kick_force: kick,
@@ -187,6 +207,7 @@ impl PhysicsWorld {
                                 debounce: 0,
                                 retract_when_hit: w.retract_when_hit == Some(true),
                                 active: true,
+                                interior_normal,
                             });
                         }
                     }
@@ -579,7 +600,15 @@ impl PhysicsWorld {
             if b.lit_ticks > 0 { b.lit_ticks -= 1; }
         }
 
-        // Kick-wall (slingshot) proximity detection
+        // Kick-wall (slingshot / ball-saver) proximity detection.
+        //
+        // Only fire when the ball is on the interior (field) side of the wall.
+        // This prevents a ball that drifts into the pocket behind a slingshot from
+        // being kicked deeper into the pocket.
+        //
+        // RetractWhenHit walls (ball-savers) use ball_radius as the trigger distance
+        // so they only fire on genuine contact, not when the ball passes nearby in
+        // the shooter lane.
         {
             let mut hits: Vec<(usize, f32, f32)> = Vec::new();
             if let Some(ball_h) = self.ball_handle {
@@ -588,8 +617,16 @@ impl PhysicsWorld {
                     for (i, kw) in self.kick_walls.iter().enumerate() {
                         if !kw.active || kw.debounce > 0 { continue; }
                         let (dist, nx, ny) = Self::point_to_segment_dist(bp.x, bp.y, kw.x1, kw.y1, kw.x2, kw.y2);
-                        if dist < self.ball_radius + 0.25 {
-                            hits.push((i, nx, ny));
+                        // Ball must be on the interior (field) side of the kick wall.
+                        let on_interior = nx * kw.interior_normal[0] + ny * kw.interior_normal[1] > 0.0;
+                        // Tighter threshold for retract-when-hit walls: fire only on genuine contact.
+                        let threshold = if kw.retract_when_hit {
+                            self.ball_radius
+                        } else {
+                            self.ball_radius + 0.25
+                        };
+                        if dist < threshold && on_interior {
+                            hits.push((i, kw.interior_normal[0], kw.interior_normal[1]));
                         }
                     }
                 }
