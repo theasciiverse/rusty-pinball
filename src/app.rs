@@ -30,6 +30,7 @@ enum Screen {
         physics:   PhysicsWorld,
         input:     InputState,
         camera_y:  f32,
+        paused:    bool,
     },
 }
 
@@ -167,6 +168,16 @@ impl App {
             }
         }
 
+        // Pause toggle — works any time while in-game (but not on GameOver screen).
+        if k.kind == KeyEventKind::Press && matches!(k.code, KeyCode::Char('p') | KeyCode::Char('P')) {
+            if let Screen::Playing { paused, game, .. } = &mut self.screen {
+                if game.phase != Phase::GameOver {
+                    *paused = !*paused;
+                    return;
+                }
+            }
+        }
+
         let Screen::Playing { game, physics, input, .. } = &mut self.screen else { return };
 
         input.handle_key(k);
@@ -205,6 +216,7 @@ impl App {
             physics,
             input:     InputState::default(),
             camera_y:  0.0,
+            paused:    false,
         };
         Ok(())
     }
@@ -213,8 +225,9 @@ impl App {
         // Run physics and collect sound triggers in one borrow block, then
         // release the borrow before accessing self.audio.
         let (sound_events, ball_drained) =
-            if let Screen::Playing { game, physics, input, camera_y, .. } = &mut self.screen
+            if let Screen::Playing { game, physics, input, camera_y, paused, .. } = &mut self.screen
         {
+            if *paused { return; }
             input.tick();
             for _ in 0..PHYSICS_STEPS {
                 physics.step(PHYSICS_DT, input);
@@ -281,13 +294,14 @@ impl App {
                     crate::ui::draw_menu(frame, menu, sound_enabled, &high_scores);
                 })?;
             }
-            Screen::Playing { game, physics, camera_y, .. } => {
+            Screen::Playing { game, physics, camera_y, paused, .. } => {
                 let game      = game;
                 let physics   = physics;
                 let renderer  = &self.renderer;
                 let camera_y  = *camera_y;
+                let paused    = *paused;
                 self.terminal.draw(|frame| {
-                    crate::ui::draw(frame, physics, game, renderer, camera_y);
+                    crate::ui::draw(frame, physics, game, renderer, camera_y, paused);
                 })?;
             }
         }

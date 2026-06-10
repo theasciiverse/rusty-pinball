@@ -3,10 +3,10 @@ pub mod menu;
 
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
 
 use crate::{game::GameState, physics::PhysicsWorld, renderer::FieldRenderer};
@@ -24,6 +24,7 @@ pub fn draw(
     game: &GameState,
     renderer: &FieldRenderer,
     camera_y: f32,
+    paused: bool,
 ) {
     let area = frame.area();
 
@@ -37,6 +38,45 @@ pub fn draw(
 
     draw_play_area(frame, chunks[0], physics, renderer, camera_y);
     dmd::draw_dmd(frame, chunks[1], game);
+
+    if paused {
+        draw_pause_overlay(frame, area);
+    }
+}
+
+fn draw_pause_overlay(frame: &mut Frame, area: Rect) {
+    // Centre a 26×7 box over the play area.
+    let w: u16 = 26;
+    let h: u16 = 7;
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.y + area.height.saturating_sub(h) / 2;
+    let popup = Rect { x, y, width: w.min(area.width), height: h.min(area.height) };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Yellow).bg(Color::Black));
+
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  ▐▌ PAUSED ▐▌",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Press P to resume",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+    ];
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(block)
+            .alignment(Alignment::Left),
+        popup,
+    );
 }
 
 fn draw_play_area(
