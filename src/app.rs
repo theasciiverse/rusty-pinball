@@ -30,7 +30,6 @@ enum Screen {
         physics:   PhysicsWorld,
         input:     InputState,
         camera_y:  f32,
-        paused:    bool,
     },
 }
 
@@ -42,6 +41,7 @@ pub struct App {
     renderer:      FieldRenderer,
     menu:          MenuState,
     screen:        Screen,
+    paused:        bool,
 }
 
 impl App {
@@ -72,6 +72,7 @@ impl App {
             renderer:      FieldRenderer::new(),
             menu:          MenuState::new(),
             screen:        Screen::Menu,
+            paused:        false,
         };
         if let Some(a) = &mut app.audio {
             a.set_enabled(app.sound_enabled);
@@ -103,10 +104,25 @@ impl App {
 
     // Returns true when the app should quit entirely.
     fn handle_key(&mut self, k: KeyEvent) -> Result<bool> {
-        // Escape from playing → back to menu
-        if matches!(&self.screen, Screen::Playing { .. }) {
+        let is_playing = matches!(&self.screen, Screen::Playing { .. });
+
+        // Pause toggle — P key while playing (not on GameOver screen).
+        if is_playing && k.kind != KeyEventKind::Release
+            && matches!(k.code, KeyCode::Char('p') | KeyCode::Char('P'))
+        {
+            let is_game_over = matches!(&self.screen,
+                Screen::Playing { game, .. } if game.phase == Phase::GameOver);
+            if !is_game_over {
+                self.paused = !self.paused;
+                return Ok(false);
+            }
+        }
+
+        // Escape from playing → back to menu (also clears pause).
+        if is_playing {
             if k.code == KeyCode::Esc || k.code == KeyCode::Char('q') {
                 self.screen = Screen::Menu;
+                self.paused = false;
                 return Ok(false);
             }
         }
@@ -168,16 +184,6 @@ impl App {
             }
         }
 
-        // Pause toggle — works any time while in-game (but not on GameOver screen).
-        if k.kind == KeyEventKind::Press && matches!(k.code, KeyCode::Char('p') | KeyCode::Char('P')) {
-            if let Screen::Playing { paused, game, .. } = &mut self.screen {
-                if game.phase != Phase::GameOver {
-                    *paused = !*paused;
-                    return;
-                }
-            }
-        }
-
         let Screen::Playing { game, physics, input, .. } = &mut self.screen else { return };
 
         input.handle_key(k);
@@ -210,13 +216,13 @@ impl App {
         let physics = PhysicsWorld::from_table(&table);
         let mut game = GameState::new(balls);
         game.high_score = self.high_scores[(n as usize).saturating_sub(1).min(7)];
+        self.paused = false;
         self.screen = Screen::Playing {
             table_idx: n,
             game,
             physics,
             input:     InputState::default(),
             camera_y:  0.0,
-            paused:    false,
         };
         Ok(())
     }
@@ -225,9 +231,9 @@ impl App {
         // Run physics and collect sound triggers in one borrow block, then
         // release the borrow before accessing self.audio.
         let (sound_events, ball_drained) =
-            if let Screen::Playing { game, physics, input, camera_y, paused, .. } = &mut self.screen
+            if let Screen::Playing { game, physics, input, camera_y, .. } = &mut self.screen
         {
-            if *paused { return; }
+            if self.paused { return; }
             input.tick();
             for _ in 0..PHYSICS_STEPS {
                 physics.step(PHYSICS_DT, input);
@@ -294,12 +300,12 @@ impl App {
                     crate::ui::draw_menu(frame, menu, sound_enabled, &high_scores);
                 })?;
             }
-            Screen::Playing { game, physics, camera_y, paused, .. } => {
+            Screen::Playing { game, physics, camera_y, .. } => {
                 let game      = game;
                 let physics   = physics;
                 let renderer  = &self.renderer;
                 let camera_y  = *camera_y;
-                let paused    = *paused;
+                let paused    = self.paused;
                 self.terminal.draw(|frame| {
                     crate::ui::draw(frame, physics, game, renderer, camera_y, paused);
                 })?;
