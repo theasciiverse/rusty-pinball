@@ -148,9 +148,10 @@ struct LayerSensorInfo {
 const BUMPER_LIT_TICKS:   u8  = 6;
 const KICK_WALL_DEBOUNCE: u8  = 6;
 const DROP_CLEAR_BONUS:   u64 = 2_000;
-// Rollover group completion flash: 4 phases × 6 sub-steps each.
-// At 2 sub-steps per frame (30 fps) each phase ≈ 100 ms; total ≈ 400 ms.
-const ROLLOVER_FLASH_TICKS:  u8 = 24;
+// Rollover group completion flash: 4 phases × 8 sub-steps each.
+// At 2 sub-steps per frame (30 fps) each phase ≈ 133 ms; total ≈ 533 ms.
+// Phase 0 = unlit so the dots go dark immediately on completion (obvious feedback).
+const ROLLOVER_FLASH_TICKS:  u8 = 32;
 const ROLLOVER_FLASH_PHASES: u8 = 4;
 
 // ── Layer collision groups ─────────────────────────────────────────────────────
@@ -1145,7 +1146,7 @@ impl PhysicsWorld {
             let flash_override = if g.flash_ticks > 0 {
                 let phase = (ROLLOVER_FLASH_TICKS - g.flash_ticks)
                     / (ROLLOVER_FLASH_TICKS / ROLLOVER_FLASH_PHASES);
-                Some(phase % 2 == 0) // phases 0,2 → lit; phases 1,3 → unlit
+                Some(phase % 2 == 1) // phase 0 → unlit immediately; phases 1,3 → lit
             } else {
                 None
             };
