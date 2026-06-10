@@ -8,12 +8,16 @@ const FLIPPER_HOLD_TICKS: u8 = 3;
 
 #[derive(Default, Debug, Clone)]
 pub struct InputState {
-    pub left_flipper:  bool,
-    pub right_flipper: bool,
-    pub plunger_held:  bool,
-    left_ticks:        u8,
-    right_ticks:       u8,
-    plunger_ticks:     u32,
+    pub left_flipper:        bool,
+    pub right_flipper:       bool,
+    pub plunger_held:        bool,
+    /// True only on the first tick after the left flipper transitions to active.
+    pub left_just_pressed:   bool,
+    /// True only on the first tick after the right flipper transitions to active.
+    pub right_just_pressed:  bool,
+    left_ticks:              u8,
+    right_ticks:             u8,
+    plunger_ticks:           u32,
 }
 
 impl InputState {
@@ -24,10 +28,14 @@ impl InputState {
 
     /// Call once per game tick to advance plunger charging and decay flipper counters.
     pub fn tick(&mut self) {
+        let prev_left  = self.left_flipper;
+        let prev_right = self.right_flipper;
         if self.left_ticks  > 0 { self.left_ticks  -= 1; }
         if self.right_ticks > 0 { self.right_ticks -= 1; }
         self.left_flipper  = self.left_ticks  > 0;
         self.right_flipper = self.right_ticks > 0;
+        self.left_just_pressed  = !prev_left  && self.left_flipper;
+        self.right_just_pressed = !prev_right && self.right_flipper;
 
         if self.plunger_held {
             self.plunger_ticks = (self.plunger_ticks + 1).min(60);

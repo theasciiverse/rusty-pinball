@@ -11,7 +11,7 @@
 /// this prevents off-screen elements from being clamped to the screen edge.
 
 use ratatui::style::Color;
-use crate::physics::FieldSnapshot;
+use crate::physics::{FieldSnapshot, RolloverSnapshot};
 
 // ── Palette ───────────────────────────────────────────────────────────────────
 
@@ -25,6 +25,9 @@ const COL_BALL:        Color = Color::White;
 const COL_BACKGROUND:  Color = Color::DarkGray;
 
 // Layer-specific wall colors.  Index = layer number.
+const COL_ROLLOVER_LIT:   Color = Color::Cyan;
+const COL_ROLLOVER_UNLIT: Color = Color::Rgb(0, 80, 80);
+
 const COL_LAYER: [Color; 4] = [
     Color::Gray,           // layer 0 — main field
     Color::Green,          // layer 1 — left ramp
@@ -122,6 +125,12 @@ impl FieldRenderer {
             }
         }
 
+        for group in &snap.rollover_groups {
+            for rv in &group.rollovers {
+                draw_rollover(&mut pixels, &mut grid, rv, field_w, viewport_h, dot_w, dot_h, &to_cx, &to_cy);
+            }
+        }
+
         for fl in &snap.flippers {
             draw_line(&mut pixels, &mut grid,
                 to_cx(fl.x1), to_cy(fl.y1), to_cx(fl.x2), to_cy(fl.y2),
@@ -191,6 +200,30 @@ impl ColorGrid {
     fn get(&self, cx: u32, cy: u32) -> Color {
         let idx = (cy * self.cols + cx) as usize;
         if idx < self.data.len() { self.data[idx] } else { COL_BACKGROUND }
+    }
+}
+
+// ── Rollover helper ───────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn draw_rollover(
+    pixels: &mut PixelBuf, grid: &mut ColorGrid,
+    rv: &RolloverSnapshot,
+    field_w: f32, viewport_h: f32, dot_w: u32, dot_h: u32,
+    to_cx: &impl Fn(f32) -> i32,
+    to_cy: &impl Fn(f32) -> i32,
+) {
+    let cx = to_cx(rv.x);
+    let cy = to_cy(rv.y);
+    let rx = ((rv.radius / field_w)    * dot_w as f32) as u32;
+    let ry = ((rv.radius / viewport_h) * dot_h as f32) as u32;
+    let rx = rx.max(1);
+    let ry = ry.max(1);
+    let color = if rv.lit { COL_ROLLOVER_LIT } else { COL_ROLLOVER_UNLIT };
+    if rv.lit {
+        fill_ellipse(pixels, grid, cx, cy, rx, ry, color);
+    } else {
+        draw_ellipse(pixels, grid, cx, cy, rx, ry, color);
     }
 }
 

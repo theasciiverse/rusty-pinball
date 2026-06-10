@@ -3,7 +3,7 @@ use rapier2d::prelude::*;
 use crate::input::InputState;
 use crate::table::{
     TableDef, ElementDef, WallDef, WallArcDef, WallPathDef,
-    BumperDef, FlipperDef, DropTargetGroupDef,
+    BumperDef, FlipperDef, DropTargetGroupDef, RolloverGroupDef,
 };
 
 // ---------------------------------------------------------------------------
@@ -41,6 +41,19 @@ pub struct FlipperSnapshot {
     pub x2: f32, pub y2: f32,  // tip end
 }
 
+#[derive(Debug, Clone)]
+pub struct RolloverSnapshot {
+    pub x: f32,
+    pub y: f32,
+    pub radius: f32,
+    pub lit: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RolloverGroupSnapshot {
+    pub rollovers: Vec<RolloverSnapshot>,
+}
+
 pub struct FieldSnapshot {
     pub ball: Option<BallSnapshot>,
     pub walls: Vec<WallSnapshot>,
@@ -48,6 +61,7 @@ pub struct FieldSnapshot {
     pub bumpers: Vec<BumperSnapshot>,
     pub flippers: Vec<FlipperSnapshot>,
     pub drop_targets: Vec<WallSnapshot>,
+    pub rollover_groups: Vec<RolloverGroupSnapshot>,
     pub field_width: f32,
     pub field_height: f32,
     pub ball_layer: u8,
@@ -104,6 +118,20 @@ struct DropTargetGroupInfo {
     score:   u64,
 }
 
+struct RolloverInfo {
+    x: f32, y: f32,
+    radius: f32,
+    score: u64,
+    lit: bool,
+}
+
+struct RolloverGroupInfo {
+    rollovers:        Vec<RolloverInfo>,
+    score:            u64,   // group-level score (used when individual score is 0)
+    cycle_on_flipper: bool,
+    ignore_ball:      bool,
+}
+
 struct LayerSensorInfo {
     rect:         [f32; 4],   // [xmin, ymin, xmax, ymax]
     target_layer: u8,
@@ -156,13 +184,14 @@ pub struct PhysicsWorld {
     gravity:       Vector<f32>,
 
     // Game objects
-    ball_handle:    Option<RigidBodyHandle>,
+    ball_handle:        Option<RigidBodyHandle>,
     ball_collider:  Option<ColliderHandle>,   // collider for the ball body
     ball_radius:        f32,
     flippers:           Vec<FlipperInfo>,
     bumpers:            Vec<BumperInfo>,
     kick_walls:         Vec<KickWallInfo>,
     drop_target_groups: Vec<DropTargetGroupInfo>,
+    rollover_groups:    Vec<RolloverGroupInfo>,
 
     // Collision-event channel: pipeline writes Started/Stopped events here.
     kick_evt_send: rapier2d::crossbeam::channel::Sender<CollisionEvent>,
@@ -208,6 +237,7 @@ impl PhysicsWorld {
         let mut bumpers_info       = Vec::new();
         let mut kick_walls         = Vec::new();
         let mut drop_target_groups = Vec::new();
+        let mut rollover_groups    = Vec::new();
         let mut wall_segs          = Vec::new();
         let mut layer_sensors      = Vec::new();
 
@@ -257,6 +287,9 @@ impl PhysicsWorld {
                 ElementDef::FlipperElement(f)   => Self::add_flipper(f, &mut bodies, &mut colliders, &mut flippers),
                 ElementDef::DropTargetGroupElement(d) => {
                     drop_target_groups.push(Self::build_drop_target_group(d, &mut bodies, &mut colliders));
+                }
+                ElementDef::RolloverGroupElement(r) => {
+                    rollover_groups.push(Self::build_rollover_group(r));
                 }
                 ElementDef::SensorElement(s) => {
                     if let (Some(rect), Some(target)) = (s.rect, s.ball_layer) {
@@ -349,6 +382,7 @@ impl PhysicsWorld {
             kick_walls,
             drop_target_groups,
             wall_segments: wall_segs,
+            rollover_groups,
             layer_sensors,
             ball_layer: 0,
             score_events: RefCell::new(Vec::new()),
@@ -546,6 +580,24 @@ impl PhysicsWorld {
             DropTargetInfo { x1, y1, x2, y2, collider: ch, active: true }
         }).collect();
         DropTargetGroupInfo { targets, score: d.score.unwrap_or(0) }
+    }
+
+    fn build_rollover_group(r: &RolloverGroupDef) -> RolloverGroupInfo {
+        let group_radius = r.radius.unwrap_or(0.4);
+        let group_score  = r.score.unwrap_or(0);
+        let rollovers = r.rollovers.iter().map(|rv| RolloverInfo {
+            x:      rv.position[0],
+            y:      rv.position[1],
+            radius: rv.radius.unwrap_or(group_radius),
+            score:  rv.score.unwrap_or(group_score),
+            lit:    false,
+        }).collect();
+        RolloverGroupInfo {
+            rollovers,
+            score:            group_score,
+            cycle_on_flipper: r.cycle_on_flipper.unwrap_or(false),
+            ignore_ball:      r.ignore_ball.unwrap_or(false),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -771,6 +823,53 @@ impl PhysicsWorld {
             }
         }
 
+        // Rollover detection and flipper cycling.
+        {
+            let ball_pos = self.ball_handle
+                .and_then(|h| self.bodies.get(h))
+                .map(|b| *b.translation());
+            for group in &mut self.rollover_groups {
+                // Ball activation
+                if !group.ignore_ball {
+                    if let Some(bp) = ball_pos {
+                        for rv in &mut group.rollovers {
+                            if rv.lit { continue; }
+                            let dx = bp.x - rv.x;
+                            let dy = bp.y - rv.y;
+                            if dx * dx + dy * dy <= (rv.radius + self.ball_radius).powi(2) {
+                                rv.lit = true;
+                                let pts = if rv.score > 0 { rv.score } else { group.score };
+                                if pts > 0 {
+                                    self.score_events.borrow_mut().push(pts);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Flipper cycling — leading edge only, matches original Vector-Pinball direction.
+                // Left press  → rotate_right(1): lit dot shifts toward higher index.
+                // Right press → rotate_left(1):  lit dot shifts toward lower index.
+                if group.cycle_on_flipper {
+                    let n = group.rollovers.len();
+                    if n > 1 {
+                        if input.left_just_pressed {
+                            let last = group.rollovers[n - 1].lit;
+                            for i in (1..n).rev() {
+                                group.rollovers[i].lit = group.rollovers[i - 1].lit;
+                            }
+                            group.rollovers[0].lit = last;
+                        } else if input.right_just_pressed {
+                            let first = group.rollovers[0].lit;
+                            for i in 0..n - 1 {
+                                group.rollovers[i].lit = group.rollovers[i + 1].lit;
+                            }
+                            group.rollovers[n - 1].lit = first;
+                        }
+                    }
+                }
+            }
+        }
+
         // Layer-sensor detection: transition ball to a new physics layer when
         // it enters a sensor rect (and the optional from-layer filter matches).
         {
@@ -980,6 +1079,14 @@ impl PhysicsWorld {
             .map(|t| WallSnapshot { x1: t.x1, y1: t.y1, x2: t.x2, y2: t.y2, layer: None })
             .collect();
 
+        let rollover_groups = self.rollover_groups.iter().map(|g| {
+            RolloverGroupSnapshot {
+                rollovers: g.rollovers.iter().map(|rv| RolloverSnapshot {
+                    x: rv.x, y: rv.y, radius: rv.radius, lit: rv.lit,
+                }).collect(),
+            }
+        }).collect();
+
         FieldSnapshot {
             ball,
             walls: self.wall_segments.clone(),
@@ -987,6 +1094,7 @@ impl PhysicsWorld {
             bumpers,
             flippers,
             drop_targets,
+            rollover_groups,
             field_width:  self.field_width,
             field_height: self.field_height,
             ball_layer: self.ball_layer,
