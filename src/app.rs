@@ -37,7 +37,7 @@ pub struct App {
     terminal:      Terminal<CrosstermBackend<io::Stdout>>,
     audio:         Option<AudioManager>,
     sound_enabled: bool,
-    high_score:    u64,
+    high_scores:   [u64; 8],
     renderer:      FieldRenderer,
     menu:          MenuState,
     screen:        Screen,
@@ -67,7 +67,7 @@ impl App {
             terminal,
             audio,
             sound_enabled: saved.sound_enabled,
-            high_score:    saved.high_score,
+            high_scores:   saved.high_scores,
             renderer:      FieldRenderer::new(),
             menu:          MenuState::new(),
             screen:        Screen::Menu,
@@ -133,7 +133,7 @@ impl App {
                         }
                         persist::save(&persist::SavedState {
                             sound_enabled: self.sound_enabled,
-                            high_score:    self.high_score,
+                            high_scores:   self.high_scores,
                         });
                     }
                     MenuAction::Exit          => return Ok(true),
@@ -198,7 +198,7 @@ impl App {
         let balls   = table.num_balls();
         let physics = PhysicsWorld::from_table(&table);
         let mut game = GameState::new(balls);
-        game.high_score = self.high_score;
+        game.high_score = self.high_scores[(n as usize).saturating_sub(1).min(7)];
         self.screen = Screen::Playing {
             table_idx: n,
             game,
@@ -258,12 +258,13 @@ impl App {
 
         // Persist new high score when a ball is lost.
         if ball_drained {
-            if let Screen::Playing { game, .. } = &self.screen {
-                if game.high_score > self.high_score {
-                    self.high_score = game.high_score;
+            if let Screen::Playing { table_idx, game, .. } = &self.screen {
+                let slot = (*table_idx as usize).saturating_sub(1).min(7);
+                if game.high_score > self.high_scores[slot] {
+                    self.high_scores[slot] = game.high_score;
                     persist::save(&persist::SavedState {
                         sound_enabled: self.sound_enabled,
-                        high_score:    self.high_score,
+                        high_scores:   self.high_scores,
                     });
                 }
             }
@@ -275,8 +276,9 @@ impl App {
             Screen::Menu => {
                 let menu          = &self.menu;
                 let sound_enabled = self.sound_enabled;
+                let high_scores   = self.high_scores;
                 self.terminal.draw(|frame| {
-                    crate::ui::draw_menu(frame, menu, sound_enabled);
+                    crate::ui::draw_menu(frame, menu, sound_enabled, &high_scores);
                 })?;
             }
             Screen::Playing { game, physics, camera_y, .. } => {

@@ -74,7 +74,7 @@ const PINBALL: [&str; 6] = [
 
 // ── Public draw entry point ───────────────────────────────────────────────────
 
-pub fn draw_menu(frame: &mut Frame, area: Rect, state: &MenuState, sound_enabled: bool) {
+pub fn draw_menu(frame: &mut Frame, area: Rect, state: &MenuState, sound_enabled: bool, high_scores: &[u64; 8]) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -84,7 +84,7 @@ pub fn draw_menu(frame: &mut Frame, area: Rect, state: &MenuState, sound_enabled
         .split(area);
 
     draw_title(frame, chunks[0]);
-    draw_list(frame, chunks[1], state, sound_enabled);
+    draw_list(frame, chunks[1], state, sound_enabled, high_scores);
 }
 
 // ── Title block ───────────────────────────────────────────────────────────────
@@ -132,7 +132,7 @@ fn draw_title(frame: &mut Frame, area: Rect) {
 
 // ── Table / option list ───────────────────────────────────────────────────────
 
-fn draw_list(frame: &mut Frame, area: Rect, state: &MenuState, sound_enabled: bool) {
+fn draw_list(frame: &mut Frame, area: Rect, state: &MenuState, sound_enabled: bool, high_scores: &[u64; 8]) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(" SELECT TABLE ", Style::default().fg(Color::Yellow)))
@@ -140,55 +140,77 @@ fn draw_list(frame: &mut Frame, area: Rect, state: &MenuState, sound_enabled: bo
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let normal = Style::default().fg(Color::White);
-    let sel    = Style::default()
-        .fg(Color::Black)
-        .bg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
-    let dim    = Style::default().fg(Color::DarkGray);
+    let normal    = Style::default().fg(Color::White);
+    let sel       = Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let dim       = Style::default().fg(Color::DarkGray);
+    let score_col = Style::default().fg(Color::Rgb(200, 170, 60));
 
-    // Build (text, style) pairs first so we can measure the longest line
-    // and pad everything to the same width, giving a left-aligned block
-    // that is then centred as a whole in the window.
     let sound_label = if sound_enabled { "Sound: [ ON ]" } else { "Sound: [OFF]" };
     let hint        = "↑↓  Navigate    Enter  Select";
 
-    let mut items: Vec<(String, Style)> = Vec::new();
+    // Fixed layout widths so the score column is always right-aligned.
+    let longest_name = TABLE_NAMES.iter().map(|n| n.chars().count()).max().unwrap_or(0);
+    // prefix = "▶  1. " = 6 chars (cursor + 2 spaces + 2-digit number + dot + space)
+    let prefix_w = 6;
+    let score_w  = 11; // "999,999,999" = 11 chars
+    let gap      = 2;
+    let row_w    = prefix_w + longest_name + gap + score_w;
+
+    let mut lines: Vec<Line> = Vec::new();
+
     for (i, &name) in TABLE_NAMES.iter().enumerate() {
-        let cursor = if state.selected == i { "▶" } else { " " };
-        items.push((
-            format!("{}  {:>2}. {}", cursor, i + 1, name),
-            if state.selected == i { sel } else { normal },
-        ));
+        let is_sel = state.selected == i;
+        let cursor = if is_sel { "▶" } else { " " };
+        let score_str = format_score_col(high_scores[i]);
+        let dots_count = row_w
+            .saturating_sub(prefix_w + name.chars().count() + score_str.chars().count());
+        let dots = "·".repeat(dots_count);
+
+        let row_style = if is_sel { sel } else { normal };
+        let sc_style  = if is_sel { sel } else { score_col };
+        let dt_style  = if is_sel { sel } else { dim };
+
+        lines.push(Line::from(vec![
+            Span::styled(format!("{}  {:>2}. {}", cursor, i + 1, name), row_style),
+            Span::styled(dots, dt_style),
+            Span::styled(score_str, sc_style),
+        ]));
     }
-    items.push(("────────────────────────".to_owned(), dim));
-    items.push((
-        format!("{}  {}", if state.selected == ITEM_SOUND { "▶" } else { " " }, sound_label),
-        if state.selected == ITEM_SOUND { sel } else { normal },
-    ));
-    items.push((
-        format!("{}  Exit", if state.selected == ITEM_EXIT { "▶" } else { " " }),
-        if state.selected == ITEM_EXIT { sel } else { normal },
-    ));
 
-    let max_w = items.iter()
-        .map(|(s, _)| s.chars().count())
-        .max()
-        .unwrap_or(0)
-        .max(hint.chars().count());
+    lines.push(Line::from(Span::styled("─".repeat(row_w), dim)));
 
-    let mut lines: Vec<Line> = items
-        .into_iter()
-        .map(|(s, style)| {
-            Line::from(Span::styled(format!("{:<width$}", s, width = max_w), style))
-        })
-        .collect();
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{}  {:<width$}", if state.selected == ITEM_SOUND { "▶" } else { " " }, sound_label, width = row_w - 3),
+            if state.selected == ITEM_SOUND { sel } else { normal },
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{}  {:<width$}", if state.selected == ITEM_EXIT { "▶" } else { " " }, "Exit", width = row_w - 3),
+            if state.selected == ITEM_EXIT { sel } else { normal },
+        ),
+    ]));
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        format!("{:<width$}", hint, width = max_w),
+        format!("{:<width$}", hint, width = row_w),
         dim,
     )));
 
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
+}
+
+fn format_score_col(score: u64) -> String {
+    if score == 0 {
+        return "──────────".to_owned();
+    }
+    // Insert thousands separators.
+    let s = score.to_string();
+    let mut out = String::new();
+    for (i, ch) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 { out.push(','); }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
 }

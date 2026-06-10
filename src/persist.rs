@@ -3,8 +3,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedState {
+    /// Per-table high scores; index 0 = table 1.
     #[serde(default)]
-    pub high_score:    u64,
+    pub high_scores:   [u64; 8],
     #[serde(default = "default_true")]
     pub sound_enabled: bool,
 }
@@ -13,7 +14,7 @@ fn default_true() -> bool { true }
 
 impl Default for SavedState {
     fn default() -> Self {
-        Self { high_score: 0, sound_enabled: true }
+        Self { high_scores: [0; 8], sound_enabled: true }
     }
 }
 

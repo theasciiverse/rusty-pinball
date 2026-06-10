@@ -11,9 +11,9 @@ use ratatui::{
 
 use crate::{game::GameState, physics::PhysicsWorld, renderer::FieldRenderer};
 
-pub fn draw_menu(frame: &mut Frame, state: &menu::MenuState, sound_enabled: bool) {
+pub fn draw_menu(frame: &mut Frame, state: &menu::MenuState, sound_enabled: bool, high_scores: &[u64; 8]) {
     let area = frame.area();
-    menu::draw_menu(frame, area, state, sound_enabled);
+    menu::draw_menu(frame, area, state, sound_enabled, high_scores);
 }
 
 const DMD_HEIGHT: u16 = 6;
