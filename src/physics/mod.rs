@@ -132,9 +132,11 @@ struct RolloverInfo {
 
 struct RolloverGroupInfo {
     rollovers:        Vec<RolloverInfo>,
-    score:            u64,   // group-level score (used when individual score is 0)
+    score:            u64,   // group-level score: per-rollover fallback AND completion bonus
     cycle_on_flipper: bool,
     ignore_ball:      bool,
+    // >0 while the "all lit" flash animation is running; 0 = idle.
+    flash_ticks:      u8,
 }
 
 struct LayerSensorInfo {
@@ -146,6 +148,10 @@ struct LayerSensorInfo {
 const BUMPER_LIT_TICKS:   u8  = 6;
 const KICK_WALL_DEBOUNCE: u8  = 6;
 const DROP_CLEAR_BONUS:   u64 = 2_000;
+// Rollover group completion flash: 4 phases × 6 sub-steps each.
+// At 2 sub-steps per frame (30 fps) each phase ≈ 100 ms; total ≈ 400 ms.
+const ROLLOVER_FLASH_TICKS:  u8 = 24;
+const ROLLOVER_FLASH_PHASES: u8 = 4;
 
 // ── Layer collision groups ─────────────────────────────────────────────────────
 // Bits 0-3 correspond to layers 0-3.  Universal walls use ALL bits (like
@@ -606,6 +612,7 @@ impl PhysicsWorld {
             score:            group_score,
             cycle_on_flipper: r.cycle_on_flipper.unwrap_or(false),
             ignore_ball:      r.ignore_ball.unwrap_or(false),
+            flash_ticks:      0,
         }
     }
 
@@ -850,14 +857,14 @@ impl PhysicsWorld {
             }
         }
 
-        // Rollover detection and flipper cycling.
+        // Rollover detection, flipper cycling, and group-completion flash.
         {
             let ball_pos = self.ball_handle
                 .and_then(|h| self.bodies.get(h))
                 .map(|b| *b.translation());
             for group in &mut self.rollover_groups {
-                // Ball activation
-                if !group.ignore_ball {
+                // ── Ball activation (skip while flashing — group is mid-reset) ──
+                if !group.ignore_ball && group.flash_ticks == 0 {
                     if let Some(bp) = ball_pos {
                         for rv in &mut group.rollovers {
                             if rv.lit { continue; }
@@ -873,10 +880,32 @@ impl PhysicsWorld {
                         }
                     }
                 }
-                // Flipper cycling — leading edge only, matches original Vector-Pinball direction.
+
+                // ── Group completion: start flash when all rollovers just became lit ──
+                if group.flash_ticks == 0
+                    && !group.rollovers.is_empty()
+                    && group.rollovers.iter().all(|rv| rv.lit)
+                {
+                    group.flash_ticks = ROLLOVER_FLASH_TICKS;
+                }
+
+                // ── Flash countdown → bonus + reset on completion ──
+                if group.flash_ticks > 0 {
+                    group.flash_ticks -= 1;
+                    if group.flash_ticks == 0 {
+                        if group.score > 0 {
+                            self.score_events.borrow_mut().push(group.score);
+                        }
+                        for rv in &mut group.rollovers {
+                            rv.lit = false;
+                        }
+                    }
+                }
+
+                // ── Flipper cycling — suspend while flashing ──
                 // Left press  → rotate_right(1): lit dot shifts toward higher index.
                 // Right press → rotate_left(1):  lit dot shifts toward lower index.
-                if group.cycle_on_flipper {
+                if group.cycle_on_flipper && group.flash_ticks == 0 {
                     let n = group.rollovers.len();
                     if n > 1 {
                         if input.left_just_pressed {
@@ -1111,9 +1140,19 @@ impl PhysicsWorld {
             .collect();
 
         let rollover_groups = self.rollover_groups.iter().map(|g| {
+            // During the completion flash the renderer overrides all rollovers
+            // to blink together.  4 phases: lit → unlit → lit → unlit → reset.
+            let flash_override = if g.flash_ticks > 0 {
+                let phase = (ROLLOVER_FLASH_TICKS - g.flash_ticks)
+                    / (ROLLOVER_FLASH_TICKS / ROLLOVER_FLASH_PHASES);
+                Some(phase % 2 == 0) // phases 0,2 → lit; phases 1,3 → unlit
+            } else {
+                None
+            };
             RolloverGroupSnapshot {
                 rollovers: g.rollovers.iter().map(|rv| RolloverSnapshot {
-                    x: rv.x, y: rv.y, radius: rv.radius, lit: rv.lit,
+                    x: rv.x, y: rv.y, radius: rv.radius,
+                    lit: flash_override.unwrap_or(rv.lit),
                 }).collect(),
             }
         }).collect();
