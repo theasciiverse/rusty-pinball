@@ -278,6 +278,9 @@ impl PhysicsWorld {
                                 interior_normal,
                                 collider_handle: col,
                             });
+                            // Kick walls are rendered via the kick_walls path only;
+                            // remove the segment add_wall just pushed to wall_segs.
+                            wall_segs.pop();
                         }
                     }
                 }
@@ -760,6 +763,9 @@ impl PhysicsWorld {
             for (i, nx, ny) in hits {
                 if self.kick_walls[i].retract_when_hit {
                     self.kick_walls[i].active = false;
+                    if let Some(col) = self.colliders.get_mut(self.kick_walls[i].collider_handle) {
+                        col.set_collision_groups(InteractionGroups::none());
+                    }
                 } else {
                     self.kick_walls[i].debounce = KICK_WALL_DEBOUNCE;
                 }
@@ -1032,10 +1038,13 @@ impl PhysicsWorld {
                 col.set_collision_groups(InteractionGroups::none());
             }
         }
-        // Reactivate ball-saver walls.
+        // Reactivate ball-saver walls and re-enable their colliders.
         for kw in &mut self.kick_walls {
             if kw.retract_when_hit {
                 kw.active = true;
+                if let Some(col) = self.colliders.get_mut(kw.collider_handle) {
+                    col.set_collision_groups(InteractionGroups::all());
+                }
             }
         }
     }
