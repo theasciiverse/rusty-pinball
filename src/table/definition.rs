@@ -203,6 +203,10 @@ pub struct WallDef {
     pub retract_when_hit: Option<bool>,
 
     pub score: Option<u64>,
+
+    /// Physics/render layer (0 = main field; 1/2/3 = elevated ramps/orbits).
+    /// None means universal — active on all layers.
+    pub layer: Option<u8>,
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +235,11 @@ pub struct WallArcDef {
 
     pub segments: Option<u32>,
     pub color: Option<serde_json::Value>,
+
+    pub layer: Option<u8>,
+
+    #[serde(rename = "inactiveLayerColor")]
+    pub inactive_layer_color: Option<serde_json::Value>,
 }
 
 impl WallArcDef {
@@ -262,6 +271,11 @@ pub struct WallPathDef {
     #[serde(deserialize_with = "de_vec_xy")]
     pub positions: Vec<[f32; 2]>,
     pub color: Option<serde_json::Value>,
+
+    pub layer: Option<u8>,
+
+    #[serde(rename = "inactiveLayerColor")]
+    pub inactive_layer_color: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +397,14 @@ pub struct SensorDef {
     /// [xmin, ymin, xmax, ymax]
     #[serde(default, deserialize_with = "de_xxyy_opt")]
     pub rect: Option<[f32; 4]>,
+
+    /// When ball enters this sensor, switch it to this layer.
+    #[serde(rename = "ballLayer")]
+    pub ball_layer: Option<u8>,
+
+    /// Only trigger the layer switch if ball is currently on this layer.
+    #[serde(rename = "ballLayerFrom")]
+    pub ball_layer_from: Option<u8>,
 }
 
 // ---------------------------------------------------------------------------

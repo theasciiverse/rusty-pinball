@@ -22,6 +22,8 @@ pub struct BallSnapshot {
 pub struct WallSnapshot {
     pub x1: f32, pub y1: f32,
     pub x2: f32, pub y2: f32,
+    /// None = universal (always visible). Some(n) = only active on layer n.
+    pub layer: Option<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +50,7 @@ pub struct FieldSnapshot {
     pub drop_targets: Vec<WallSnapshot>,
     pub field_width: f32,
     pub field_height: f32,
+    pub ball_layer: u8,
 }
 
 // ---------------------------------------------------------------------------
@@ -101,9 +104,30 @@ struct DropTargetGroupInfo {
     score:   u64,
 }
 
+struct LayerSensorInfo {
+    rect:         [f32; 4],   // [xmin, ymin, xmax, ymax]
+    target_layer: u8,
+    from_layer:   Option<u8>, // None = trigger from any layer
+}
+
 const BUMPER_LIT_TICKS:   u8  = 6;
 const KICK_WALL_DEBOUNCE: u8  = 6;
 const DROP_CLEAR_BONUS:   u64 = 2_000;
+
+// ── Layer collision groups ─────────────────────────────────────────────────────
+// Bits 0-3 correspond to layers 0-3.  Universal walls use ALL bits (like
+// InteractionGroups::all()).  A ball on layer N has memberships=bit(N),
+// filter=ALL, so it passes through walls of other layers unimpeded.
+
+fn layer_group_for(layer: u8) -> InteractionGroups {
+    let bit = Group::from_bits_truncate(1u32 << layer as u32);
+    InteractionGroups::new(bit, bit)
+}
+
+fn ball_groups_for(layer: u8) -> InteractionGroups {
+    let bit = Group::from_bits_truncate(1u32 << layer as u32);
+    InteractionGroups::new(bit, Group::ALL)
+}
 
 #[derive(Clone)]
 pub enum PhysicsSound {
@@ -151,6 +175,10 @@ pub struct PhysicsWorld {
     // Pre-computed wall segments for rendering (no physics body needed to query)
     wall_segments: Vec<WallSnapshot>,
 
+    // Layer system: sensors that transition the ball between layers.
+    layer_sensors: Vec<LayerSensorInfo>,
+    ball_layer:    u8,
+
     // Events accumulated during step; drained by game / audio layers
     score_events:  RefCell<Vec<u64>>,
     sound_events:  RefCell<Vec<PhysicsSound>>,
@@ -181,6 +209,7 @@ impl PhysicsWorld {
         let mut kick_walls         = Vec::new();
         let mut drop_target_groups = Vec::new();
         let mut wall_segs          = Vec::new();
+        let mut layer_sensors      = Vec::new();
 
         // Gravity points downward in rapier (negative y)
         let g = table.gravity_magnitude();
@@ -189,18 +218,16 @@ impl PhysicsWorld {
         for elem in &table.elements {
             match elem {
                 ElementDef::WallElement(w) => {
-                    let wall_col = Self::add_wall(w, &mut bodies, &mut colliders, &mut wall_segs);
+                    let wall_col = Self::add_wall(w, &mut bodies, &mut colliders, &mut wall_segs, w.layer);
                     // Register slingshot / kicker if this wall has a kick value.
                     if w.disabled != Some(true) && w.kill != Some(true) {
                         if let (Some(kick), Some([x1, y1, x2, y2]), Some(col)) =
                             (w.kick, w.position, wall_col)
                         {
-                            // Perpendicular pointing toward field centre — always kick
-                            // the ball toward the interior regardless of approach angle.
                             let dx = x2 - x1;
                             let dy = y2 - y1;
                             let len = (dx * dx + dy * dy).sqrt().max(1e-6);
-                            let nx = dy / len;   // right-hand normal candidate
+                            let nx = dy / len;
                             let ny = -dx / len;
                             let midx = (x1 + x2) / 2.0;
                             let midy = (y1 + y2) / 2.0;
@@ -231,6 +258,15 @@ impl PhysicsWorld {
                 ElementDef::DropTargetGroupElement(d) => {
                     drop_target_groups.push(Self::build_drop_target_group(d, &mut bodies, &mut colliders));
                 }
+                ElementDef::SensorElement(s) => {
+                    if let (Some(rect), Some(target)) = (s.rect, s.ball_layer) {
+                        layer_sensors.push(LayerSensorInfo {
+                            rect,
+                            target_layer: target,
+                            from_layer:   s.ball_layer_from,
+                        });
+                    }
+                }
                 _ => {}
             }
         }
@@ -248,7 +284,7 @@ impl PhysicsWorld {
             let h = bodies.insert(rb);
             let c = ColliderBuilder::cuboid(0.05, table.height / 2.0).build();
             colliders.insert_with_parent(c, h, &mut bodies);
-            wall_segs.push(WallSnapshot { x1: x, y1: 0.0, x2: x, y2: table.height });
+            wall_segs.push(WallSnapshot { x1: x, y1: 0.0, x2: x, y2: table.height, layer: None });
             let _ = w; // suppress warning
         }
 
@@ -282,6 +318,7 @@ impl PhysicsWorld {
             .friction(0.0)
             .density(1.0)
             .active_events(ActiveEvents::COLLISION_EVENTS)
+            .collision_groups(ball_groups_for(0))
             .build();
         let ball_col_h = colliders.insert_with_parent(idle_col, idle_h, &mut bodies);
         let ball_handle   = Some(idle_h);
@@ -312,6 +349,8 @@ impl PhysicsWorld {
             kick_walls,
             drop_target_groups,
             wall_segments: wall_segs,
+            layer_sensors,
+            ball_layer: 0,
             score_events: RefCell::new(Vec::new()),
             sound_events: RefCell::new(Vec::new()),
             drain_y: 1.0,
@@ -335,7 +374,7 @@ impl PhysicsWorld {
     // Element builders
     // -----------------------------------------------------------------------
 
-    fn add_wall(w: &WallDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, segs: &mut Vec<WallSnapshot>) -> Option<ColliderHandle> {
+    fn add_wall(w: &WallDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, segs: &mut Vec<WallSnapshot>, layer: Option<u8>) -> Option<ColliderHandle> {
         let pos = match &w.position { Some(p) => *p, None => return None };
         if w.disabled == Some(true) || w.kill == Some(true) { return None; }
 
@@ -350,7 +389,11 @@ impl PhysicsWorld {
         let half_h = 0.05_f32;
         let restitution = w.restitution.unwrap_or(0.5);
 
-        // Rotation goes on the rigid body; collider stays axis-aligned relative to it
+        let groups = match layer {
+            Some(n) => layer_group_for(n),
+            None    => InteractionGroups::all(),
+        };
+
         let rb = RigidBodyBuilder::fixed()
             .translation(vector![cx, cy])
             .rotation(angle)
@@ -360,9 +403,10 @@ impl PhysicsWorld {
             .restitution(restitution)
             .restitution_combine_rule(CoefficientCombineRule::Max)
             .friction(0.0)
+            .collision_groups(groups)
             .build();
         let col_h = colliders.insert_with_parent(col, h, bodies);
-        segs.push(WallSnapshot { x1, y1, x2, y2 });
+        segs.push(WallSnapshot { x1, y1, x2, y2, layer });
         Some(col_h)
     }
 
@@ -372,8 +416,9 @@ impl PhysicsWorld {
                 position: Some([p0[0], p0[1], p1[0], p1[1]]),
                 id: None, color: None, kick: None, restitution: Some(0.8),
                 kill: None, disabled: None, retract_when_hit: None, score: None,
+                layer: None,
             };
-            let _ = Self::add_wall(&dummy_def, bodies, colliders, segs);
+            let _ = Self::add_wall(&dummy_def, bodies, colliders, segs, a.layer);
         }
     }
 
@@ -383,8 +428,9 @@ impl PhysicsWorld {
                 position: Some([pair[0][0], pair[0][1], pair[1][0], pair[1][1]]),
                 id: None, color: None, kick: None, restitution: None,
                 kill: None, disabled: None, retract_when_hit: None, score: None,
+                layer: None,
             };
-            let _ = Self::add_wall(&dummy, bodies, colliders, segs);
+            let _ = Self::add_wall(&dummy, bodies, colliders, segs, p.layer);
         }
     }
 
@@ -725,6 +771,34 @@ impl PhysicsWorld {
             }
         }
 
+        // Layer-sensor detection: transition ball to a new physics layer when
+        // it enters a sensor rect (and the optional from-layer filter matches).
+        {
+            let ball_pos = self.ball_handle
+                .and_then(|h| self.bodies.get(h))
+                .map(|b| *b.translation());
+            if let Some(bp) = ball_pos {
+                let mut new_layer = self.ball_layer;
+                for sensor in &self.layer_sensors {
+                    let [xmin, ymin, xmax, ymax] = sensor.rect;
+                    if bp.x >= xmin && bp.x <= xmax && bp.y >= ymin && bp.y <= ymax {
+                        if sensor.from_layer.map_or(true, |fl| fl == self.ball_layer) {
+                            new_layer = sensor.target_layer;
+                            break;
+                        }
+                    }
+                }
+                if new_layer != self.ball_layer {
+                    self.ball_layer = new_layer;
+                    if let Some(bc) = self.ball_collider {
+                        if let Some(col) = self.colliders.get_mut(bc) {
+                            col.set_collision_groups(ball_groups_for(new_layer));
+                        }
+                    }
+                }
+            }
+        }
+
         // Shooter-lane gate: enable once the ball clears gate_y going upward.
         if !self.gate_cleared {
             if let (Some(ball_h), Some(gate_col_h)) = (self.ball_handle, self.gate_collider) {
@@ -845,6 +919,13 @@ impl PhysicsWorld {
                 body.set_gravity_scale(0.0, true);
             }
         }
+        // Return ball to main-field layer.
+        self.ball_layer = 0;
+        if let Some(bc) = self.ball_collider {
+            if let Some(col) = self.colliders.get_mut(bc) {
+                col.set_collision_groups(ball_groups_for(0));
+            }
+        }
         // Re-open the shooter-lane gate for the next launch attempt.
         self.gate_cleared = false;
         if let Some(gate_col_h) = self.gate_collider {
@@ -891,12 +972,12 @@ impl PhysicsWorld {
 
         let kick_walls = self.kick_walls.iter()
             .filter(|kw| kw.active)
-            .map(|kw| WallSnapshot { x1: kw.x1, y1: kw.y1, x2: kw.x2, y2: kw.y2 })
+            .map(|kw| WallSnapshot { x1: kw.x1, y1: kw.y1, x2: kw.x2, y2: kw.y2, layer: None })
             .collect();
 
         let drop_targets: Vec<WallSnapshot> = self.drop_target_groups.iter()
             .flat_map(|g| g.targets.iter().filter(|t| t.active))
-            .map(|t| WallSnapshot { x1: t.x1, y1: t.y1, x2: t.x2, y2: t.y2 })
+            .map(|t| WallSnapshot { x1: t.x1, y1: t.y1, x2: t.x2, y2: t.y2, layer: None })
             .collect();
 
         FieldSnapshot {
@@ -908,6 +989,7 @@ impl PhysicsWorld {
             drop_targets,
             field_width:  self.field_width,
             field_height: self.field_height,
+            ball_layer: self.ball_layer,
         }
     }
 }

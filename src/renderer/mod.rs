@@ -24,6 +24,14 @@ const COL_FLIPPER:     Color = Color::Cyan;
 const COL_BALL:        Color = Color::White;
 const COL_BACKGROUND:  Color = Color::DarkGray;
 
+// Layer-specific wall colors.  Index = layer number.
+const COL_LAYER: [Color; 4] = [
+    Color::Gray,           // layer 0 — main field
+    Color::Green,          // layer 1 — left ramp
+    Color::Magenta,        // layer 2 — outer orbit
+    Color::Red,            // layer 3 — right ramp
+];
+
 // ── Public output type ────────────────────────────────────────────────────────
 
 pub struct ColoredFrame {
@@ -74,9 +82,14 @@ impl FieldRenderer {
         // Draw in priority order (later = higher priority overwrites color).
 
         for w in &snap.walls {
+            let color = match w.layer {
+                None    => COL_WALL,
+                Some(n) if n == snap.ball_layer => COL_LAYER[n.min(3) as usize],
+                Some(_) => continue,  // inactive layer — not visible from below
+            };
             draw_line(&mut pixels, &mut grid,
                 to_cx(w.x1), to_cy(w.y1), to_cx(w.x2), to_cy(w.y2),
-                COL_WALL);
+                color);
         }
 
         for kw in &snap.kick_walls {
