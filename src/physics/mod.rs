@@ -101,6 +101,11 @@ struct KickWallInfo {
     debounce: u8,
     retract_when_hit: bool,
     active: bool,
+    // When true the rapier collider will be disabled at the START of the next
+    // step() call — one physics sub-step after the kick impulse was applied.
+    // This gives rapier one full integration step to move the ball away before
+    // the collider disappears.
+    retract_pending: bool,
     // Perpendicular direction pointing toward the field interior (precomputed).
     interior_normal: [f32; 2],
     // Rapier collider handle — used for collision-event-based kick detection.
@@ -275,6 +280,7 @@ impl PhysicsWorld {
                                 debounce: 0,
                                 retract_when_hit: w.retract_when_hit == Some(true),
                                 active: true,
+                                retract_pending: false,
                                 interior_normal,
                                 collider_handle: col,
                             });
@@ -651,6 +657,19 @@ impl PhysicsWorld {
     }
 
     pub fn step(&mut self, dt: f32, input: &InputState) {
+        // Deferred collider disable for retractWhenHit walls.
+        // We set retract_pending in the previous sub-step so that the kick
+        // impulse has one full integration step to move the ball away before
+        // the wall disappears from the physics world.
+        for kw in &mut self.kick_walls {
+            if kw.retract_pending {
+                kw.retract_pending = false;
+                if let Some(col) = self.colliders.get_mut(kw.collider_handle) {
+                    col.set_collision_groups(InteractionGroups::none());
+                }
+            }
+        }
+
         // Drive flippers kinematically
         for fl in &mut self.flippers {
             let angvel = if (fl.is_right && input.right_flipper)
@@ -762,10 +781,12 @@ impl PhysicsWorld {
             }
             for (i, nx, ny) in hits {
                 if self.kick_walls[i].retract_when_hit {
+                    // Visual disappearance is immediate; the rapier collider is
+                    // disabled one sub-step later (via retract_pending) so the
+                    // kick impulse has a full integration step to move the ball
+                    // clear before the wall vanishes from the physics world.
                     self.kick_walls[i].active = false;
-                    if let Some(col) = self.colliders.get_mut(self.kick_walls[i].collider_handle) {
-                        col.set_collision_groups(InteractionGroups::none());
-                    }
+                    self.kick_walls[i].retract_pending = true;
                 } else {
                     self.kick_walls[i].debounce = KICK_WALL_DEBOUNCE;
                 }
@@ -1042,6 +1063,7 @@ impl PhysicsWorld {
         for kw in &mut self.kick_walls {
             if kw.retract_when_hit {
                 kw.active = true;
+                kw.retract_pending = false;
                 if let Some(col) = self.colliders.get_mut(kw.collider_handle) {
                     col.set_collision_groups(InteractionGroups::all());
                 }
