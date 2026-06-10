@@ -11,7 +11,7 @@ use ratatui::{
 use crate::game::GameState;
 
 const DOT: &str = "·";
-const DOT_COLOR: Color = Color::Rgb(35, 35, 35);
+const DOT_COLOR: Color = Color::Rgb(80, 55, 20);
 
 pub fn draw_dmd(frame: &mut Frame, area: Rect, game: &GameState) {
     let dot_style   = Style::default().fg(DOT_COLOR);
@@ -22,7 +22,6 @@ pub fn draw_dmd(frame: &mut Frame, area: Rect, game: &GameState) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" DMD ")
         .style(Style::default().fg(Color::Yellow));
     let inner = block.inner(area);
     frame.render_widget(block, area);

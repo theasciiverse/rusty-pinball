@@ -12,6 +12,7 @@ use crate::{
     audio::{AudioManager, SoundTrigger},
     game::{GameState, Phase},
     input::InputState,
+    persist,
     physics::PhysicsWorld,
     renderer::FieldRenderer,
     ui::menu::{MenuState, MenuAction},
@@ -24,11 +25,11 @@ const FRAME_MILLIS:  u64 = 33;
 enum Screen {
     Menu,
     Playing {
-        _table:   u8,
-        game:     GameState,
-        physics:  PhysicsWorld,
-        input:    InputState,
-        camera_y: f32,
+        table_idx: u8,
+        game:      GameState,
+        physics:   PhysicsWorld,
+        input:     InputState,
+        camera_y:  f32,
     },
 }
 
@@ -36,6 +37,7 @@ pub struct App {
     terminal:      Terminal<CrosstermBackend<io::Stdout>>,
     audio:         Option<AudioManager>,
     sound_enabled: bool,
+    high_score:    u64,
     renderer:      FieldRenderer,
     menu:          MenuState,
     screen:        Screen,
@@ -55,14 +57,25 @@ impl App {
         );
         let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
 
-        Ok(Self {
+        let saved = persist::load();
+        let audio = AudioManager::try_new();
+        if let Some(a) = &audio {
+            // prime the audio system with the saved preference
+            let _ = a; // set_enabled called below via the field
+        }
+        let mut app = Self {
             terminal,
-            audio:         AudioManager::try_new(),
-            sound_enabled: true,
+            audio,
+            sound_enabled: saved.sound_enabled,
+            high_score:    saved.high_score,
             renderer:      FieldRenderer::new(),
             menu:          MenuState::new(),
             screen:        Screen::Menu,
-        })
+        };
+        if let Some(a) = &mut app.audio {
+            a.set_enabled(app.sound_enabled);
+        }
+        Ok(app)
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -118,6 +131,10 @@ impl App {
                         if let Some(a) = &mut self.audio {
                             a.set_enabled(self.sound_enabled);
                         }
+                        persist::save(&persist::SavedState {
+                            sound_enabled: self.sound_enabled,
+                            high_score:    self.high_score,
+                        });
                     }
                     MenuAction::Exit          => return Ok(true),
                     MenuAction::None          => {}
@@ -129,6 +146,27 @@ impl App {
     }
 
     fn handle_play_key(&mut self, k: KeyEvent) {
+        // GameOver restart must call start_table(&mut self), so handle it before
+        // taking any other borrows from self.
+        if k.kind == KeyEventKind::Press && k.code == KeyCode::Char(' ') {
+            let is_game_over = matches!(&self.screen, Screen::Playing { game, .. } if game.phase == Phase::GameOver);
+            if is_game_over {
+                let table_n = match &self.screen {
+                    Screen::Playing { table_idx, .. } => *table_idx,
+                    _ => return,
+                };
+                let _ = self.start_table(table_n);
+                if let Screen::Playing { game, physics, .. } = &mut self.screen {
+                    physics.launch_ball();
+                    game.phase = Phase::Playing;
+                }
+                if self.sound_enabled {
+                    if let Some(a) = &mut self.audio { a.play(SoundTrigger::BallLaunch); }
+                }
+                return;
+            }
+        }
+
         let Screen::Playing { game, physics, input, .. } = &mut self.screen else { return };
 
         input.handle_key(k);
@@ -136,15 +174,6 @@ impl App {
         if k.kind == KeyEventKind::Press && k.code == KeyCode::Char(' ') {
             match game.phase {
                 Phase::WaitingToLaunch | Phase::BallLost => {
-                    physics.launch_ball();
-                    game.phase = Phase::Playing;
-                    if self.sound_enabled {
-                        if let Some(a) = &mut self.audio { a.play(SoundTrigger::BallLaunch); }
-                    }
-                }
-                Phase::GameOver => {
-                    let n = game.balls_remaining;
-                    *game = GameState::new(n);
                     physics.launch_ball();
                     game.phase = Phase::Playing;
                     if self.sound_enabled {
@@ -168,13 +197,14 @@ impl App {
         let table   = crate::table::load_table(n)?;
         let balls   = table.num_balls();
         let physics = PhysicsWorld::from_table(&table);
-        let game    = GameState::new(balls);
+        let mut game = GameState::new(balls);
+        game.high_score = self.high_score;
         self.screen = Screen::Playing {
-            _table:   n,
+            table_idx: n,
             game,
             physics,
-            input:    InputState::default(),
-            camera_y: 0.0,
+            input:     InputState::default(),
+            camera_y:  0.0,
         };
         Ok(())
     }
@@ -222,6 +252,19 @@ impl App {
                 }
                 if ball_drained {
                     audio.play(SoundTrigger::BallDrain);
+                }
+            }
+        }
+
+        // Persist new high score when a ball is lost.
+        if ball_drained {
+            if let Screen::Playing { game, .. } = &self.screen {
+                if game.high_score > self.high_score {
+                    self.high_score = game.high_score;
+                    persist::save(&persist::SavedState {
+                        sound_enabled: self.sound_enabled,
+                        high_score:    self.high_score,
+                    });
                 }
             }
         }

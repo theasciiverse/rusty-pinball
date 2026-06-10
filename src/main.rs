@@ -2,6 +2,7 @@ mod app;
 mod audio;
 mod game;
 mod input;
+mod persist;
 mod physics;
 mod renderer;
 mod table;
