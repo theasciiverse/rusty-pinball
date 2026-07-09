@@ -148,57 +148,81 @@ fn draw_list(frame: &mut Frame, area: Rect, state: &MenuState, sound_enabled: bo
     let sound_label = if sound_enabled { "Sound: [ ON ]" } else { "Sound: [OFF]" };
     let hint        = "↑↓  Navigate    Enter  Select";
 
-    // Fixed layout widths so the score column is always right-aligned.
-    let longest_name = TABLE_NAMES.iter().map(|n| n.chars().count()).max().unwrap_or(0);
-    // prefix = "▶  1. " = 6 chars (cursor + 2 spaces + 2-digit number + dot + space)
-    let prefix_w = 6;
-    let score_w  = 11; // "999,999,999" = 11 chars
-    let gap      = 2;
-    let row_w    = prefix_w + longest_name + gap + score_w;
+    // Arrow column (3 chars) sits to the left of the content column (50 chars).
+    // Together they are 53 chars — the same as the PINBALL title art — so both
+    // blocks share the same visual centre when centred on screen.
+    const ARROW_W:   u16   = 3;
+    const CONTENT_W: u16   = 50;
+    const ROW_W:     usize = CONTENT_W as usize;
+    // " {:>2}. " prefix = 1sp + 2-char-num + ". " = 5 chars before the name.
+    const PREFIX_W:  usize = 5;
 
-    let mut lines: Vec<Line> = Vec::new();
+    let mut arrow_lines:   Vec<Line> = Vec::new();
+    let mut content_lines: Vec<Line> = Vec::new();
 
     for (i, &name) in TABLE_NAMES.iter().enumerate() {
-        let is_sel = state.selected == i;
-        let cursor = if is_sel { "▶" } else { " " };
+        let is_sel    = state.selected == i;
         let score_str = format_score_col(high_scores[i]);
-        let dots_count = row_w
-            .saturating_sub(prefix_w + name.chars().count() + score_str.chars().count());
-        let dots = "·".repeat(dots_count);
+        let dots      = "·".repeat(ROW_W
+            .saturating_sub(PREFIX_W + name.chars().count() + score_str.chars().count()));
 
         let row_style = if is_sel { sel } else { normal };
         let sc_style  = if is_sel { sel } else { score_col };
         let dt_style  = if is_sel { sel } else { dim };
 
-        lines.push(Line::from(vec![
-            Span::styled(format!("{}  {:>2}. {}", cursor, i + 1, name), row_style),
+        arrow_lines.push(Line::from(Span::styled(
+            if is_sel { "▶  " } else { "   " }, row_style,
+        )));
+        content_lines.push(Line::from(vec![
+            Span::styled(format!(" {:>2}. {}", i + 1, name), row_style),
             Span::styled(dots, dt_style),
             Span::styled(score_str, sc_style),
         ]));
     }
 
-    lines.push(Line::from(Span::styled("─".repeat(row_w), dim)));
+    // Separator
+    arrow_lines.push(Line::from(Span::styled("   ", dim)));
+    content_lines.push(Line::from(Span::styled("─".repeat(ROW_W), dim)));
 
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!("{}  {:<width$}", if state.selected == ITEM_SOUND { "▶" } else { " " }, sound_label, width = row_w - 3),
-            if state.selected == ITEM_SOUND { sel } else { normal },
-        ),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!("{}  {:<width$}", if state.selected == ITEM_EXIT { "▶" } else { " " }, "Exit", width = row_w - 3),
-            if state.selected == ITEM_EXIT { sel } else { normal },
-        ),
-    ]));
+    // Sound / Exit
+    for (idx, label) in [(ITEM_SOUND, sound_label), (ITEM_EXIT, "Exit")] {
+        let is_sel = state.selected == idx;
+        arrow_lines.push(Line::from(Span::styled(
+            if is_sel { "▶  " } else { "   " },
+            if is_sel { sel } else { normal },
+        )));
+        content_lines.push(Line::from(Span::styled(
+            format!("     {:<width$}", label, width = ROW_W - 5),
+            if is_sel { sel } else { normal },
+        )));
+    }
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        format!("{:<width$}", hint, width = row_w),
+    // Hint
+    arrow_lines.push(Line::from(""));
+    content_lines.push(Line::from(""));
+    arrow_lines.push(Line::from(""));
+    content_lines.push(Line::from(Span::styled(
+        format!("     {:<width$}", hint, width = ROW_W - 5),
         dim,
     )));
 
-    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
+    // Place the arrow+content block centred in the inner area.
+    let left_off = inner.width.saturating_sub(ARROW_W + CONTENT_W) / 2;
+    let arrow_area = Rect {
+        x: inner.x + left_off,
+        y: inner.y,
+        width: ARROW_W,
+        height: inner.height,
+    };
+    let content_area = Rect {
+        x: inner.x + left_off + ARROW_W,
+        y: inner.y,
+        width: CONTENT_W,
+        height: inner.height,
+    };
+
+    frame.render_widget(Paragraph::new(arrow_lines),   arrow_area);
+    frame.render_widget(Paragraph::new(content_lines), content_area);
 }
 
 fn format_score_col(score: u64) -> String {
