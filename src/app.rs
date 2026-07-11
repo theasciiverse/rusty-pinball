@@ -42,6 +42,7 @@ pub struct App {
     menu:          MenuState,
     screen:        Screen,
     paused:        bool,
+    debug_ids:     bool,
 }
 
 impl App {
@@ -73,6 +74,7 @@ impl App {
             menu:          MenuState::new(),
             screen:        Screen::Menu,
             paused:        false,
+            debug_ids:     false,
         };
         if let Some(a) = &mut app.audio {
             a.set_enabled(app.sound_enabled);
@@ -116,6 +118,14 @@ impl App {
                 self.paused = !self.paused;
                 return Ok(false);
             }
+        }
+
+        // Debug object-ID overlay toggle — I key while playing.
+        if is_playing && k.kind != KeyEventKind::Release
+            && matches!(k.code, KeyCode::Char('i') | KeyCode::Char('I'))
+        {
+            self.debug_ids = !self.debug_ids;
+            return Ok(false);
         }
 
         // Escape from playing → back to menu (also clears pause).
@@ -306,8 +316,9 @@ impl App {
                 let renderer  = &self.renderer;
                 let camera_y  = *camera_y;
                 let paused    = self.paused;
+                let debug_ids = self.debug_ids;
                 self.terminal.draw(|frame| {
-                    crate::ui::draw(frame, physics, game, renderer, camera_y, paused);
+                    crate::ui::draw(frame, physics, game, renderer, camera_y, paused, debug_ids);
                 })?;
             }
         }

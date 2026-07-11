@@ -25,6 +25,7 @@ pub fn draw(
     renderer: &FieldRenderer,
     camera_y: f32,
     paused: bool,
+    debug_ids: bool,
 ) {
     let area = frame.area();
 
@@ -36,7 +37,7 @@ pub fn draw(
         ])
         .split(area);
 
-    draw_play_area(frame, chunks[0], physics, renderer, camera_y);
+    draw_play_area(frame, chunks[0], physics, renderer, camera_y, debug_ids);
     dmd::draw_dmd(frame, chunks[1], game);
 
     if paused {
@@ -85,17 +86,19 @@ fn draw_play_area(
     physics: &PhysicsWorld,
     renderer: &FieldRenderer,
     camera_y: f32,
+    debug_ids: bool,
 ) {
+    let title = if debug_ids { " RUSTTY-PIN [IDs] " } else { " RUSTTY-PIN " };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" RUSTTY-PIN ")
+        .title(title)
         .style(Style::default().fg(Color::DarkGray));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let snap     = physics.snapshot();
-    let rendered = renderer.render(&snap, camera_y, inner.width, inner.height);
+    let rendered = renderer.render(&snap, camera_y, inner.width, inner.height, debug_ids);
 
     let cols = rendered.char_cols as usize;
     let rows = rendered.char_rows as usize;

@@ -24,6 +24,8 @@ pub struct WallSnapshot {
     pub x2: f32, pub y2: f32,
     /// None = universal (always visible). Some(n) = only active on layer n.
     pub layer: Option<u8>,
+    /// Debug label: index (and sub-index) into the table JSON's `elements` array.
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -33,12 +35,14 @@ pub struct BumperSnapshot {
     pub radius: f32,
     pub outer_radius: Option<f32>,
     pub lit: bool,          // true for one tick after a hit
+    pub label: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct FlipperSnapshot {
     pub x1: f32, pub y1: f32,  // pivot end
     pub x2: f32, pub y2: f32,  // tip end
+    pub label: String,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +51,7 @@ pub struct RolloverSnapshot {
     pub y: f32,
     pub radius: f32,
     pub lit: bool,
+    pub label: String,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +86,7 @@ struct FlipperInfo {
     up_speed:    f32,      // rad/s toward max_angle
     down_speed:  f32,      // rad/s toward min_angle
     is_right:    bool,
+    label:       String,
 }
 
 struct BumperInfo {
@@ -90,6 +96,7 @@ struct BumperInfo {
     score: u64,
     kick_force: f32,
     lit_ticks: u8,
+    label: String,
 }
 
 // Slingshot / kicker wall: a WallElement with a non-zero kick value.
@@ -99,6 +106,7 @@ struct KickWallInfo {
     kick_force: f32,
     score: u64,
     debounce: u8,
+    label: String,
     retract_when_hit: bool,
     active: bool,
     // When true the rapier collider will be disabled at the START of the next
@@ -121,6 +129,7 @@ struct DropTargetInfo {
 struct DropTargetGroupInfo {
     targets: Vec<DropTargetInfo>,
     score:   u64,
+    label:   String,
 }
 
 struct RolloverInfo {
@@ -137,6 +146,7 @@ struct RolloverGroupInfo {
     ignore_ball:      bool,
     // >0 while the "all lit" flash animation is running; 0 = idle.
     flash_ticks:      u8,
+    label:            String,
 }
 
 struct LayerSensorInfo {
@@ -257,10 +267,11 @@ impl PhysicsWorld {
         let g = table.gravity_magnitude();
         let gravity = vector![0.0_f32, -g];
 
-        for elem in &table.elements {
+        for (elem_idx, elem) in table.elements.iter().enumerate() {
+            let label = elem_idx.to_string();
             match elem {
                 ElementDef::WallElement(w) => {
-                    let wall_col = Self::add_wall(w, &mut bodies, &mut colliders, &mut wall_segs, w.layer);
+                    let wall_col = Self::add_wall(w, &mut bodies, &mut colliders, &mut wall_segs, w.layer, Some(label.clone()));
                     // Register slingshot / kicker if this wall has a kick value.
                     if w.disabled != Some(true) && w.kill != Some(true) {
                         if let (Some(kick), Some([x1, y1, x2, y2]), Some(col)) =
@@ -285,6 +296,7 @@ impl PhysicsWorld {
                                 kick_force: kick,
                                 score: w.score.unwrap_or(0),
                                 debounce: 0,
+                                label: label.clone(),
                                 retract_when_hit: w.retract_when_hit == Some(true),
                                 active: true,
                                 retract_pending: false,
@@ -297,15 +309,15 @@ impl PhysicsWorld {
                         }
                     }
                 }
-                ElementDef::WallArcElement(a)   => Self::add_arc(a, &mut bodies, &mut colliders, &mut wall_segs),
-                ElementDef::WallPathElement(p)  => Self::add_path(p, &mut bodies, &mut colliders, &mut wall_segs),
-                ElementDef::BumperElement(b)    => Self::add_bumper(b, &mut bodies, &mut colliders, &mut bumpers_info),
-                ElementDef::FlipperElement(f)   => Self::add_flipper(f, &mut bodies, &mut colliders, &mut flippers),
+                ElementDef::WallArcElement(a)   => Self::add_arc(a, &mut bodies, &mut colliders, &mut wall_segs, label),
+                ElementDef::WallPathElement(p)  => Self::add_path(p, &mut bodies, &mut colliders, &mut wall_segs, label),
+                ElementDef::BumperElement(b)    => Self::add_bumper(b, &mut bodies, &mut colliders, &mut bumpers_info, label),
+                ElementDef::FlipperElement(f)   => Self::add_flipper(f, &mut bodies, &mut colliders, &mut flippers, label),
                 ElementDef::DropTargetGroupElement(d) => {
-                    drop_target_groups.push(Self::build_drop_target_group(d, &mut bodies, &mut colliders));
+                    drop_target_groups.push(Self::build_drop_target_group(d, &mut bodies, &mut colliders, label));
                 }
                 ElementDef::RolloverGroupElement(r) => {
-                    rollover_groups.push(Self::build_rollover_group(r));
+                    rollover_groups.push(Self::build_rollover_group(r, label));
                 }
                 ElementDef::SensorElement(s) => {
                     if let (Some(rect), Some(target)) = (s.rect, s.ball_layer) {
@@ -333,7 +345,7 @@ impl PhysicsWorld {
             let h = bodies.insert(rb);
             let c = ColliderBuilder::cuboid(0.05, table.height / 2.0).build();
             colliders.insert_with_parent(c, h, &mut bodies);
-            wall_segs.push(WallSnapshot { x1: x, y1: 0.0, x2: x, y2: table.height, layer: None });
+            wall_segs.push(WallSnapshot { x1: x, y1: 0.0, x2: x, y2: table.height, layer: None, label: None });
             let _ = w; // suppress warning
         }
 
@@ -424,7 +436,7 @@ impl PhysicsWorld {
     // Element builders
     // -----------------------------------------------------------------------
 
-    fn add_wall(w: &WallDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, segs: &mut Vec<WallSnapshot>, layer: Option<u8>) -> Option<ColliderHandle> {
+    fn add_wall(w: &WallDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, segs: &mut Vec<WallSnapshot>, layer: Option<u8>, label: Option<String>) -> Option<ColliderHandle> {
         let pos = match &w.position { Some(p) => *p, None => return None };
         if w.disabled == Some(true) || w.kill == Some(true) { return None; }
 
@@ -456,35 +468,37 @@ impl PhysicsWorld {
             .collision_groups(groups)
             .build();
         let col_h = colliders.insert_with_parent(col, h, bodies);
-        segs.push(WallSnapshot { x1, y1, x2, y2, layer });
+        segs.push(WallSnapshot { x1, y1, x2, y2, layer, label });
         Some(col_h)
     }
 
-    fn add_arc(a: &WallArcDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, segs: &mut Vec<WallSnapshot>) {
-        for (p0, p1) in a.to_segments() {
+    fn add_arc(a: &WallArcDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, segs: &mut Vec<WallSnapshot>, label: String) {
+        for (i, (p0, p1)) in a.to_segments().into_iter().enumerate() {
             let dummy_def = WallDef {
                 position: Some([p0[0], p0[1], p1[0], p1[1]]),
                 id: None, color: None, kick: None, restitution: Some(0.8),
                 kill: None, disabled: None, retract_when_hit: None, score: None,
                 layer: None,
             };
-            let _ = Self::add_wall(&dummy_def, bodies, colliders, segs, a.layer);
+            let seg_label = if i == 0 { Some(label.clone()) } else { None };
+            let _ = Self::add_wall(&dummy_def, bodies, colliders, segs, a.layer, seg_label);
         }
     }
 
-    fn add_path(p: &WallPathDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, segs: &mut Vec<WallSnapshot>) {
-        for pair in p.positions.windows(2) {
+    fn add_path(p: &WallPathDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, segs: &mut Vec<WallSnapshot>, label: String) {
+        for (i, pair) in p.positions.windows(2).enumerate() {
             let dummy = WallDef {
                 position: Some([pair[0][0], pair[0][1], pair[1][0], pair[1][1]]),
                 id: None, color: None, kick: None, restitution: None,
                 kill: None, disabled: None, retract_when_hit: None, score: None,
                 layer: None,
             };
-            let _ = Self::add_wall(&dummy, bodies, colliders, segs, p.layer);
+            let seg_label = if i == 0 { Some(label.clone()) } else { None };
+            let _ = Self::add_wall(&dummy, bodies, colliders, segs, p.layer, seg_label);
         }
     }
 
-    fn add_bumper(b: &BumperDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, bumpers: &mut Vec<BumperInfo>) {
+    fn add_bumper(b: &BumperDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, bumpers: &mut Vec<BumperInfo>, label: String) {
         let [x, y] = b.position;
         let rb = RigidBodyBuilder::fixed().translation(vector![x, y]).build();
         let h = bodies.insert(rb);
@@ -501,6 +515,7 @@ impl PhysicsWorld {
             score: b.score.unwrap_or(100),
             kick_force: b.kick.unwrap_or(8.0),
             lit_ticks: 0,
+            label,
         });
     }
 
@@ -509,6 +524,7 @@ impl PhysicsWorld {
         bodies: &mut RigidBodySet,
         colliders: &mut ColliderSet,
         flippers: &mut Vec<FlipperInfo>,
+        label: String,
     ) {
         let half_len   = f.abs_length() / 2.0;
         let is_right   = f.is_right_flipper();
@@ -540,6 +556,7 @@ impl PhysicsWorld {
             up_speed:    f.upspeed,
             down_speed:  f.downspeed,
             is_right,
+            label,
         });
     }
 
@@ -573,7 +590,7 @@ impl PhysicsWorld {
         }
     }
 
-    fn build_drop_target_group(d: &DropTargetGroupDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet) -> DropTargetGroupInfo {
+    fn build_drop_target_group(d: &DropTargetGroupDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, label: String) -> DropTargetGroupInfo {
         let targets = d.positions.iter().map(|&[x1, y1, x2, y2]| {
             let cx    = (x1 + x2) / 2.0;
             let cy    = (y1 + y2) / 2.0;
@@ -595,10 +612,10 @@ impl PhysicsWorld {
             let ch = colliders.insert_with_parent(col, bh, bodies);
             DropTargetInfo { x1, y1, x2, y2, collider: ch, active: true }
         }).collect();
-        DropTargetGroupInfo { targets, score: d.score.unwrap_or(0) }
+        DropTargetGroupInfo { targets, score: d.score.unwrap_or(0), label }
     }
 
-    fn build_rollover_group(r: &RolloverGroupDef) -> RolloverGroupInfo {
+    fn build_rollover_group(r: &RolloverGroupDef, label: String) -> RolloverGroupInfo {
         let group_radius = r.radius.unwrap_or(0.4);
         let group_score  = r.score.unwrap_or(0);
         let rollovers = r.rollovers.iter().map(|rv| RolloverInfo {
@@ -614,6 +631,7 @@ impl PhysicsWorld {
             cycle_on_flipper: r.cycle_on_flipper.unwrap_or(false),
             ignore_ball:      r.ignore_ball.unwrap_or(false),
             flash_ticks:      0,
+            label,
         }
     }
 
@@ -1120,7 +1138,7 @@ impl PhysicsWorld {
                 (fl.pivot[0] + len * fl.angle.cos(),
                  fl.pivot[1] + len * fl.angle.sin())
             };
-            FlipperSnapshot { x1: fl.pivot[0], y1: fl.pivot[1], x2, y2 }
+            FlipperSnapshot { x1: fl.pivot[0], y1: fl.pivot[1], x2, y2, label: fl.label.clone() }
         }).collect();
 
         let bumpers = self.bumpers.iter().map(|b| BumperSnapshot {
@@ -1128,16 +1146,21 @@ impl PhysicsWorld {
             radius: b.radius,
             outer_radius: b.outer_radius,
             lit: b.lit_ticks > 0,
+            label: b.label.clone(),
         }).collect();
 
         let kick_walls = self.kick_walls.iter()
             .filter(|kw| kw.active)
-            .map(|kw| WallSnapshot { x1: kw.x1, y1: kw.y1, x2: kw.x2, y2: kw.y2, layer: None })
+            .map(|kw| WallSnapshot { x1: kw.x1, y1: kw.y1, x2: kw.x2, y2: kw.y2, layer: None, label: Some(kw.label.clone()) })
             .collect();
 
         let drop_targets: Vec<WallSnapshot> = self.drop_target_groups.iter()
-            .flat_map(|g| g.targets.iter().filter(|t| t.active))
-            .map(|t| WallSnapshot { x1: t.x1, y1: t.y1, x2: t.x2, y2: t.y2, layer: None })
+            .flat_map(|g| g.targets.iter().enumerate().filter(|(_, t)| t.active)
+                .map(move |(i, t)| (g.label.clone(), i, t)))
+            .map(|(glabel, i, t)| WallSnapshot {
+                x1: t.x1, y1: t.y1, x2: t.x2, y2: t.y2, layer: None,
+                label: Some(format!("{glabel}.{i}")),
+            })
             .collect();
 
         let rollover_groups = self.rollover_groups.iter().map(|g| {
@@ -1151,9 +1174,10 @@ impl PhysicsWorld {
                 None
             };
             RolloverGroupSnapshot {
-                rollovers: g.rollovers.iter().map(|rv| RolloverSnapshot {
+                rollovers: g.rollovers.iter().enumerate().map(|(i, rv)| RolloverSnapshot {
                     x: rv.x, y: rv.y, radius: rv.radius,
                     lit: flash_override.unwrap_or(rv.lit),
+                    label: format!("{}.{}", g.label, i),
                 }).collect(),
             }
         }).collect();

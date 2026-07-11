@@ -23,6 +23,7 @@ const COL_BUMPER_LIT:  Color = Color::LightYellow;
 const COL_FLIPPER:     Color = Color::Cyan;
 const COL_BALL:        Color = Color::White;
 const COL_BACKGROUND:  Color = Color::DarkGray;
+const COL_DEBUG_LABEL: Color = Color::White;
 
 // Layer-specific wall colors.  Index = layer number.
 const COL_ROLLOVER_LIT:   Color = Color::Cyan;
@@ -57,6 +58,7 @@ impl FieldRenderer {
         camera_y: f32,
         char_cols: u16,
         char_rows: u16,
+        debug_ids: bool,
     ) -> ColoredFrame {
         let char_cols = char_cols as u32;
         let char_rows = char_rows as u32;
@@ -69,6 +71,7 @@ impl FieldRenderer {
 
         let mut pixels = PixelBuf::new(dot_w, dot_h);
         let mut grid   = ColorGrid::new(char_cols, char_rows);
+        let mut labels: Vec<(i32, i32, String)> = Vec::new();
 
         let field_w    = snap.field_width;
         let viewport_h = field_w * (dot_h as f32 / dot_w as f32);
@@ -80,6 +83,12 @@ impl FieldRenderer {
             let norm    = (gy - camera_y) / viewport_h;
             let flipped = 1.0 - norm;
             (flipped * dot_h as f32) as i32
+        };
+        // Dot coords → char-cell coords (2 dots per column, 4 per row).
+        let label_at = |labels: &mut Vec<(i32, i32, String)>, dot_x: i32, dot_y: i32, text: &str| {
+            if debug_ids {
+                labels.push((dot_x.div_euclid(2), dot_y.div_euclid(4), text.to_string()));
+            }
         };
 
         // Draw in priority order (later = higher priority overwrites color).
@@ -93,18 +102,27 @@ impl FieldRenderer {
             draw_line(&mut pixels, &mut grid,
                 to_cx(w.x1), to_cy(w.y1), to_cx(w.x2), to_cy(w.y2),
                 color);
+            if let Some(text) = &w.label {
+                label_at(&mut labels, to_cx(w.x1), to_cy(w.y1), text);
+            }
         }
 
         for kw in &snap.kick_walls {
             draw_line(&mut pixels, &mut grid,
                 to_cx(kw.x1), to_cy(kw.y1), to_cx(kw.x2), to_cy(kw.y2),
                 COL_KICK_WALL);
+            if let Some(text) = &kw.label {
+                label_at(&mut labels, to_cx(kw.x1), to_cy(kw.y1), text);
+            }
         }
 
         for dt in &snap.drop_targets {
             draw_line(&mut pixels, &mut grid,
                 to_cx(dt.x1), to_cy(dt.y1), to_cx(dt.x2), to_cy(dt.y2),
                 COL_DROP_TARGET);
+            if let Some(text) = &dt.label {
+                label_at(&mut labels, to_cx(dt.x1), to_cy(dt.y1), text);
+            }
         }
 
         for b in &snap.bumpers {
@@ -123,11 +141,13 @@ impl FieldRenderer {
             } else {
                 draw_ellipse(&mut pixels, &mut grid, cx, cy, rx, ry, color);
             }
+            label_at(&mut labels, cx, cy, &b.label);
         }
 
         for group in &snap.rollover_groups {
             for rv in &group.rollovers {
                 draw_rollover(&mut pixels, &mut grid, rv, field_w, viewport_h, dot_w, dot_h, &to_cx, &to_cy);
+                label_at(&mut labels, to_cx(rv.x), to_cy(rv.y), &rv.label);
             }
         }
 
@@ -135,6 +155,7 @@ impl FieldRenderer {
             draw_line(&mut pixels, &mut grid,
                 to_cx(fl.x1), to_cy(fl.y1), to_cx(fl.x2), to_cy(fl.y2),
                 COL_FLIPPER);
+            label_at(&mut labels, to_cx(fl.x1), to_cy(fl.y1), &fl.label);
         }
 
         if let Some(b) = &snap.ball {
@@ -152,6 +173,25 @@ impl FieldRenderer {
             for cx in 0..char_cols {
                 chars.push(pixels.braille_char(cx, cy));
                 colors.push(grid.get(cx, cy));
+            }
+        }
+
+        // Overlay debug ID labels last, directly onto the character grid —
+        // braille sub-pixels can't render text, so labels overwrite whatever
+        // was drawn at that char cell.
+        if debug_ids {
+            for (label_cx, label_cy, text) in labels {
+                if label_cy < 0 || label_cy as u32 >= char_rows { continue; }
+                let row = label_cy as u32;
+                for (i, ch) in text.chars().enumerate() {
+                    let col = label_cx + i as i32;
+                    if col < 0 { continue; }
+                    let col = col as u32;
+                    if col >= char_cols { break; }
+                    let idx = (row * char_cols + col) as usize;
+                    chars[idx] = ch;
+                    colors[idx] = COL_DEBUG_LABEL;
+                }
             }
         }
 

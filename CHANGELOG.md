@@ -5,6 +5,7 @@ All notable changes to Rusty Pin are documented here.
 ## [Unreleased]
 
 ### Added
+- Debug object-ID overlay (`I` key while playing): labels every wall segment, kick-wall, drop target, bumper, flipper, and rollover with its index in the table JSON's `elements` array (`N` for single elements, `N.i` for grouped sub-items like rollovers/drop targets), for cross-referencing mechanics against the source table
 - Drop targets: per-target proximity hit detection, targets disable on contact, group-clear bonus (2 000 pts), groups reset when fully cleared
 - Shooter-lane gate: horizontal wall across the lane that closes once the ball escapes upward, preventing it from rolling back into the dead zone
 - Dead-zone detection: ball that rolls back before clearing the gate is automatically re-parked and the player can re-launch
