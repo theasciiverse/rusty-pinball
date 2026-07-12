@@ -106,16 +106,20 @@ pub struct FieldSnapshot {
 // ---------------------------------------------------------------------------
 
 struct FlipperInfo {
-    body_handle: RigidBodyHandle,
-    pivot:       [f32; 2],
-    half_len:    f32,
-    angle:       f32,      // logical angle: 0 = horizontal, + = up, − = down
-    min_angle:   f32,      // lower limit (radians)
-    max_angle:   f32,      // upper limit (radians)
-    up_speed:    f32,      // rad/s toward max_angle
-    down_speed:  f32,      // rad/s toward min_angle
-    is_right:    bool,
-    label:       String,
+    body_handle:  RigidBodyHandle,
+    joint_handle: ImpulseJointHandle,
+    pivot:        [f32; 2],
+    half_len:     f32,
+    min_angle:    f32,      // lower limit (radians, logical: 0 = horizontal, + = up, − = down)
+    max_angle:    f32,      // upper limit (radians)
+    up_speed:     f32,      // rad/s toward max_angle
+    down_speed:   f32,      // rad/s toward min_angle
+    is_right:     bool,
+    // True while the flipper button is currently held. Only used to detect
+    // state *changes* — the motor target isn't reset every tick so the
+    // top-of-swing slowdown (below) isn't immediately undone.
+    engaged:      bool,
+    label:        String,
 }
 
 struct BumperInfo {
@@ -212,6 +216,21 @@ struct SpinnerInfo {
 const BUMPER_LIT_TICKS:   u8  = 6;
 const KICK_WALL_DEBOUNCE: u8  = 6;
 const DROP_CLEAR_BONUS:   u64 = 2_000;
+
+// Flipper motor, matching Vector-Pinball's Box2D revolute-joint setup
+// (density 5.0, maxMotorTorque 1000). The joint's ForceBased motor model
+// solves force = damping * (vel - target_vel), clamped to ±max_force — a
+// high damping value makes the motor converge to its target velocity
+// almost immediately whenever there's a nonzero error, so max_force (the
+// torque cap) is what actually governs acceleration, same as Box2D.
+const FLIPPER_DENSITY:       f32 = 5.0;
+const FLIPPER_MAX_TORQUE:    f32 = 1000.0;
+const FLIPPER_MOTOR_DAMPING: f32 = 1.0e4;
+// Once the flipper is within this many radians of its "up" limit while
+// still moving up faster than this speed, the motor target is clamped so
+// a ball resting at the top doesn't get launched by the final slam.
+const FLIPPER_TOP_SLOWDOWN_ANGLE: f32 = 0.05;
+const FLIPPER_TOP_SLOWDOWN_SPEED: f32 = 0.5;
 // Rollover group completion flash: 4 phases × 8 sub-steps each.
 // At 2 sub-steps per frame (30 fps) each phase ≈ 133 ms; total ≈ 533 ms.
 // Phase 0 = unlit so the dots go dark immediately on completion (obvious feedback).
@@ -369,7 +388,7 @@ impl PhysicsWorld {
                 ElementDef::WallArcElement(a)   => Self::add_arc(a, &mut bodies, &mut colliders, &mut wall_segs, label),
                 ElementDef::WallPathElement(p)  => Self::add_path(p, &mut bodies, &mut colliders, &mut wall_segs, label),
                 ElementDef::BumperElement(b)    => Self::add_bumper(b, &mut bodies, &mut colliders, &mut bumpers_info, label),
-                ElementDef::FlipperElement(f)   => Self::add_flipper(f, &mut bodies, &mut colliders, &mut flippers, label),
+                ElementDef::FlipperElement(f)   => Self::add_flipper(f, &mut bodies, &mut colliders, &mut impulse_joints, &mut flippers, label),
                 ElementDef::DropTargetGroupElement(d) => {
                     drop_target_groups.push(Self::build_drop_target_group(d, &mut bodies, &mut colliders, label));
                 }
@@ -590,6 +609,7 @@ impl PhysicsWorld {
         f: &FlipperDef,
         bodies: &mut RigidBodySet,
         colliders: &mut ColliderSet,
+        impulse_joints: &mut ImpulseJointSet,
         flippers: &mut Vec<FlipperInfo>,
         label: String,
     ) {
@@ -601,30 +621,69 @@ impl PhysicsWorld {
 
         let (cx, cy, rot) = Self::flipper_pose(f.position, half_len, init_angle, is_right);
 
-        // Kinematic body: we move it ourselves every tick.
-        let flipper_body = RigidBodyBuilder::kinematic_position_based()
+        // Matches Vector-Pinball's Box2D setup: a dynamic body on a motorized
+        // revolute joint (density 5.0, CCD/"bullet" enabled), not a kinematic
+        // body — so the ball's own momentum genuinely affects the flipper,
+        // instead of the flipper being an unstoppable, forceless puppet.
+        let flipper_body = RigidBodyBuilder::dynamic()
             .translation(vector![cx, cy])
             .rotation(rot)
+            .ccd_enabled(true)
             .build();
         let h = bodies.insert(flipper_body);
-        let col = ColliderBuilder::cuboid(half_len, 0.06)
-            .restitution(0.3)
-            .friction(0.5)
+        let col = ColliderBuilder::cuboid(half_len, 0.12)
+            .density(FLIPPER_DENSITY)
+            .restitution(0.0)
+            .friction(0.2)
             .build();
         colliders.insert_with_parent(col, h, bodies);
 
+        let anchor_body = RigidBodyBuilder::fixed()
+            .translation(vector![f.position[0], f.position[1]])
+            .build();
+        let anchor_h = bodies.insert(anchor_body);
+
+        // In the flipper's local (unrotated) frame the pivot sits at the
+        // -half_len end for a left flipper and the +half_len end for a
+        // right one — see flipper_pose's doc comment for the derivation.
+        let local_pivot_x = if is_right { half_len } else { -half_len };
+        // The anchor body never rotates, so the joint's raw angle equals the
+        // flipper body's absolute rotation directly — which is +logical_angle
+        // for a left flipper and -logical_angle for a right one (again per
+        // flipper_pose), so the limits and motor target need the same flip.
+        let raw_limits = if is_right { [-max_angle, -min_angle] } else { [min_angle, max_angle] };
+        let joint = RevoluteJointBuilder::new()
+            .local_anchor1(point![0.0, 0.0])
+            .local_anchor2(point![local_pivot_x, 0.0])
+            .limits(raw_limits)
+            .motor_model(MotorModel::ForceBased)
+            .motor_max_force(FLIPPER_MAX_TORQUE)
+            // Force flipper to bottom when the field is first created, same as
+            // Vector-Pinball's FlipperElement.createBodies().
+            .motor_velocity(Self::signed_motor_target(-f.downspeed, is_right), FLIPPER_MOTOR_DAMPING)
+            .build();
+        let joint_h = impulse_joints.insert(anchor_h, h, joint, true);
+
         flippers.push(FlipperInfo {
             body_handle: h,
+            joint_handle: joint_h,
             pivot:       f.position,
             half_len,
-            angle:       init_angle,
             min_angle,
             max_angle,
             up_speed:    f.upspeed,
             down_speed:  f.downspeed,
             is_right,
+            engaged:     false,
             label,
         });
+    }
+
+    /// Converts a logical motor target (+ toward max_angle, − toward
+    /// min_angle) into the raw joint-motor target, flipping sign for right
+    /// flippers per flipper_pose's angle convention.
+    fn signed_motor_target(logical_target: f32, is_right: bool) -> f32 {
+        if is_right { -logical_target } else { logical_target }
     }
 
     /// Returns (center_x, center_y, body_rotation) for a flipper at the given logical angle.
@@ -781,22 +840,40 @@ impl PhysicsWorld {
             }
         }
 
-        // Drive flippers kinematically
+        // Drive flippers via their motorized joint (see add_flipper). The
+        // motor target is only touched when the button state actually
+        // changes; the top-of-swing slowdown below still applies every tick
+        // regardless, so it isn't immediately undone while the button stays
+        // held — matching Vector-Pinball's FlipperElement.
         for fl in &mut self.flippers {
-            let angvel = if (fl.is_right && input.right_flipper)
-                           || (!fl.is_right && input.left_flipper)
-            {
-                fl.up_speed
-            } else {
-                -fl.down_speed
-            };
+            let should_engage = (fl.is_right && input.right_flipper)
+                              || (!fl.is_right && input.left_flipper);
+            if should_engage != fl.engaged {
+                fl.engaged = should_engage;
+                let logical_target = if should_engage { fl.up_speed } else { -fl.down_speed };
+                if let Some(joint) = self.impulse_joints.get_mut(fl.joint_handle) {
+                    joint.data.set_motor_velocity(
+                        JointAxis::AngX,
+                        Self::signed_motor_target(logical_target, fl.is_right),
+                        FLIPPER_MOTOR_DAMPING,
+                    );
+                }
+            }
 
-            fl.angle = (fl.angle + angvel * dt).clamp(fl.min_angle, fl.max_angle);
-
-            let (cx, cy, rot) = Self::flipper_pose(fl.pivot, fl.half_len, fl.angle, fl.is_right);
-            if let Some(body) = self.bodies.get_mut(fl.body_handle) {
-                body.set_next_kinematic_translation(vector![cx, cy]);
-                body.set_next_kinematic_rotation(Rotation::new(rot));
+            if fl.engaged {
+                if let Some(body) = self.bodies.get(fl.body_handle) {
+                    let raw_angle = body.rotation().angle();
+                    let logical_angle = if fl.is_right { -raw_angle } else { raw_angle };
+                    if (fl.max_angle - logical_angle).abs() < FLIPPER_TOP_SLOWDOWN_ANGLE {
+                        if let Some(joint) = self.impulse_joints.get_mut(fl.joint_handle) {
+                            joint.data.set_motor_velocity(
+                                JointAxis::AngX,
+                                Self::signed_motor_target(FLIPPER_TOP_SLOWDOWN_SPEED, fl.is_right),
+                                FLIPPER_MOTOR_DAMPING,
+                            );
+                        }
+                    }
+                }
             }
         }
 
@@ -1260,16 +1337,14 @@ impl PhysicsWorld {
             BallSnapshot { x: t.x, y: t.y, vx: v.x, vy: v.y }
         });
 
-        let flippers: Vec<FlipperSnapshot> = self.flippers.iter().map(|fl| {
-            let len = fl.half_len * 2.0;
-            let (x2, y2) = if fl.is_right {
-                (fl.pivot[0] - len * fl.angle.cos(),
-                 fl.pivot[1] + len * fl.angle.sin())
-            } else {
-                (fl.pivot[0] + len * fl.angle.cos(),
-                 fl.pivot[1] + len * fl.angle.sin())
-            };
-            FlipperSnapshot { x1: fl.pivot[0], y1: fl.pivot[1], x2, y2, label: fl.label.clone() }
+        // Read the tip position straight from the physics body's actual
+        // transform (translation + rotation) rather than a separately
+        // tracked angle, now that the flipper is a real dynamic body.
+        let flippers: Vec<FlipperSnapshot> = self.flippers.iter().filter_map(|fl| {
+            let body = self.bodies.get(fl.body_handle)?;
+            let local_tip_x = if fl.is_right { -fl.half_len } else { fl.half_len };
+            let tip = body.position() * point![local_tip_x, 0.0];
+            Some(FlipperSnapshot { x1: fl.pivot[0], y1: fl.pivot[1], x2: tip.x, y2: tip.y, label: fl.label.clone() })
         }).collect();
 
         let bumpers = self.bumpers.iter().map(|b| BumperSnapshot {
@@ -1405,5 +1480,40 @@ mod spinner_tests {
         }
         assert_eq!(world.spinners[0].status, SpinnerStatus::Inactive, "slow ball should not activate the spinner");
         assert!(world.drain_score_events().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod all_tables_smoke {
+    use super::*;
+    use crate::table::load_table;
+    use crate::input::InputState;
+
+    #[test]
+    fn every_table_loads_and_steps_with_flippers_toggling() {
+        for n in 1..=9u8 {
+            let table = load_table(n).unwrap_or_else(|e| panic!("table{n} failed to load: {e}"));
+            let mut world = PhysicsWorld::from_table(&table);
+            world.launch_ball();
+            let mut input = InputState::default();
+            for i in 0..600 {
+                input.left_flipper = (i / 15) % 2 == 0;
+                input.right_flipper = (i / 15) % 2 == 1;
+                world.step(1.0 / 60.0, &input);
+                if world.is_ball_drained() {
+                    world.park_ball();
+                    world.launch_ball();
+                }
+                if world.is_ball_in_dead_zone() {
+                    world.park_ball();
+                    world.launch_ball();
+                }
+            }
+            for fl in &world.flippers {
+                let body = world.bodies.get(fl.body_handle).unwrap_or_else(|| panic!("table{n}: flipper body missing"));
+                let raw = body.rotation().angle();
+                assert!(raw.is_finite(), "table{n}: flipper angle is not finite: {raw}");
+            }
+        }
     }
 }
