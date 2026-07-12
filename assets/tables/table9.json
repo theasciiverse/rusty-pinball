@@ -153,17 +153,19 @@
     },
 
     { "class": "WallElement", "color": [237, 191, 130], "position": [12.0, 9.5, 14.2, 12.5] },
+    { "class": "WallElement", "color": [237, 191, 130], "position": [11.2, 10.1, 13.4, 13.1] },
     {
       "class": "WallElement", "id": "SkyrideRamp", "color": [237, 191, 130],
       "kick": "1.5", "score": 4000,
-      "position": [14.2, 12.7, 14.9, 12.3]
+      "position": [13.4, 13.1, 14.2, 12.5]
     },
 
-    { "class": "WallElement", "color": [83, 145, 126], "position": [3.5, 16.5, 5.8, 20.0] },
+    { "class": "WallElement", "color": [83, 145, 126], "position": [4.3, 16.2, 6.3, 19.5] },
+    { "class": "WallElement", "color": [83, 145, 126], "position": [3.4, 16.7, 5.4, 20.0] },
     {
       "class": "WallElement", "id": "CycloneRamp", "color": [83, 145, 126],
       "kick": "1.5", "score": 3500,
-      "position": [5.8, 20.0, 6.6, 19.8]
+      "position": [5.4, 20.0, 6.3, 19.5]
     },
 
     {
@@ -184,6 +186,8 @@
       "position": [12.6, 20.5], "radius": "1.0", "outerRadius": "1.4", "kick": "3", "score": 25000
     },
 
+    { "class": "WallElement", "color": [192, 50, 33], "position": [6.1, 23.0, 6.4, 22.3] },
+    { "class": "WallElement", "color": [192, 50, 33], "position": [7.9, 23.0, 7.6, 22.1] },
     {
       "class": "WallElement", "id": "Arcade", "color": [192, 50, 33],
       "kick": "1.5", "score": 5000,
@@ -194,12 +198,16 @@
       "position": [5.8, 21.6], "radius": "0.15", "kick": "1", "score": 0
     },
 
+    { "class": "WallElement", "color": [74, 37, 69], "position": [7.3, 24.6, 7.6, 23.9] },
+    { "class": "WallElement", "color": [74, 37, 69], "position": [8.7, 24.6, 8.4, 23.7] },
     {
       "class": "WallElement", "id": "Tunnel", "color": [74, 37, 69],
       "kick": "1.5", "score": 2500,
       "position": [7.6, 23.9, 8.4, 23.7]
     },
 
+    { "class": "WallElement", "color": [74, 37, 69], "position": [10.0, 25.3, 10.3, 24.6] },
+    { "class": "WallElement", "color": [74, 37, 69], "position": [11.4, 25.3, 11.1, 24.4] },
     {
       "class": "WallElement", "id": "HiddenEntrance", "color": [74, 37, 69],
       "kick": "1.2", "score": 4000,
