@@ -38,6 +38,14 @@ const COL_LAYER: [Color; 4] = [
     Color::Red,            // layer 3 — right ramp
 ];
 
+/// Converts a table-JSON RGB triple to a ratatui `Color`.
+fn rgb((r, g, b): (u8, u8, u8)) -> Color { Color::Rgb(r, g, b) }
+
+/// A dimmed variant of an explicit element color, used for "unlit" rollover
+/// states — mirrors the ~31% brightness ratio between the built-in
+/// `COL_ROLLOVER_LIT` / `COL_ROLLOVER_UNLIT` pair.
+fn dim((r, g, b): (u8, u8, u8)) -> Color { Color::Rgb(r / 3, g / 3, b / 3) }
+
 // ── Public output type ────────────────────────────────────────────────────────
 
 pub struct ColoredFrame {
@@ -97,7 +105,7 @@ impl FieldRenderer {
 
         for w in &snap.walls {
             let color = match w.layer {
-                None    => COL_WALL,
+                None    => w.color.map(rgb).unwrap_or(COL_WALL),
                 Some(n) if n == snap.ball_layer => COL_LAYER[n.min(3) as usize],
                 Some(_) => continue,  // inactive layer — not visible from below
             };
@@ -121,27 +129,28 @@ impl FieldRenderer {
         for dt in &snap.drop_targets {
             draw_line(&mut pixels, &mut grid,
                 to_cx(dt.x1), to_cy(dt.y1), to_cx(dt.x2), to_cy(dt.y2),
-                COL_DROP_TARGET);
+                dt.color.map(rgb).unwrap_or(COL_DROP_TARGET));
             if let Some(text) = &dt.label {
                 label_at(&mut labels, to_cx(dt.x1), to_cy(dt.y1), text);
             }
         }
 
         for b in &snap.bumpers {
-            let color = if b.lit { COL_BUMPER_LIT } else { COL_BUMPER };
+            let outer_color = if b.lit { COL_BUMPER_LIT } else { b.outer_color.or(b.color).map(rgb).unwrap_or(COL_BUMPER) };
+            let inner_color = if b.lit { COL_BUMPER_LIT } else { b.color.map(rgb).unwrap_or(COL_BUMPER) };
             let cx = to_cx(b.x);
             let cy = to_cy(b.y);
             if let Some(outer) = b.outer_radius {
                 let rx = (outer / field_w    * dot_w as f32) as u32;
                 let ry = (outer / viewport_h * dot_h as f32) as u32;
-                draw_ellipse(&mut pixels, &mut grid, cx, cy, rx, ry, color);
+                draw_ellipse(&mut pixels, &mut grid, cx, cy, rx, ry, outer_color);
             }
             let rx = (b.radius / field_w    * dot_w as f32) as u32;
             let ry = (b.radius / viewport_h * dot_h as f32) as u32;
             if b.lit {
-                fill_ellipse(&mut pixels, &mut grid, cx, cy, rx, ry, color);
+                fill_ellipse(&mut pixels, &mut grid, cx, cy, rx, ry, inner_color);
             } else {
-                draw_ellipse(&mut pixels, &mut grid, cx, cy, rx, ry, color);
+                draw_ellipse(&mut pixels, &mut grid, cx, cy, rx, ry, inner_color);
             }
             label_at(&mut labels, cx, cy, &b.label);
         }
@@ -179,7 +188,7 @@ impl FieldRenderer {
             let rx = ((snap.field_width * 0.025 / field_w)    * dot_w as f32) as u32;
             let ry = ((snap.field_width * 0.025 / viewport_h) * dot_h as f32) as u32;
             fill_ellipse(&mut pixels, &mut grid,
-                to_cx(b.x), to_cy(b.y), rx.max(1), ry.max(1), COL_BALL);
+                to_cx(b.x), to_cy(b.y), rx.max(1), ry.max(1), snap.ball_color.map(rgb).unwrap_or(COL_BALL));
         }
 
         // Build output.
@@ -276,7 +285,12 @@ fn draw_rollover(
     let ry = ((rv.radius / viewport_h) * dot_h as f32) as u32;
     let rx = rx.max(1);
     let ry = ry.max(1);
-    let color = if rv.lit { COL_ROLLOVER_LIT } else { COL_ROLLOVER_UNLIT };
+    let color = match (rv.lit, rv.color) {
+        (true, Some(c))  => rgb(c),
+        (true, None)     => COL_ROLLOVER_LIT,
+        (false, Some(c)) => dim(c),
+        (false, None)    => COL_ROLLOVER_UNLIT,
+    };
     if rv.lit {
         fill_ellipse(pixels, grid, cx, cy, rx, ry, color);
     } else {

@@ -10,6 +10,15 @@ use crate::table::{
 // Public query types
 // ---------------------------------------------------------------------------
 
+/// Reads a table JSON `color`/`outerColor` value (`[r,g,b]` or `[r,g,b,a]`,
+/// alpha ignored) into an RGB triple for the renderer. `None` means "no
+/// color was specified" — callers fall back to their element-type default.
+fn parse_color(v: &Option<serde_json::Value>) -> Option<(u8, u8, u8)> {
+    let arr = v.as_ref()?.as_array()?;
+    let at = |i: usize| -> Option<u8> { arr.get(i)?.as_u64().map(|n| n as u8) };
+    Some((at(0)?, at(1)?, at(2)?))
+}
+
 #[derive(Debug, Clone)]
 pub struct BallSnapshot {
     pub x: f32,
@@ -26,6 +35,9 @@ pub struct WallSnapshot {
     pub layer: Option<u8>,
     /// Debug label: index (and sub-index) into the table JSON's `elements` array.
     pub label: Option<String>,
+    /// Explicit color from the table JSON, if any. `None` = fall back to the
+    /// renderer's layer-based default.
+    pub color: Option<(u8, u8, u8)>,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +48,8 @@ pub struct BumperSnapshot {
     pub outer_radius: Option<f32>,
     pub lit: bool,          // true for one tick after a hit
     pub label: String,
+    pub color: Option<(u8, u8, u8)>,
+    pub outer_color: Option<(u8, u8, u8)>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +66,7 @@ pub struct RolloverSnapshot {
     pub radius: f32,
     pub lit: bool,
     pub label: String,
+    pub color: Option<(u8, u8, u8)>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +98,7 @@ pub struct FieldSnapshot {
     pub field_width: f32,
     pub field_height: f32,
     pub ball_layer: u8,
+    pub ball_color: Option<(u8, u8, u8)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +126,8 @@ struct BumperInfo {
     kick_force: f32,
     lit_ticks: u8,
     label: String,
+    color: Option<(u8, u8, u8)>,
+    outer_color: Option<(u8, u8, u8)>,
 }
 
 // Slingshot / kicker wall: a WallElement with a non-zero kick value.
@@ -143,6 +161,7 @@ struct DropTargetGroupInfo {
     targets: Vec<DropTargetInfo>,
     score:   u64,
     label:   String,
+    color:   Option<(u8, u8, u8)>,
 }
 
 struct RolloverInfo {
@@ -150,6 +169,7 @@ struct RolloverInfo {
     radius: f32,
     score: u64,
     lit: bool,
+    color: Option<(u8, u8, u8)>,
 }
 
 struct RolloverGroupInfo {
@@ -243,6 +263,7 @@ pub struct PhysicsWorld {
     ball_handle:        Option<RigidBodyHandle>,
     ball_collider:  Option<ColliderHandle>,   // collider for the ball body
     ball_radius:        f32,
+    ball_color:         Option<(u8, u8, u8)>,
     flippers:           Vec<FlipperInfo>,
     bumpers:            Vec<BumperInfo>,
     kick_walls:         Vec<KickWallInfo>,
@@ -307,7 +328,7 @@ impl PhysicsWorld {
             let label = elem_idx.to_string();
             match elem {
                 ElementDef::WallElement(w) => {
-                    let wall_col = Self::add_wall(w, &mut bodies, &mut colliders, &mut wall_segs, w.layer, Some(label.clone()));
+                    let wall_col = Self::add_wall(w, &mut bodies, &mut colliders, &mut wall_segs, w.layer, Some(label.clone()), parse_color(&w.color));
                     // Register slingshot / kicker if this wall has a kick value.
                     if w.disabled != Some(true) && w.kill != Some(true) {
                         if let (Some(kick), Some([x1, y1, x2, y2]), Some(col)) =
@@ -372,6 +393,7 @@ impl PhysicsWorld {
         }
 
         let ball_radius = table.ball_radius();
+        let ball_color  = table.ball_color.map(|[r, g, b]| (r, g, b));
         let launch_pos        = table.launch_position.unwrap_or([table.width * 0.95, ball_radius + 0.5]);
         let launch_vel        = table.launch_velocity.unwrap_or([0.0, g * 3.0]);
         let launch_vel_delta  = table.launch_velocity_random_delta.unwrap_or([0.0, 0.0]);
@@ -384,7 +406,7 @@ impl PhysicsWorld {
             let h = bodies.insert(rb);
             let c = ColliderBuilder::cuboid(0.05, table.height / 2.0).build();
             colliders.insert_with_parent(c, h, &mut bodies);
-            wall_segs.push(WallSnapshot { x1: x, y1: 0.0, x2: x, y2: table.height, layer: None, label: None });
+            wall_segs.push(WallSnapshot { x1: x, y1: 0.0, x2: x, y2: table.height, layer: None, label: None, color: None });
             let _ = w; // suppress warning
         }
 
@@ -444,6 +466,7 @@ impl PhysicsWorld {
             ball_handle,
             ball_collider,
             ball_radius,
+            ball_color,
             flippers,
             bumpers: bumpers_info,
             kick_walls,
@@ -476,7 +499,7 @@ impl PhysicsWorld {
     // Element builders
     // -----------------------------------------------------------------------
 
-    fn add_wall(w: &WallDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, segs: &mut Vec<WallSnapshot>, layer: Option<u8>, label: Option<String>) -> Option<ColliderHandle> {
+    fn add_wall(w: &WallDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, segs: &mut Vec<WallSnapshot>, layer: Option<u8>, label: Option<String>, color: Option<(u8, u8, u8)>) -> Option<ColliderHandle> {
         let pos = match &w.position { Some(p) => *p, None => return None };
         if w.disabled == Some(true) || w.kill == Some(true) { return None; }
 
@@ -508,11 +531,12 @@ impl PhysicsWorld {
             .collision_groups(groups)
             .build();
         let col_h = colliders.insert_with_parent(col, h, bodies);
-        segs.push(WallSnapshot { x1, y1, x2, y2, layer, label });
+        segs.push(WallSnapshot { x1, y1, x2, y2, layer, label, color });
         Some(col_h)
     }
 
     fn add_arc(a: &WallArcDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, segs: &mut Vec<WallSnapshot>, label: String) {
+        let color = parse_color(&a.color);
         for (i, (p0, p1)) in a.to_segments().into_iter().enumerate() {
             let dummy_def = WallDef {
                 position: Some([p0[0], p0[1], p1[0], p1[1]]),
@@ -521,11 +545,12 @@ impl PhysicsWorld {
                 layer: None,
             };
             let seg_label = if i == 0 { Some(label.clone()) } else { None };
-            let _ = Self::add_wall(&dummy_def, bodies, colliders, segs, a.layer, seg_label);
+            let _ = Self::add_wall(&dummy_def, bodies, colliders, segs, a.layer, seg_label, color);
         }
     }
 
     fn add_path(p: &WallPathDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, segs: &mut Vec<WallSnapshot>, label: String) {
+        let color = parse_color(&p.color);
         for (i, pair) in p.positions.windows(2).enumerate() {
             let dummy = WallDef {
                 position: Some([pair[0][0], pair[0][1], pair[1][0], pair[1][1]]),
@@ -534,7 +559,7 @@ impl PhysicsWorld {
                 layer: None,
             };
             let seg_label = if i == 0 { Some(label.clone()) } else { None };
-            let _ = Self::add_wall(&dummy, bodies, colliders, segs, p.layer, seg_label);
+            let _ = Self::add_wall(&dummy, bodies, colliders, segs, p.layer, seg_label, color);
         }
     }
 
@@ -556,6 +581,8 @@ impl PhysicsWorld {
             kick_force: b.kick.unwrap_or(8.0),
             lit_ticks: 0,
             label,
+            color: parse_color(&b.color),
+            outer_color: parse_color(&b.outer_color),
         });
     }
 
@@ -652,18 +679,20 @@ impl PhysicsWorld {
             let ch = colliders.insert_with_parent(col, bh, bodies);
             DropTargetInfo { x1, y1, x2, y2, collider: ch, active: true }
         }).collect();
-        DropTargetGroupInfo { targets, score: d.score.unwrap_or(0), label }
+        DropTargetGroupInfo { targets, score: d.score.unwrap_or(0), label, color: parse_color(&d.color) }
     }
 
     fn build_rollover_group(r: &RolloverGroupDef, label: String) -> RolloverGroupInfo {
         let group_radius = r.radius.unwrap_or(0.4);
         let group_score  = r.score.unwrap_or(0);
+        let group_color  = parse_color(&r.color);
         let rollovers = r.rollovers.iter().map(|rv| RolloverInfo {
             x:      rv.position[0],
             y:      rv.position[1],
             radius: rv.radius.unwrap_or(group_radius),
             score:  rv.score.unwrap_or(group_score),
             lit:    false,
+            color:  parse_color(&rv.color).or(group_color),
         }).collect();
         RolloverGroupInfo {
             rollovers,
@@ -1249,19 +1278,22 @@ impl PhysicsWorld {
             outer_radius: b.outer_radius,
             lit: b.lit_ticks > 0,
             label: b.label.clone(),
+            color: b.color,
+            outer_color: b.outer_color,
         }).collect();
 
         let kick_walls = self.kick_walls.iter()
             .filter(|kw| kw.active)
-            .map(|kw| WallSnapshot { x1: kw.x1, y1: kw.y1, x2: kw.x2, y2: kw.y2, layer: None, label: Some(kw.label.clone()) })
+            .map(|kw| WallSnapshot { x1: kw.x1, y1: kw.y1, x2: kw.x2, y2: kw.y2, layer: None, label: Some(kw.label.clone()), color: None })
             .collect();
 
         let drop_targets: Vec<WallSnapshot> = self.drop_target_groups.iter()
             .flat_map(|g| g.targets.iter().enumerate().filter(|(_, t)| t.active)
-                .map(move |(i, t)| (g.label.clone(), i, t)))
-            .map(|(glabel, i, t)| WallSnapshot {
+                .map(move |(i, t)| (g.label.clone(), g.color, i, t)))
+            .map(|(glabel, color, i, t)| WallSnapshot {
                 x1: t.x1, y1: t.y1, x2: t.x2, y2: t.y2, layer: None,
                 label: Some(format!("{glabel}.{i}")),
+                color,
             })
             .collect();
 
@@ -1280,6 +1312,7 @@ impl PhysicsWorld {
                     x: rv.x, y: rv.y, radius: rv.radius,
                     lit: flash_override.unwrap_or(rv.lit),
                     label: format!("{}.{}", g.label, i),
+                    color: rv.color,
                 }).collect(),
             }
         }).collect();
@@ -1304,6 +1337,7 @@ impl PhysicsWorld {
             field_width:  self.field_width,
             field_height: self.field_height,
             ball_layer: self.ball_layer,
+            ball_color: self.ball_color,
         }
     }
 }
