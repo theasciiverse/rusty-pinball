@@ -37,7 +37,7 @@ pub struct App {
     terminal:      Terminal<CrosstermBackend<io::Stdout>>,
     audio:         Option<AudioManager>,
     sound_enabled: bool,
-    high_scores:   [u64; 8],
+    high_scores:   [u64; 9],
     renderer:      FieldRenderer,
     menu:          MenuState,
     screen:        Screen,
@@ -225,7 +225,7 @@ impl App {
         let balls   = table.num_balls();
         let physics = PhysicsWorld::from_table(&table);
         let mut game = GameState::new(balls);
-        game.high_score = self.high_scores[(n as usize).saturating_sub(1).min(7)];
+        game.high_score = self.high_scores[(n as usize).saturating_sub(1).min(8)];
         self.paused = false;
         self.screen = Screen::Playing {
             table_idx: n,
@@ -288,7 +288,7 @@ impl App {
         // Persist new high score when a ball is lost.
         if ball_drained {
             if let Screen::Playing { table_idx, game, .. } = &self.screen {
-                let slot = (*table_idx as usize).saturating_sub(1).min(7);
+                let slot = (*table_idx as usize).saturating_sub(1).min(8);
                 if game.high_score > self.high_scores[slot] {
                     self.high_scores[slot] = game.high_score;
                     persist::save(&persist::SavedState {

@@ -25,9 +25,9 @@ Rusty Pinball is inspired by [Vector Pinball](https://github.com/dozingcat/Vecto
 
 ```
 git clone <repo-url>
-cd rusty-pin
+cd rusty-pinball
 cargo build --release
-./target/release/rusty-pin
+./target/release/rusty-pinball
 ```
 
 Or build and run in one step:

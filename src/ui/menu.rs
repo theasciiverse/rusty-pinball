@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-pub const TABLE_NAMES: [&str; 8] = [
+pub const TABLE_NAMES: [&str; 9] = [
     "Classic",
     "Round and Round",
     "Ringmaster",
@@ -15,6 +15,7 @@ pub const TABLE_NAMES: [&str; 8] = [
     "Orbiters",
     "Ad Astra",
     "Pool Party",
+    "Party Land",
 ];
 
 const ITEM_SOUND: usize = TABLE_NAMES.len();
@@ -74,7 +75,7 @@ const PINBALL: [&str; 6] = [
 
 // ── Public draw entry point ───────────────────────────────────────────────────
 
-pub fn draw_menu(frame: &mut Frame, area: Rect, state: &MenuState, sound_enabled: bool, high_scores: &[u64; 8]) {
+pub fn draw_menu(frame: &mut Frame, area: Rect, state: &MenuState, sound_enabled: bool, high_scores: &[u64; 9]) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -132,7 +133,7 @@ fn draw_title(frame: &mut Frame, area: Rect) {
 
 // ── Table / option list ───────────────────────────────────────────────────────
 
-fn draw_list(frame: &mut Frame, area: Rect, state: &MenuState, sound_enabled: bool, high_scores: &[u64; 8]) {
+fn draw_list(frame: &mut Frame, area: Rect, state: &MenuState, sound_enabled: bool, high_scores: &[u64; 9]) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(" SELECT TABLE ", Style::default().fg(Color::Yellow)))

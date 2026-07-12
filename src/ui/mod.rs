@@ -11,7 +11,7 @@ use ratatui::{
 
 use crate::{game::GameState, physics::PhysicsWorld, renderer::FieldRenderer};
 
-pub fn draw_menu(frame: &mut Frame, state: &menu::MenuState, sound_enabled: bool, high_scores: &[u64; 8]) {
+pub fn draw_menu(frame: &mut Frame, state: &menu::MenuState, sound_enabled: bool, high_scores: &[u64; 9]) {
     let area = frame.area();
     menu::draw_menu(frame, area, state, sound_enabled, high_scores);
 }
@@ -88,7 +88,7 @@ fn draw_play_area(
     camera_y: f32,
     debug_ids: bool,
 ) {
-    let title = if debug_ids { " RUSTTY-PIN [IDs] " } else { " RUSTTY-PIN " };
+    let title = if debug_ids { " RUSTY PINBALL [IDs] " } else { " RUSTY PINBALL " };
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)

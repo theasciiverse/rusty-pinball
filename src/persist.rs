@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub struct SavedState {
     /// Per-table high scores; index 0 = table 1.
     #[serde(default)]
-    pub high_scores:   [u64; 8],
+    pub high_scores:   [u64; 9],
     #[serde(default = "default_true")]
     pub sound_enabled: bool,
 }
@@ -14,7 +14,7 @@ fn default_true() -> bool { true }
 
 impl Default for SavedState {
     fn default() -> Self {
-        Self { high_scores: [0; 8], sound_enabled: true }
+        Self { high_scores: [0; 9], sound_enabled: true }
     }
 }
 
@@ -26,7 +26,7 @@ fn state_path() -> Option<PathBuf> {
                 .map(|h| PathBuf::from(h).join(".config"))
                 .unwrap_or_else(|_| PathBuf::from("."))
         });
-    Some(base.join("rusty-pin").join("state.json"))
+    Some(base.join("rusty-pinball").join("state.json"))
 }
 
 pub fn load() -> SavedState {
