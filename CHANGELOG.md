@@ -5,13 +5,18 @@ All notable changes to Rusty Pin are documented here.
 ## [Unreleased]
 
 ### Added
-- Debug object-ID overlay (`I` key while playing): labels every wall segment, kick-wall, drop target, bumper, flipper, and rollover with its index in the table JSON's `elements` array (`N` for single elements, `N.i` for grouped sub-items like rollovers/drop targets), for cross-referencing mechanics against the source table
+- Spinners (`SpinnerElement`): virtual, non-colliding zones — a ball crossing one at or above `minActivationSpeed` sets it spinning, flashing on/off at a decaying frequency and scoring once per cycle until the frequency decays below `minCyclesPerSecond` and it goes idle; ported from Vector Pinball's tick-based model (table 8's `LeftOrbitSpinner`)
+- Debug object-ID overlay (`I` key while playing): labels every wall segment, kick-wall, drop target, bumper, flipper, rollover, and spinner with its index in the table JSON's `elements` array (`N` for single elements, `N.i` for grouped sub-items like rollovers/drop targets), for cross-referencing mechanics against the source table
 - Drop targets: per-target proximity hit detection, targets disable on contact, group-clear bonus (2 000 pts), groups reset when fully cleared
 - Shooter-lane gate: horizontal wall across the lane that closes once the ball escapes upward, preventing it from rolling back into the dead zone
 - Dead-zone detection: ball that rolls back before clearing the gate is automatically re-parked and the player can re-launch
 - `park_ball()`: freezes ball at launch position with gravity off; reactivates ball-saver kick-walls for each new ball
 - Drop targets rendered in yellow in the braille viewport
 - `WallArcDef` now accepts `radius` (circular arc) as a fallback when `xradius`/`yradius` are absent — fixes table 2 loading
+- First unit tests: regression coverage for spinner activation/scoring/decay and the table 8 load fix below (`cargo test`)
+
+### Fixed
+- Table 8 (Pool Party) failed to load entirely: its JSON uses `layer: -1` on a few purely-decorative, ball-ignoring elements (a Vector-Pinball convention for a physics world no ball ever occupies), but `layer` was typed as `u8`. Negative layers now map to an unreachable sentinel layer, so those elements build without colliding or rendering — matching their original decorative-only behavior — instead of failing to parse
 
 ### Changed
 - `launch_ball()` reuses the existing ball body rather than destroying and recreating it each launch

@@ -3,7 +3,7 @@ use rapier2d::prelude::*;
 use crate::input::InputState;
 use crate::table::{
     TableDef, ElementDef, WallDef, WallArcDef, WallPathDef,
-    BumperDef, FlipperDef, DropTargetGroupDef, RolloverGroupDef,
+    BumperDef, FlipperDef, DropTargetGroupDef, RolloverGroupDef, SpinnerDef,
 };
 
 // ---------------------------------------------------------------------------
@@ -59,6 +59,18 @@ pub struct RolloverGroupSnapshot {
     pub rollovers: Vec<RolloverSnapshot>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SpinnerSnapshot {
+    pub x: f32,
+    pub y: f32,
+    pub radius: f32,
+    /// True while the spinner is mid-spin (ball passed over it fast enough).
+    pub spinning: bool,
+    /// True on the "on" half of the current flash cycle.
+    pub flash_on: bool,
+    pub label: String,
+}
+
 pub struct FieldSnapshot {
     pub ball: Option<BallSnapshot>,
     pub walls: Vec<WallSnapshot>,
@@ -67,6 +79,7 @@ pub struct FieldSnapshot {
     pub flippers: Vec<FlipperSnapshot>,
     pub drop_targets: Vec<WallSnapshot>,
     pub rollover_groups: Vec<RolloverGroupSnapshot>,
+    pub spinners: Vec<SpinnerSnapshot>,
     pub field_width: f32,
     pub field_height: f32,
     pub ball_layer: u8,
@@ -155,6 +168,27 @@ struct LayerSensorInfo {
     from_layer:   Option<u8>, // None = trigger from any layer
 }
 
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum SpinnerStatus { Inactive, ActiveVisible, ActiveInvisible }
+
+// No physical body: a spinner is a virtual zone the ball passes through.
+// Passing over it at/above `min_activation_speed` starts it spinning; it
+// flashes on/off at a decaying frequency, scoring once per cycle, until it
+// drops below `min_cycles_per_second` and goes idle again.
+struct SpinnerInfo {
+    position: [f32; 2],
+    radius: f32,
+    min_activation_speed: f32,
+    base_cycles_per_second: f32,
+    min_cycles_per_second: f32,
+    speed_decay_rate: f32,
+    score: u64,
+    status: SpinnerStatus,
+    current_cycles_per_second: f32,
+    seconds_to_next_cycle: f32,
+    label: String,
+}
+
 const BUMPER_LIT_TICKS:   u8  = 6;
 const KICK_WALL_DEBOUNCE: u8  = 6;
 const DROP_CLEAR_BONUS:   u64 = 2_000;
@@ -214,6 +248,7 @@ pub struct PhysicsWorld {
     kick_walls:         Vec<KickWallInfo>,
     drop_target_groups: Vec<DropTargetGroupInfo>,
     rollover_groups:    Vec<RolloverGroupInfo>,
+    spinners:           Vec<SpinnerInfo>,
 
     // Collision-event channel: pipeline writes Started/Stopped events here.
     kick_evt_send: rapier2d::crossbeam::channel::Sender<CollisionEvent>,
@@ -260,6 +295,7 @@ impl PhysicsWorld {
         let mut kick_walls         = Vec::new();
         let mut drop_target_groups = Vec::new();
         let mut rollover_groups    = Vec::new();
+        let mut spinners           = Vec::new();
         let mut wall_segs          = Vec::new();
         let mut layer_sensors      = Vec::new();
 
@@ -318,6 +354,9 @@ impl PhysicsWorld {
                 }
                 ElementDef::RolloverGroupElement(r) => {
                     rollover_groups.push(Self::build_rollover_group(r, label));
+                }
+                ElementDef::SpinnerElement(s) => {
+                    spinners.push(Self::build_spinner(s, label));
                 }
                 ElementDef::SensorElement(s) => {
                     if let (Some(rect), Some(target)) = (s.rect, s.ball_layer) {
@@ -411,6 +450,7 @@ impl PhysicsWorld {
             drop_target_groups,
             wall_segments: wall_segs,
             rollover_groups,
+            spinners,
             layer_sensors,
             ball_layer: 0,
             score_events: RefCell::new(Vec::new()),
@@ -631,6 +671,22 @@ impl PhysicsWorld {
             cycle_on_flipper: r.cycle_on_flipper.unwrap_or(false),
             ignore_ball:      r.ignore_ball.unwrap_or(false),
             flash_ticks:      0,
+            label,
+        }
+    }
+
+    fn build_spinner(s: &SpinnerDef, label: String) -> SpinnerInfo {
+        SpinnerInfo {
+            position: s.position,
+            radius: s.radius.unwrap_or(0.5),
+            min_activation_speed: s.min_activation_speed.unwrap_or(4.0),
+            base_cycles_per_second: s.base_cycles_per_second.unwrap_or(8.0),
+            min_cycles_per_second: s.min_cycles_per_second.unwrap_or(1.5),
+            speed_decay_rate: s.speed_decay_rate.unwrap_or(0.9),
+            score: s.score.unwrap_or(0),
+            status: SpinnerStatus::Inactive,
+            current_cycles_per_second: 0.0,
+            seconds_to_next_cycle: 0.0,
             label,
         }
     }
@@ -945,6 +1001,52 @@ impl PhysicsWorld {
             }
         }
 
+        // Spinner tick: virtual (non-colliding) zones. A ball crossing one at
+        // or above min_activation_speed starts it spinning; it then flashes
+        // on/off at a decaying frequency, scoring once per cycle, until the
+        // frequency decays below min_cycles_per_second and it goes idle.
+        {
+            let ball = self.ball_handle
+                .and_then(|h| self.bodies.get(h))
+                .map(|b| (*b.translation(), *b.linvel()));
+            for sp in &mut self.spinners {
+                if sp.status == SpinnerStatus::Inactive {
+                    if let Some((pos, vel)) = ball {
+                        let dx = pos.x - sp.position[0];
+                        let dy = pos.y - sp.position[1];
+                        if dx * dx + dy * dy <= sp.radius * sp.radius {
+                            let speed = (vel.x * vel.x + vel.y * vel.y).sqrt();
+                            if speed >= sp.min_activation_speed {
+                                sp.current_cycles_per_second =
+                                    (speed / sp.min_activation_speed) * sp.base_cycles_per_second;
+                                sp.seconds_to_next_cycle = 1.0 / sp.current_cycles_per_second;
+                                sp.status = SpinnerStatus::ActiveInvisible;
+                            }
+                        }
+                    }
+                } else {
+                    sp.seconds_to_next_cycle -= dt;
+                    if sp.seconds_to_next_cycle <= 0.0 {
+                        sp.status = if sp.status == SpinnerStatus::ActiveVisible {
+                            SpinnerStatus::ActiveInvisible
+                        } else {
+                            SpinnerStatus::ActiveVisible
+                        };
+                        if sp.score > 0 {
+                            self.score_events.borrow_mut().push(sp.score);
+                        }
+                        sp.current_cycles_per_second *= sp.speed_decay_rate;
+                        sp.seconds_to_next_cycle = 1.0 / sp.current_cycles_per_second;
+                        if sp.status == SpinnerStatus::ActiveInvisible
+                            && sp.current_cycles_per_second < sp.min_cycles_per_second
+                        {
+                            sp.status = SpinnerStatus::Inactive;
+                        }
+                    }
+                }
+            }
+        }
+
         // Layer-sensor detection: transition ball to a new physics layer when
         // it enters a sensor rect (and the optional from-layer filter matches).
         {
@@ -1182,6 +1284,14 @@ impl PhysicsWorld {
             }
         }).collect();
 
+        let spinners = self.spinners.iter().map(|sp| SpinnerSnapshot {
+            x: sp.position[0], y: sp.position[1],
+            radius: sp.radius,
+            spinning: sp.status != SpinnerStatus::Inactive,
+            flash_on: sp.status == SpinnerStatus::ActiveVisible,
+            label: sp.label.clone(),
+        }).collect();
+
         FieldSnapshot {
             ball,
             walls: self.wall_segments.clone(),
@@ -1190,9 +1300,76 @@ impl PhysicsWorld {
             flippers,
             drop_targets,
             rollover_groups,
+            spinners,
             field_width:  self.field_width,
             field_height: self.field_height,
             ball_layer: self.ball_layer,
         }
+    }
+}
+
+#[cfg(test)]
+mod spinner_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    #[test]
+    fn spinner_activates_flashes_and_scores_then_decays_to_idle() {
+        let table = load_table(8).expect("table8.json should load (regression check for the -1 layer bug)");
+        let mut world = PhysicsWorld::from_table(&table);
+        assert_eq!(world.spinners.len(), 1, "table 8 should have exactly one spinner (LeftOrbitSpinner)");
+
+        // Drive the ball straight through the spinner's zone at a speed well
+        // above its activation threshold.
+        let sp = &world.spinners[0];
+        let [sx, sy] = sp.position;
+        assert!((sx - 1.26).abs() < 0.01 && (sy - 19.19).abs() < 0.01);
+        let ball_h = world.ball_handle.expect("ball should exist");
+        let body = world.bodies.get_mut(ball_h).unwrap();
+        body.set_translation(vector![sx, sy], true);
+        body.set_linvel(vector![0.0, 12.0], true); // well above default minActivationSpeed=4
+        body.set_gravity_scale(0.0, true); // isolate spinner behavior from gravity/drain
+
+        let input = InputState::default();
+        world.step(1.0 / 60.0, &input);
+        assert_ne!(world.spinners[0].status, SpinnerStatus::Inactive, "spinner should activate once the fast ball crosses its zone");
+
+        // Run enough steps for several flash cycles; collect score events.
+        // (Other proximity-based mechanics near the spinner's coordinates,
+        // e.g. bumpers, may also fire — so check that 500-pt spinner scores
+        // occurred at all rather than asserting on the event stream's total.)
+        let mut events = Vec::new();
+        let mut saw_visible = false;
+        for _ in 0..600 {
+            world.step(1.0 / 60.0, &input);
+            if world.spinners[0].status == SpinnerStatus::ActiveVisible {
+                saw_visible = true;
+            }
+            events.extend(world.drain_score_events());
+        }
+
+        assert!(saw_visible, "spinner should flash to its visible phase at least once");
+        let spinner_cycles = events.iter().filter(|&&pts| pts == 500).count();
+        assert!(spinner_cycles >= 2, "spinner should score its configured 500 pts on multiple cycles, got {spinner_cycles} in {events:?}");
+        assert_eq!(world.spinners[0].status, SpinnerStatus::Inactive, "spinner should decay back to idle (minCyclesPerSecond=1.5, decay=0.9) within 600 steps");
+    }
+
+    #[test]
+    fn spinner_stays_idle_below_activation_speed() {
+        let table = load_table(8).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        let [sx, sy] = world.spinners[0].position;
+        let ball_h = world.ball_handle.unwrap();
+        let body = world.bodies.get_mut(ball_h).unwrap();
+        body.set_translation(vector![sx, sy], true);
+        body.set_linvel(vector![0.0, 1.0], true); // below minActivationSpeed=4
+        body.set_gravity_scale(0.0, true);
+
+        let input = InputState::default();
+        for _ in 0..30 {
+            world.step(1.0 / 60.0, &input);
+        }
+        assert_eq!(world.spinners[0].status, SpinnerStatus::Inactive, "slow ball should not activate the spinner");
+        assert!(world.drain_score_events().is_empty());
     }
 }

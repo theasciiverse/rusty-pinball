@@ -28,6 +28,8 @@ const COL_DEBUG_LABEL: Color = Color::White;
 // Layer-specific wall colors.  Index = layer number.
 const COL_ROLLOVER_LIT:   Color = Color::Cyan;
 const COL_ROLLOVER_UNLIT: Color = Color::Rgb(0, 80, 80);
+const COL_SPINNER:        Color = Color::Rgb(90, 70, 0);
+const COL_SPINNER_FLASH:  Color = Color::LightYellow;
 
 const COL_LAYER: [Color; 4] = [
     Color::Gray,           // layer 0 — main field
@@ -149,6 +151,21 @@ impl FieldRenderer {
                 draw_rollover(&mut pixels, &mut grid, rv, field_w, viewport_h, dot_w, dot_h, &to_cx, &to_cy);
                 label_at(&mut labels, to_cx(rv.x), to_cy(rv.y), &rv.label);
             }
+        }
+
+        for sp in &snap.spinners {
+            let cx = to_cx(sp.x);
+            let cy = to_cy(sp.y);
+            let rx = ((sp.radius / field_w)    * dot_w as f32) as u32;
+            let ry = ((sp.radius / viewport_h) * dot_h as f32) as u32;
+            let rx = rx.max(1);
+            let ry = ry.max(1);
+            if sp.flash_on {
+                fill_ellipse(&mut pixels, &mut grid, cx, cy, rx, ry, COL_SPINNER_FLASH);
+            } else {
+                draw_ellipse(&mut pixels, &mut grid, cx, cy, rx, ry, COL_SPINNER);
+            }
+            label_at(&mut labels, cx, cy, &sp.label);
         }
 
         for fl in &snap.flippers {

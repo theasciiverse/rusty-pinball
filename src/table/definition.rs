@@ -76,6 +76,24 @@ fn de_xxyy_opt<'de, D: Deserializer<'de>>(d: D) -> Result<Option<[f32; 4]>, D::E
     })
 }
 
+/// Vector-Pinball's `layer` property is a raw Box2D-world key and can be
+/// negative (table 8 uses `-1` for purely decorative arcs/rollovers that no
+/// ball ever occupies). Our layer system only assigns balls to layers 0-3,
+/// so any negative value is mapped to this unreachable sentinel — the
+/// element is built (matching the original always creating a physics body)
+/// but, since no ball is ever on layer 31, it never collides and the
+/// per-layer renderer (which only draws `Some(n)` when `n == ball_layer`)
+/// never shows it.
+const INERT_LAYER: u8 = 31;
+
+fn de_layer_opt<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u8>, D::Error> {
+    Ok(match Option::<i64>::deserialize(d)? {
+        None => None,
+        Some(n) if n < 0 => Some(INERT_LAYER),
+        Some(n) => Some(n as u8),
+    })
+}
+
 fn de_vec_xy<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<[f32; 2]>, D::Error> {
     let rows: Vec<Vec<serde_json::Value>> = Vec::deserialize(d)?;
     rows.iter().map(|row| {
@@ -206,6 +224,7 @@ pub struct WallDef {
 
     /// Physics/render layer (0 = main field; 1/2/3 = elevated ramps/orbits).
     /// None means universal — active on all layers.
+    #[serde(default, deserialize_with = "de_layer_opt")]
     pub layer: Option<u8>,
 }
 
@@ -236,6 +255,7 @@ pub struct WallArcDef {
     pub segments: Option<u32>,
     pub color: Option<serde_json::Value>,
 
+    #[serde(default, deserialize_with = "de_layer_opt")]
     pub layer: Option<u8>,
 
     #[serde(rename = "inactiveLayerColor")]
@@ -272,6 +292,7 @@ pub struct WallPathDef {
     pub positions: Vec<[f32; 2]>,
     pub color: Option<serde_json::Value>,
 
+    #[serde(default, deserialize_with = "de_layer_opt")]
     pub layer: Option<u8>,
 
     #[serde(rename = "inactiveLayerColor")]
@@ -419,4 +440,17 @@ pub struct SpinnerDef {
     pub radius: Option<f32>,
 
     pub color: Option<serde_json::Value>,
+    pub score: Option<u64>,
+
+    #[serde(rename = "minActivationSpeed", default, deserialize_with = "de_numstr_opt")]
+    pub min_activation_speed: Option<f32>,
+
+    #[serde(rename = "baseCyclesPerSecond", default, deserialize_with = "de_numstr_opt")]
+    pub base_cycles_per_second: Option<f32>,
+
+    #[serde(rename = "minCyclesPerSecond", default, deserialize_with = "de_numstr_opt")]
+    pub min_cycles_per_second: Option<f32>,
+
+    #[serde(rename = "speedDecayRate", default, deserialize_with = "de_numstr_opt")]
+    pub speed_decay_rate: Option<f32>,
 }
