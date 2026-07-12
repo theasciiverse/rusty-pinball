@@ -18,6 +18,7 @@ All notable changes to Rusty Pinball are documented here.
 - First unit tests: regression coverage for spinner activation/scoring/decay and the table 8 load fix below (`cargo test`)
 
 ### Fixed
+- Left flipper wouldn't move (right moved sluggishly) right after the dynamic-flipper rewrite below. `InputState.left_flipper`/`right_flipper` aren't a stable "held" boolean — they're a decaying counter that terminal key-repeat events keep refreshing, so the flag can flicker false for a tick between repeats even while the key is physically held. The motorized joint's target was only being updated on a state *change*, so every flicker looked like a real press/release and the motor kept getting told to reverse direction faster than it could move. Now the target is set unconditionally every tick from the current input state (as the old kinematic code did), immune to the flicker
 - Table 8 (Pool Party) failed to load entirely: its JSON uses `layer: -1` on a few purely-decorative, ball-ignoring elements (a Vector-Pinball convention for a physics world no ball ever occupies), but `layer` was typed as `u8`. Negative layers now map to an unreachable sentinel layer, so those elements build without colliding or rendering — matching their original decorative-only behavior — instead of failing to parse
 
 ### Changed

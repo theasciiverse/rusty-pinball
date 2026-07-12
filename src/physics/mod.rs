@@ -115,10 +115,6 @@ struct FlipperInfo {
     up_speed:     f32,      // rad/s toward max_angle
     down_speed:   f32,      // rad/s toward min_angle
     is_right:     bool,
-    // True while the flipper button is currently held. Only used to detect
-    // state *changes* — the motor target isn't reset every tick so the
-    // top-of-swing slowdown (below) isn't immediately undone.
-    engaged:      bool,
     label:        String,
 }
 
@@ -674,7 +670,6 @@ impl PhysicsWorld {
             up_speed:    f.upspeed,
             down_speed:  f.downspeed,
             is_right,
-            engaged:     false,
             label,
         });
     }
@@ -840,27 +835,31 @@ impl PhysicsWorld {
             }
         }
 
-        // Drive flippers via their motorized joint (see add_flipper). The
-        // motor target is only touched when the button state actually
-        // changes; the top-of-swing slowdown below still applies every tick
-        // regardless, so it isn't immediately undone while the button stays
-        // held — matching Vector-Pinball's FlipperElement.
-        for fl in &mut self.flippers {
+        // Drive flippers via their motorized joint (see add_flipper). Unlike
+        // Vector-Pinball's clean Android touch events, our InputState.left/
+        // right_flipper is a decaying counter that terminal key-repeat events
+        // keep refreshing — it can flicker false for a tick between repeats
+        // even while the key is physically held. So the motor target is set
+        // unconditionally every tick from the current state (like the old
+        // kinematic code did), not gated on a state *change*: gating on
+        // change made every flicker look like a real press/release, and the
+        // motor kept getting told to reverse direction faster than it could
+        // actually move. The top-of-swing slowdown is applied right after,
+        // every tick, so it still overrides the full-speed target near the
+        // limit without needing that gating either.
+        for fl in &self.flippers {
             let should_engage = (fl.is_right && input.right_flipper)
                               || (!fl.is_right && input.left_flipper);
-            if should_engage != fl.engaged {
-                fl.engaged = should_engage;
-                let logical_target = if should_engage { fl.up_speed } else { -fl.down_speed };
-                if let Some(joint) = self.impulse_joints.get_mut(fl.joint_handle) {
-                    joint.data.set_motor_velocity(
-                        JointAxis::AngX,
-                        Self::signed_motor_target(logical_target, fl.is_right),
-                        FLIPPER_MOTOR_DAMPING,
-                    );
-                }
+            let logical_target = if should_engage { fl.up_speed } else { -fl.down_speed };
+            if let Some(joint) = self.impulse_joints.get_mut(fl.joint_handle) {
+                joint.data.set_motor_velocity(
+                    JointAxis::AngX,
+                    Self::signed_motor_target(logical_target, fl.is_right),
+                    FLIPPER_MOTOR_DAMPING,
+                );
             }
 
-            if fl.engaged {
+            if should_engage {
                 if let Some(body) = self.bodies.get(fl.body_handle) {
                     let raw_angle = body.rotation().angle();
                     let logical_angle = if fl.is_right { -raw_angle } else { raw_angle };
@@ -1515,5 +1514,112 @@ mod all_tables_smoke {
                 assert!(raw.is_finite(), "table{n}: flipper angle is not finite: {raw}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod flipper_input_flicker {
+    use super::*;
+    use crate::table::load_table;
+    use crate::input::InputState;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+    fn press(code: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(code), KeyModifiers::NONE)
+    }
+
+    /// Regression test for a real bug: InputState.left_flipper/right_flipper
+    /// aren't a stable "held" boolean — they're a decaying counter that
+    /// terminal key-repeat events keep refreshing (see input.rs), so the
+    /// flag can go false for a tick between repeats even while the key is
+    /// physically held. Gating the motor-target update on a state *change*
+    /// (rather than setting it unconditionally every tick) made each flicker
+    /// look like a real press/release, so the motor kept getting told to
+    /// reverse direction and the flipper barely moved. This reproduces the
+    /// flicker via the actual InputState/handle_key path, at a slower-than-
+    /// FLIPPER_HOLD_TICKS repeat rate, and checks the flipper still reaches
+    /// the top of its swing.
+    #[test]
+    fn left_flipper_reaches_max_angle_despite_flickering_input() {
+        let table = load_table(1).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        let left_idx = world.flippers.iter().position(|f| !f.is_right).unwrap();
+
+        let mut input = InputState::default();
+        // One frame = input.tick() once, then PHYSICS_STEPS (2) physics
+        // substeps, matching app.rs's tick(). Re-send the key-repeat event
+        // every 4 frames — slower than FLIPPER_HOLD_TICKS (3), so
+        // left_flipper genuinely drops to false for a frame between repeats.
+        for frame in 0..90 {
+            if frame % 4 == 0 {
+                input.handle_key(press('z'));
+            }
+            input.tick();
+            for _ in 0..2 {
+                world.step(1.0 / 60.0, &input);
+            }
+        }
+
+        let body = world.bodies.get(world.flippers[left_idx].body_handle).unwrap();
+        let angle = body.rotation().angle();
+        assert!(
+            (angle - world.flippers[left_idx].max_angle).abs() < 0.1,
+            "left flipper should still reach ~max_angle despite flickering input, got {angle}"
+        );
+    }
+
+    #[test]
+    fn right_flipper_reaches_max_angle_despite_flickering_input() {
+        let table = load_table(1).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        let right_idx = world.flippers.iter().position(|f| f.is_right).unwrap();
+
+        let mut input = InputState::default();
+        for frame in 0..90 {
+            if frame % 4 == 0 {
+                input.handle_key(press('x'));
+            }
+            input.tick();
+            for _ in 0..2 {
+                world.step(1.0 / 60.0, &input);
+            }
+        }
+
+        let body = world.bodies.get(world.flippers[right_idx].body_handle).unwrap();
+        let logical_angle = -body.rotation().angle();
+        assert!(
+            (logical_angle - world.flippers[right_idx].max_angle).abs() < 0.1,
+            "right flipper should still reach ~max_angle despite flickering input, got {logical_angle}"
+        );
+    }
+
+    // Also confirm a KeyEventKind::Release event (Kitty protocol terminals)
+    // drops the flipper immediately rather than waiting out the hold ticks.
+    #[test]
+    fn flipper_releases_immediately_on_release_event() {
+        let table = load_table(1).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        let left_idx = world.flippers.iter().position(|f| !f.is_right).unwrap();
+
+        let mut input = InputState::default();
+        input.handle_key(press('z'));
+        for _ in 0..30 {
+            input.tick();
+            for _ in 0..2 { world.step(1.0 / 60.0, &input); }
+        }
+        let mut release = press('z');
+        release.kind = KeyEventKind::Release;
+        input.handle_key(release);
+        for _ in 0..30 {
+            input.tick();
+            for _ in 0..2 { world.step(1.0 / 60.0, &input); }
+        }
+
+        let body = world.bodies.get(world.flippers[left_idx].body_handle).unwrap();
+        let angle = body.rotation().angle();
+        assert!(
+            (angle - world.flippers[left_idx].min_angle).abs() < 0.1,
+            "left flipper should fall back to ~min_angle after a Release event, got {angle}"
+        );
     }
 }
