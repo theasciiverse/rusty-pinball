@@ -621,10 +621,20 @@ impl PhysicsWorld {
         // revolute joint (density 5.0, CCD/"bullet" enabled), not a kinematic
         // body — so the ball's own momentum genuinely affects the flipper,
         // instead of the flipper being an unstoppable, forceless puppet.
+        //
+        // can_sleep(false): a flipper resting at its limit for a few seconds
+        // (no ball nearby) is exactly the low-velocity state Rapier's sleep
+        // system is designed to catch — and unlike the old kinematic body,
+        // this one actually can fall asleep. Once asleep, changing the
+        // joint's motor target does *not* wake it back up on its own, so the
+        // flipper would go permanently unresponsive the first time a player
+        // left it alone for a while. Flippers are few and need to always be
+        // live, so the cost of never letting them sleep is negligible.
         let flipper_body = RigidBodyBuilder::dynamic()
             .translation(vector![cx, cy])
             .rotation(rot)
             .ccd_enabled(true)
+            .can_sleep(false)
             .build();
         let h = bodies.insert(flipper_body);
         let col = ColliderBuilder::cuboid(half_len, 0.12)
@@ -1620,6 +1630,46 @@ mod flipper_input_flicker {
         assert!(
             (angle - world.flippers[left_idx].min_angle).abs() < 0.1,
             "left flipper should fall back to ~min_angle after a Release event, got {angle}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod flipper_sleep {
+    use super::*;
+    use crate::table::load_table;
+    use crate::input::InputState;
+
+    /// Regression test for a real bug: a dynamic flipper resting at its
+    /// limit with no ball nearby is exactly the low-velocity state Rapier's
+    /// sleep system is designed to catch, and once asleep, changing the
+    /// joint's motor target does *not* wake the body back up on its own —
+    /// so the flipper went permanently unresponsive the first time a player
+    /// left it alone for a while (add_flipper now sets can_sleep(false)).
+    #[test]
+    fn flipper_responds_after_sitting_idle_for_15_seconds() {
+        let table = load_table(1).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        let left_idx = world.flippers.iter().position(|f| !f.is_right).unwrap();
+
+        let idle_input = InputState::default();
+        for _ in 0..(15 * 60) {
+            world.step(1.0 / 60.0, &idle_input);
+        }
+        assert!(
+            !world.bodies.get(world.flippers[left_idx].body_handle).unwrap().is_sleeping(),
+            "flipper body should never be allowed to sleep"
+        );
+
+        let mut engaged_input = InputState::default();
+        engaged_input.left_flipper = true;
+        for _ in 0..30 {
+            world.step(1.0 / 60.0, &engaged_input);
+        }
+        let angle = world.bodies.get(world.flippers[left_idx].body_handle).unwrap().rotation().angle();
+        assert!(
+            (angle - world.flippers[left_idx].max_angle).abs() < 0.1,
+            "left flipper should still respond after sitting idle, got {angle}"
         );
     }
 }
