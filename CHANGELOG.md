@@ -1,10 +1,11 @@
 # Changelog
 
-All notable changes to Rusty Pin are documented here.
+All notable changes to Rusty Pinball are documented here.
 
 ## [Unreleased]
 
 ### Added
+- Table 9, **Party Land**: an original table (not a Vector-Pinball port) recreating David's first pinball table, Party Land from Digital Illusions CE's *Pinball Fantasies* (1992), from an archived rule sheet — no schematic survives, so geometry is hand-designed to match the described shot layout. Built entirely from existing element types (walls, bumpers, flippers, drop targets, rollover groups) with no new physics; the four true "ball vanishes into a hole" captures (Left Sinkhole, Tunnel, Arcade, Hidden Entrance) are approximated as scoring kick-walls at the same spot rather than true capture/eject physics. Letter-lighting (MAD/CRAZY/PARTY), timed super-modes, the Demon Head award ladder, Jackpot, and the bonus multiplier are deferred to a future pass
 - Spinners (`SpinnerElement`): virtual, non-colliding zones — a ball crossing one at or above `minActivationSpeed` sets it spinning, flashing on/off at a decaying frequency and scoring once per cycle until the frequency decays below `minCyclesPerSecond` and it goes idle; ported from Vector Pinball's tick-based model (table 8's `LeftOrbitSpinner`)
 - Debug object-ID overlay (`I` key while playing): labels every wall segment, kick-wall, drop target, bumper, flipper, rollover, and spinner with its index in the table JSON's `elements` array (`N` for single elements, `N.i` for grouped sub-items like rollovers/drop targets), for cross-referencing mechanics against the source table
 - Drop targets: per-target proximity hit detection, targets disable on contact, group-clear bonus (2 000 pts), groups reset when fully cleared
@@ -19,6 +20,7 @@ All notable changes to Rusty Pin are documented here.
 - Table 8 (Pool Party) failed to load entirely: its JSON uses `layer: -1` on a few purely-decorative, ball-ignoring elements (a Vector-Pinball convention for a physics world no ball ever occupies), but `layer` was typed as `u8`. Negative layers now map to an unreachable sentinel layer, so those elements build without colliding or rendering — matching their original decorative-only behavior — instead of failing to parse
 
 ### Changed
+- Package/binary renamed from `rusty-pin` to `rusty-pinball` — the "rusti-pin" pun was short-lived; menu title art and window chrome were always "Rusty Pinball"
 - `launch_ball()` reuses the existing ball body rather than destroying and recreating it each launch
 - Launch jitter: ±4 % Y-velocity variation plus a small lateral nudge, seeded from nanosecond wall-clock time (LCG)
 - `is_ball_drained()` now ignores a ball sitting in the shooter-lane dead zone
