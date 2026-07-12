@@ -233,6 +233,8 @@ pub struct WallDef {
 // ---------------------------------------------------------------------------
 #[derive(Debug, Clone, Deserialize)]
 pub struct WallArcDef {
+    pub id: Option<String>,
+
     #[serde(deserialize_with = "de_xy")]
     pub center: [f32; 2],
 
@@ -288,6 +290,8 @@ impl WallArcDef {
 // ---------------------------------------------------------------------------
 #[derive(Debug, Clone, Deserialize)]
 pub struct WallPathDef {
+    pub id: Option<String>,
+
     #[serde(deserialize_with = "de_vec_xy")]
     pub positions: Vec<[f32; 2]>,
     pub color: Option<serde_json::Value>,
@@ -304,6 +308,8 @@ pub struct WallPathDef {
 // ---------------------------------------------------------------------------
 #[derive(Debug, Clone, Deserialize)]
 pub struct BumperDef {
+    pub id: Option<String>,
+
     #[serde(deserialize_with = "de_xy")]
     pub position: [f32; 2],
 
@@ -329,6 +335,8 @@ pub struct BumperDef {
 // ---------------------------------------------------------------------------
 #[derive(Debug, Clone, Deserialize)]
 pub struct FlipperDef {
+    pub id: Option<String>,
+
     /// Pivot point [x, y]
     #[serde(deserialize_with = "de_xy")]
     pub position: [f32; 2],
@@ -433,6 +441,8 @@ pub struct SensorDef {
 // ---------------------------------------------------------------------------
 #[derive(Debug, Clone, Deserialize)]
 pub struct SpinnerDef {
+    pub id: Option<String>,
+
     #[serde(deserialize_with = "de_xy")]
     pub position: [f32; 2],
 

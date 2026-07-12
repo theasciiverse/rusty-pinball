@@ -19,6 +19,17 @@ fn parse_color(v: &Option<serde_json::Value>) -> Option<(u8, u8, u8)> {
     Some((at(0)?, at(1)?, at(2)?))
 }
 
+/// Debug-overlay label for an element: its index into the table JSON's
+/// `elements` array, plus its `id` when the table names it — e.g. "20" for
+/// an anonymous wall, "20:LeftFlipper" for a named one. The index is always
+/// included so it still cross-references the raw JSON even when named.
+fn label_for(elem_idx: usize, id: &Option<String>) -> String {
+    match id {
+        Some(id) => format!("{elem_idx}:{id}"),
+        None => elem_idx.to_string(),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BallSnapshot {
     pub x: f32,
@@ -340,9 +351,9 @@ impl PhysicsWorld {
         let gravity = vector![0.0_f32, -g];
 
         for (elem_idx, elem) in table.elements.iter().enumerate() {
-            let label = elem_idx.to_string();
             match elem {
                 ElementDef::WallElement(w) => {
+                    let label = label_for(elem_idx, &w.id);
                     let wall_col = Self::add_wall(w, &mut bodies, &mut colliders, &mut wall_segs, w.layer, Some(label.clone()), parse_color(&w.color));
                     // Register slingshot / kicker if this wall has a kick value.
                     if w.disabled != Some(true) && w.kill != Some(true) {
@@ -381,18 +392,18 @@ impl PhysicsWorld {
                         }
                     }
                 }
-                ElementDef::WallArcElement(a)   => Self::add_arc(a, &mut bodies, &mut colliders, &mut wall_segs, label),
-                ElementDef::WallPathElement(p)  => Self::add_path(p, &mut bodies, &mut colliders, &mut wall_segs, label),
-                ElementDef::BumperElement(b)    => Self::add_bumper(b, &mut bodies, &mut colliders, &mut bumpers_info, label),
-                ElementDef::FlipperElement(f)   => Self::add_flipper(f, &mut bodies, &mut colliders, &mut impulse_joints, &mut flippers, label),
+                ElementDef::WallArcElement(a)   => Self::add_arc(a, &mut bodies, &mut colliders, &mut wall_segs, label_for(elem_idx, &a.id)),
+                ElementDef::WallPathElement(p)  => Self::add_path(p, &mut bodies, &mut colliders, &mut wall_segs, label_for(elem_idx, &p.id)),
+                ElementDef::BumperElement(b)    => Self::add_bumper(b, &mut bodies, &mut colliders, &mut bumpers_info, label_for(elem_idx, &b.id)),
+                ElementDef::FlipperElement(f)   => Self::add_flipper(f, &mut bodies, &mut colliders, &mut impulse_joints, &mut flippers, label_for(elem_idx, &f.id)),
                 ElementDef::DropTargetGroupElement(d) => {
-                    drop_target_groups.push(Self::build_drop_target_group(d, &mut bodies, &mut colliders, label));
+                    drop_target_groups.push(Self::build_drop_target_group(d, &mut bodies, &mut colliders, label_for(elem_idx, &d.id)));
                 }
                 ElementDef::RolloverGroupElement(r) => {
-                    rollover_groups.push(Self::build_rollover_group(r, label));
+                    rollover_groups.push(Self::build_rollover_group(r, label_for(elem_idx, &r.id)));
                 }
                 ElementDef::SpinnerElement(s) => {
-                    spinners.push(Self::build_spinner(s, label));
+                    spinners.push(Self::build_spinner(s, label_for(elem_idx, &s.id)));
                 }
                 ElementDef::SensorElement(s) => {
                     if let (Some(rect), Some(target)) = (s.rect, s.ball_layer) {
