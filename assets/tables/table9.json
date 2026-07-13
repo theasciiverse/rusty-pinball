@@ -217,6 +217,7 @@
 
     {
       "class": "RolloverGroupElement", "id": "PukeRollovers", "radius": "0.35", "score": 2000,
+      "multiplierStep": 1,
       "rollovers": [
         { "color": [220, 60, 60], "position": [8.7, 26.0] },
         { "color": [220, 200, 60], "position": [9.6, 26.2] },

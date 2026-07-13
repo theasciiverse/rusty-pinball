@@ -211,6 +211,8 @@ struct RolloverGroupInfo {
     flash_ticks:      u8,
     label:            String,
     shot_id:          Option<String>,
+    // 0 = completing this group doesn't touch the multiplier.
+    multiplier_step:  u32,
 }
 
 struct LayerSensorInfo {
@@ -349,6 +351,9 @@ pub struct PhysicsWorld {
     // Events accumulated during step; drained by game / audio layers
     score_events:  RefCell<Vec<u64>>,
     sound_events:  RefCell<Vec<PhysicsSound>>,
+    // Signed multiplier deltas (currently only ever positive) from
+    // multiplier-step rollover groups completing.
+    multiplier_events: RefCell<Vec<i32>>,
 
     drain_y:       f32,
     field_width:   f32,
@@ -548,6 +553,7 @@ impl PhysicsWorld {
             ball_layer: 0,
             score_events: RefCell::new(Vec::new()),
             sound_events: RefCell::new(Vec::new()),
+            multiplier_events: RefCell::new(Vec::new()),
             drain_y: 1.0,
             field_width:  table.width,
             field_height: table.height,
@@ -824,6 +830,7 @@ impl PhysicsWorld {
             flash_ticks:      0,
             label,
             shot_id: r.id.clone(),
+            multiplier_step: r.multiplier_step.unwrap_or(0),
         }
     }
 
@@ -1147,6 +1154,9 @@ impl PhysicsWorld {
                     if group.score > 0 {
                         self.score_events.borrow_mut().push(group.score);
                     }
+                    if group.multiplier_step > 0 {
+                        self.multiplier_events.borrow_mut().push(group.multiplier_step as i32);
+                    }
                     for rv in &mut group.rollovers {
                         rv.lit = false;
                     }
@@ -1351,6 +1361,10 @@ impl PhysicsWorld {
 
     pub fn drain_score_events(&self) -> Vec<u64> {
         self.score_events.borrow_mut().drain(..).collect()
+    }
+
+    pub fn drain_multiplier_events(&self) -> Vec<i32> {
+        self.multiplier_events.borrow_mut().drain(..).collect()
     }
 
     /// Lights the letter (in any letter-award word) whose shot id matches.
@@ -1648,6 +1662,43 @@ mod all_tables_smoke {
                 assert!(raw.is_finite(), "table{n}: flipper angle is not finite: {raw}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod multiplier_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    #[test]
+    fn puke_rollovers_completion_raises_multiplier_then_resets_for_next_completion() {
+        let table = load_table(9).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        let gi = world.rollover_groups.iter().position(|g| g.multiplier_step > 0)
+            .expect("Party Land should have exactly one multiplier-step rollover group (Puke Rollovers)");
+        assert_eq!(world.rollover_groups[gi].shot_id.as_deref(), Some("PukeRollovers"));
+        assert_eq!(world.rollover_groups[gi].multiplier_step, 1);
+        assert_eq!(world.rollover_groups[gi].rollovers.len(), 4);
+
+        // Light all four rollovers directly (bypassing ball-proximity
+        // detection, which is already covered by other tests) to drive
+        // the group straight to completion.
+        for rv in &mut world.rollover_groups[gi].rollovers {
+            rv.lit = true;
+        }
+
+        let input = InputState::default();
+        let mut score_events = Vec::new();
+        let mut multiplier_events = Vec::new();
+        for _ in 0..=ROLLOVER_FLASH_TICKS as usize {
+            world.step(1.0 / 60.0, &input);
+            score_events.extend(world.drain_score_events());
+            multiplier_events.extend(world.drain_multiplier_events());
+        }
+
+        assert!(score_events.contains(&2_000), "completion should still award its normal group bonus, got {score_events:?}");
+        assert_eq!(multiplier_events, vec![1], "completion should raise the multiplier by its configured step");
+        assert!(world.rollover_groups[gi].rollovers.iter().all(|rv| !rv.lit), "rollovers reset after completion, ready to build again");
     }
 }
 

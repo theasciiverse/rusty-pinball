@@ -411,6 +411,13 @@ pub struct RolloverGroupDef {
 
     #[serde(default, deserialize_with = "de_numstr_opt")]
     pub reset: Option<f32>,
+
+    /// Not part of Vector-Pinball's format: an Asciiverse-original extension
+    /// (currently only Party Land's Puke Rollovers) — raises the game's
+    /// score multiplier by this amount each time the group is completed
+    /// (all rollovers lit), on top of the group's normal completion bonus.
+    #[serde(rename = "multiplierStep", default)]
+    pub multiplier_step: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
