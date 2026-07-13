@@ -70,6 +70,10 @@ pub fn draw_dmd(frame: &mut Frame, area: Rect, game: &GameState, snap: &FieldSna
     // ── Right column: status right-justified row 0, hint right-justified last row ──
     let status_span = match game.phase {
         crate::game::Phase::WaitingToLaunch => Span::styled("PRESS SPACE", Style::default().fg(Color::Green)),
+        crate::game::Phase::Playing if game.super_mode_ticks > 0 => Span::styled(
+            format!("SUPER {}s", game.super_mode_seconds_remaining()),
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        ),
         crate::game::Phase::Playing         => Span::styled(format!("×{}", game.multiplier), score_style),
         crate::game::Phase::BallLost        => Span::styled("BALL LOST  SPACE", Style::default().fg(Color::Red)),
         crate::game::Phase::GameOver        => Span::styled("GAME OVER  SPACE", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),

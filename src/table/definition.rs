@@ -369,6 +369,13 @@ pub struct BumperDef {
     /// rung on every new ball.
     #[serde(rename = "awardLadder", default)]
     pub award_ladder: Option<Vec<u64>>,
+
+    /// Not part of Vector-Pinball's format: an Asciiverse-original extension
+    /// (currently only Ghoul Skull). Only meaningful alongside `awardLadder`
+    /// — the first hit that reaches the ladder's last rung (once per ball)
+    /// starts a timed super mode.
+    #[serde(rename = "triggersSuperMode", default)]
+    pub triggers_super_mode: bool,
 }
 
 // ---------------------------------------------------------------------------

@@ -158,6 +158,10 @@ struct BumperInfo {
     // Empty = no award ladder; use the flat `score` field above unchanged.
     award_ladder: Vec<u64>,
     ladder_rung: usize,
+    triggers_super_mode: bool,
+    // True once this bumper has fired its super-mode trigger this ball —
+    // reaching the top rung again (it holds there) won't re-fire it.
+    super_mode_triggered: bool,
 }
 
 // Slingshot / kicker wall: a WallElement with a non-zero kick value.
@@ -370,6 +374,8 @@ pub struct PhysicsWorld {
     // Signed multiplier deltas (currently only ever positive) from
     // multiplier-step rollover groups completing.
     multiplier_events: RefCell<Vec<i32>>,
+    // Count of "start (or restart) the timed super mode" triggers this step.
+    super_mode_events: RefCell<u32>,
 
     drain_y:       f32,
     field_width:   f32,
@@ -578,6 +584,7 @@ impl PhysicsWorld {
             score_events: RefCell::new(Vec::new()),
             sound_events: RefCell::new(Vec::new()),
             multiplier_events: RefCell::new(Vec::new()),
+            super_mode_events: RefCell::new(0),
             drain_y: 1.0,
             field_width:  table.width,
             field_height: table.height,
@@ -682,6 +689,8 @@ impl PhysicsWorld {
             lit_ticks: 0,
             award_ladder: b.award_ladder.clone().unwrap_or_default(),
             ladder_rung: 0,
+            triggers_super_mode: b.triggers_super_mode,
+            super_mode_triggered: false,
             label,
             color: parse_color(&b.color),
             outer_color: parse_color(&b.outer_color),
@@ -1024,8 +1033,13 @@ impl PhysicsWorld {
                 if bump.award_ladder.is_empty() {
                     self.score_events.borrow_mut().push(bump.score);
                 } else {
+                    let last_rung = bump.award_ladder.len() - 1;
                     self.score_events.borrow_mut().push(bump.award_ladder[bump.ladder_rung]);
-                    bump.ladder_rung = (bump.ladder_rung + 1).min(bump.award_ladder.len() - 1);
+                    bump.ladder_rung = (bump.ladder_rung + 1).min(last_rung);
+                    if bump.triggers_super_mode && bump.ladder_rung == last_rung && !bump.super_mode_triggered {
+                        bump.super_mode_triggered = true;
+                        *self.super_mode_events.borrow_mut() += 1;
+                    }
                 }
                 self.sound_events.borrow_mut().push(PhysicsSound::BumperHit);
                 if let Some(pts) = Self::record_shot_opt(&mut self.letter_groups, &mut self.jackpot, &self.bumpers[i].shot_id) {
@@ -1413,6 +1427,10 @@ impl PhysicsWorld {
         self.multiplier_events.borrow_mut().drain(..).collect()
     }
 
+    pub fn drain_super_mode_events(&self) -> u32 {
+        std::mem::replace(&mut *self.super_mode_events.borrow_mut(), 0)
+    }
+
     /// Lights the letter (in any letter-award word) whose shot id matches,
     /// and collects the jackpot if it's lit and this shot is the one that
     /// collects it — returning its score for the caller to apply. A word
@@ -1477,8 +1495,9 @@ impl PhysicsWorld {
     /// Freeze the ball at the launch position with gravity off so it appears
     /// waiting in the shooter lane between balls.  Also reactivates any
     /// retract-when-hit walls (ball savers), resets any bumper award
-    /// ladders to their first rung, and un-lights the jackpot (and clears
-    /// letter-award completion progress toward it) for the new ball.
+    /// ladders (and their super-mode trigger) to fire again, and un-lights
+    /// the jackpot (and clears letter-award completion progress toward it)
+    /// for the new ball.
     pub fn park_ball(&mut self) {
         let [lx, ly] = self.launch_pos;
         if let Some(h) = self.ball_handle {
@@ -1513,9 +1532,11 @@ impl PhysicsWorld {
                 }
             }
         }
-        // Reset award-ladder bumpers to their first rung for the new ball.
+        // Reset award-ladder bumpers to their first rung for the new ball,
+        // and let their super-mode trigger fire again.
         for bump in &mut self.bumpers {
             bump.ladder_rung = 0;
+            bump.super_mode_triggered = false;
         }
         // The jackpot must be earned fresh each ball: un-light it and clear
         // every word's "completed this ball" flag.
@@ -1828,6 +1849,7 @@ mod award_ladder_tests {
 
         let input = InputState::default();
         let mut hits = Vec::new();
+        let mut super_mode_events_per_hit = Vec::new();
         for _ in 0..6 {
             let body = world.bodies.get_mut(ball_h).unwrap();
             body.set_translation(vector![bx, by], true);
@@ -1837,22 +1859,28 @@ mod award_ladder_tests {
             // Step until exactly one hit registers, rather than a fixed tick
             // count — the debounce (BUMPER_LIT_TICKS) can otherwise let a
             // second hit sneak in on the same round.
+            let mut events_this_round = 0;
             loop {
                 world.step(1.0 / 60.0, &input);
+                events_this_round += world.drain_super_mode_events();
                 let evs = world.drain_score_events();
                 if let Some(&pts) = evs.first() {
                     hits.push(pts);
                     break;
                 }
             }
+            super_mode_events_per_hit.push(events_this_round);
         }
 
         assert_eq!(hits, vec![5_000, 10_000, 20_000, 35_000, 50_000, 50_000],
             "ladder should climb rung by rung then hold at the top, got {hits:?}");
         assert_eq!(world.bumpers[gi].ladder_rung, 4, "rung stays pinned at the last index");
+        assert_eq!(super_mode_events_per_hit, vec![0, 0, 0, 1, 0, 0],
+            "super mode should trigger exactly once — the hit that first reaches the top rung");
 
         world.park_ball();
         assert_eq!(world.bumpers[gi].ladder_rung, 0, "a new ball resets the ladder to its first rung");
+        assert!(!world.bumpers[gi].super_mode_triggered, "a new ball lets the trigger fire again");
     }
 }
 
