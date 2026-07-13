@@ -277,6 +277,14 @@ const BUMPER_LIT_TICKS:   u8  = 6;
 const KICK_WALL_DEBOUNCE: u8  = 6;
 const DROP_CLEAR_BONUS:   u64 = 2_000;
 const LETTER_FLASH_TICKS: u8  = 32;
+// point_to_segment_dist measures to the wall's centerline, not its physical
+// surface — the wall itself has a half-thickness of 0.05 (see add_wall), so
+// `ball_radius + 0.05` alone is the exact geometric touch point with zero
+// real slack, not a margin on top of it. On a shallow/glancing approach the
+// ball can settle a hair short of that (deflected by neighboring geometry
+// before fully closing the gap) and never register. This adds real slack:
+// wall half-thickness (0.05) + an actual buffer (0.05).
+const KICK_WALL_TOUCH_MARGIN: f32 = 0.10;
 
 // Flipper motor, matching Vector-Pinball's Box2D revolute-joint setup
 // (density 5.0, maxMotorTorque 1000). The joint's ForceBased motor model
@@ -352,14 +360,6 @@ pub struct PhysicsWorld {
     spinners:           Vec<SpinnerInfo>,
     letter_groups:      Vec<LetterGroupInfo>,
     jackpot:            Option<JackpotInfo>,
-
-    // Collision-event channel: pipeline writes Started/Stopped events here.
-    kick_evt_send: rapier2d::crossbeam::channel::Sender<CollisionEvent>,
-    kick_evt_recv: rapier2d::crossbeam::channel::Receiver<CollisionEvent>,
-    // Force-event channel: we don't use force events but must keep the sender
-    // alive so the channel doesn't disconnect and cause silent errors.
-    _force_send:   rapier2d::crossbeam::channel::Sender<rapier2d::geometry::ContactForceEvent>,
-    _force_recv:   rapier2d::crossbeam::channel::Receiver<rapier2d::geometry::ContactForceEvent>,
 
     // Pre-computed wall segments for rendering (no physics body needed to query)
     wall_segments: Vec<WallSnapshot>,
@@ -534,11 +534,6 @@ impl PhysicsWorld {
         let ball_handle   = Some(idle_h);
         let ball_collider = Some(ball_col_h);
 
-        let (kick_evt_send, kick_evt_recv) =
-            rapier2d::crossbeam::channel::unbounded::<CollisionEvent>();
-        let (_force_send, _force_recv) =
-            rapier2d::crossbeam::channel::unbounded::<rapier2d::geometry::ContactForceEvent>();
-
         let letter_groups = table.letter_awards.iter().map(|la| LetterGroupInfo {
             word:     la.word.clone(),
             lit:      vec![false; la.shots.len()],
@@ -595,10 +590,6 @@ impl PhysicsWorld {
             gate_y,
             gate_collider,
             gate_cleared: false,
-            kick_evt_send,
-            kick_evt_recv,
-            _force_send,
-            _force_recv,
         }
     }
 
@@ -989,10 +980,6 @@ impl PhysicsWorld {
         let mut params = IntegrationParameters::default();
         params.dt = dt;
 
-        let evt_handler = ChannelEventCollector::new(
-            self.kick_evt_send.clone(),
-            self._force_send.clone(),
-        );
         self.pipeline.step(
             &self.gravity,
             &params,
@@ -1006,7 +993,7 @@ impl PhysicsWorld {
             &mut self.ccd_solver,
             Some(&mut self.query_pipeline),
             &(),
-            &evt_handler,
+            &(),
         );
 
         // Bumper proximity detection: collect hits, then apply kicks + score
@@ -1059,34 +1046,32 @@ impl PhysicsWorld {
             if b.lit_ticks > 0 { b.lit_ticks -= 1; }
         }
 
-        // Kick-wall (slingshot / ball-saver) collision-event detection.
+        // Kick-wall (slingshot / ball-saver) proximity detection.
         //
-        // Rapier emits CollisionEvent::Started when the ball first contacts a
-        // kick-wall collider.  This matches the original Vector-Pinball approach
-        // (Box2D handleCollision) and fires reliably regardless of ball speed.
-        // Kick direction is always the precomputed interior_normal so the ball
-        // is pushed away from the pocket and into the field.
+        // Originally detected via Rapier's CollisionEvent::Started, matching
+        // Vector-Pinball's Box2D handleCollision approach — but that only
+        // reliably fires on a square, fairly fast hit. A slingshot is almost
+        // always brushed at a shallow/glancing angle as the ball rolls past
+        // (not hit head-on), and at that angle CollisionEvent::Started often
+        // never arrives at all against these thin wall colliders, so the
+        // ball would silently bounce off with no kick most of the time.
+        // Proximity detection (same pattern as bumpers/drop-targets below)
+        // can't miss a shallow graze the way a discrete collision event can:
+        // it just checks distance-to-segment every step, independent of
+        // approach angle or closing speed. Kick direction is always the
+        // precomputed interior_normal so the ball is pushed away from the
+        // pocket and into the field.
         {
-            let ball_col = self.ball_collider;
-            // Drain all collision events queued during the step above.
-            let events: Vec<CollisionEvent> = {
-                let mut v = Vec::new();
-                while let Ok(e) = self.kick_evt_recv.try_recv() { v.push(e); }
-                v
-            };
             let mut hits: Vec<(usize, f32, f32)> = Vec::new();
-            for event in events {
-                if let CollisionEvent::Started(h1, h2, _) = event {
-                    let other = match ball_col {
-                        Some(bc) if bc == h1 => h2,
-                        Some(bc) if bc == h2 => h1,
-                        _ => continue,
-                    };
-                    if let Some(ki) = self.kick_walls.iter().position(|kw| {
-                        kw.active && kw.debounce == 0 && kw.collider_handle == other
-                    }) {
-                        let kw = &self.kick_walls[ki];
-                        hits.push((ki, kw.interior_normal[0], kw.interior_normal[1]));
+            if let Some(ball_h) = self.ball_handle {
+                if let Some(ball_body) = self.bodies.get(ball_h) {
+                    let bp = *ball_body.translation();
+                    for (i, kw) in self.kick_walls.iter().enumerate() {
+                        if !kw.active || kw.debounce > 0 { continue; }
+                        let (dist, _, _) = Self::point_to_segment_dist(bp.x, bp.y, kw.x1, kw.y1, kw.x2, kw.y2);
+                        if dist < self.ball_radius + KICK_WALL_TOUCH_MARGIN {
+                            hits.push((i, kw.interior_normal[0], kw.interior_normal[1]));
+                        }
                     }
                 }
             }
@@ -1881,6 +1866,110 @@ mod award_ladder_tests {
         world.park_ball();
         assert_eq!(world.bumpers[gi].ladder_rung, 0, "a new ball resets the ladder to its first rung");
         assert!(!world.bumpers[gi].super_mode_triggered, "a new ball lets the trigger fire again");
+    }
+}
+
+#[cfg(test)]
+mod kick_wall_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    // Regression coverage for a real bug: kick-walls used to detect hits via
+    // Rapier's CollisionEvent::Started, which only reliably fires on a
+    // square, fairly fast hit. A slingshot is almost always brushed at a
+    // shallow/glancing angle as the ball rolls past (not hit head-on), and
+    // at that angle the event frequently never arrived at all against these
+    // thin wall colliders — confirmed empirically: 0/8 glancing trials at
+    // low-to-moderate speed fired before the fix (event-based), vs the
+    // proximity-based detection below, which fires on every trial.
+    #[test]
+    fn slingshot_fires_on_a_glancing_hit_not_just_a_square_one() {
+        let table = load_table(1).unwrap();
+
+        // Element 31 on table 1: the left slingshot kick-wall.
+        let (x1, y1, x2, y2) = (3.2_f32, 8.77_f32, 5.7_f32, 4.43_f32);
+        let dx = x2 - x1;
+        let dy = y2 - y1;
+        let len = (dx * dx + dy * dy).sqrt();
+        let (tx, ty) = (dx / len, dy / len); // along the wall's length
+
+        // Read the engine's own interior_normal (guaranteed to point away
+        // from the pocket, into the field — the same direction the kick
+        // impulse uses) rather than re-deriving it and risking a sign error.
+        let probe = PhysicsWorld::from_table(&table);
+        let ki = probe.kick_walls.iter()
+            .position(|kw| (kw.x1 - x1).abs() < 0.01 && (kw.y1 - y1).abs() < 0.01)
+            .expect("table 1 element 31 should be a kick-wall");
+        let [inx, iny] = probe.kick_walls[ki].interior_normal;
+        let input = InputState::default();
+
+        let fire = |vx: f32, vy: f32, start: [f32; 2]| -> bool {
+            let mut world = PhysicsWorld::from_table(&table);
+            let ball_h = world.ball_handle.unwrap();
+            {
+                let body = world.bodies.get_mut(ball_h).unwrap();
+                body.set_translation(vector![start[0], start[1]], true);
+                body.set_linvel(vector![vx, vy], true);
+                body.set_gravity_scale(0.0, true);
+            }
+            let mut fired = false;
+            for _ in 0..90 {
+                world.step(1.0 / 60.0, &input);
+                if !world.drain_score_events().is_empty() { fired = true; }
+            }
+            fired
+        };
+
+        // Square hit, approaching head-on from the field side — was already reliable.
+        let mid = [(x1 + x2) / 2.0 + inx * 1.5, (y1 + y2) / 2.0 + iny * 1.5];
+        assert!(fire(-inx * 6.0, -iny * 6.0, mid), "a direct perpendicular hit should always kick");
+
+        // Glancing hit at realistic rolling speed: mostly sliding along the
+        // wall's length (like a ball rolling down the guide rail into the
+        // pocket), with only a small component closing the remaining gap.
+        // Starts mid-segment (35% along), safely clear of the adjacent
+        // guide walls that form the rest of the pocket near each end. This
+        // is the shape of a normal slingshot hit, and is what the old
+        // event-based detection missed entirely (0/8 fired below the fix).
+        let seg_t = 0.35;
+        let (segx, segy) = (x1 + seg_t * dx, y1 + seg_t * dy);
+        let graze_start = [segx + inx * 0.6, segy + iny * 0.6];
+        for speed in [4.0_f32, 6.0, 8.0] {
+            for graze in [0.05_f32, 0.1, 0.2, 0.3] {
+                let vx = tx * speed - inx * speed * graze;
+                let vy = ty * speed - iny * speed * graze;
+                assert!(fire(vx, vy, graze_start),
+                    "glancing hit at speed={speed} graze={graze} should still kick");
+            }
+        }
+    }
+
+    #[test]
+    fn ball_saver_still_retracts_on_contact_with_proximity_detection() {
+        let table = load_table(1).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        let ki = world.kick_walls.iter().position(|kw| kw.retract_when_hit)
+            .expect("table 1 should have at least one retract-when-hit ball-saver");
+        assert!(world.kick_walls[ki].active, "starts active");
+
+        let (mx, my) = ((world.kick_walls[ki].x1 + world.kick_walls[ki].x2) / 2.0,
+                         (world.kick_walls[ki].y1 + world.kick_walls[ki].y2) / 2.0);
+        let [inx, iny] = world.kick_walls[ki].interior_normal;
+        let ball_h = world.ball_handle.unwrap();
+        {
+            let body = world.bodies.get_mut(ball_h).unwrap();
+            body.set_translation(vector![mx + inx * 1.0, my + iny * 1.0], true);
+            body.set_linvel(vector![-inx * 5.0, -iny * 5.0], true);
+            body.set_gravity_scale(0.0, true);
+        }
+        let input = InputState::default();
+        for _ in 0..60 {
+            world.step(1.0 / 60.0, &input);
+        }
+        assert!(!world.kick_walls[ki].active, "ball-saver retracts (deactivates) once hit");
+
+        world.park_ball();
+        assert!(world.kick_walls[ki].active, "park_ball reactivates it for the next ball");
     }
 }
 
