@@ -182,7 +182,7 @@
     },
 
     {
-      "class": "BumperElement", "id": "DemonHead", "color": [192, 50, 33], "outerColor": [237, 130, 130],
+      "class": "BumperElement", "id": "GhoulSkull", "color": [192, 50, 33], "outerColor": [237, 130, 130],
       "position": [12.6, 20.5], "radius": "1.0", "outerRadius": "1.4", "kick": "3", "score": 25000
     },
 
@@ -226,7 +226,7 @@
   ],
 
   "letterAwards": [
-    { "word": "MAD", "shots": ["DemonHead", "CycloneRamp", "SkyrideRamp"], "score": 10000 },
+    { "word": "MAD", "shots": ["GhoulSkull", "CycloneRamp", "SkyrideRamp"], "score": 10000 },
     { "word": "CRAZY", "shots": ["LeftOrbit", "RightOrbit", "LeftOutlane", "RightOutlane", "CenterPost"], "score": 20000 },
     { "word": "PARTY", "shots": ["LeftSinkhole", "Tunnel", "Arcade", "HiddenEntrance", "DuckTargets"], "score": 30000 }
   ]

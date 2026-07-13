@@ -1643,7 +1643,7 @@ mod letter_award_tests {
         assert_eq!(world.letter_groups.len(), 3, "Party Land should define MAD/CRAZY/PARTY");
 
         let mad = world.letter_groups.iter().position(|g| g.word == "MAD").unwrap();
-        for id in ["DemonHead", "CycloneRamp", "SkyrideRamp"] {
+        for id in ["GhoulSkull", "CycloneRamp", "SkyrideRamp"] {
             PhysicsWorld::record_shot(&mut world.letter_groups, id);
         }
         assert!(world.letter_groups[mad].lit.iter().all(|&l| l), "all three MAD shots were hit");
