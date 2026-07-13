@@ -183,7 +183,8 @@
 
     {
       "class": "BumperElement", "id": "GhoulSkull", "color": [192, 50, 33], "outerColor": [237, 130, 130],
-      "position": [12.6, 20.5], "radius": "1.0", "outerRadius": "1.4", "kick": "3", "score": 25000
+      "position": [12.6, 20.5], "radius": "1.0", "outerRadius": "1.4", "kick": "3",
+      "awardLadder": [5000, 10000, 20000, 35000, 50000]
     },
 
     { "class": "WallElement", "color": [192, 50, 33], "position": [6.1, 23.0, 6.4, 22.3] },

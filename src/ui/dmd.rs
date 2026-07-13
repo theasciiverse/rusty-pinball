@@ -58,6 +58,9 @@ pub fn draw_dmd(frame: &mut Frame, area: Rect, game: &GameState, snap: &FieldSna
     if !snap.letter_groups.is_empty() {
         centre_raw.push(letter_awards_line(snap));
     }
+    if let Some(line) = award_ladder_line(snap) {
+        centre_raw.push(line);
+    }
     let centre_lines = dot_pad_lines(centre_raw, cols[1].width, inner.height, dot_style);
     frame.render_widget(Paragraph::new(centre_lines), cols[1]);
 
@@ -134,6 +137,22 @@ fn letter_awards_line(snap: &FieldSnapshot) -> Line<'static> {
         }
     }
     Line::from(spans)
+}
+
+/// "AWARD  35,000" for the first bumper carrying an award ladder (there's
+/// only ever one on a table today, but this doesn't assume it), bright
+/// yellow while lit (just hit — the value shown is already the *next* rung).
+fn award_ladder_line(snap: &FieldSnapshot) -> Option<Line<'static>> {
+    let bump = snap.bumpers.iter().find(|b| b.next_award.is_some())?;
+    let value_style = if bump.lit {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::LightYellow)
+    };
+    Some(Line::from(vec![
+        Span::styled("AWARD  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format_score(bump.next_award.unwrap()), value_style),
+    ]))
 }
 
 fn format_score(s: u64) -> String {

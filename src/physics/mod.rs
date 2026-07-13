@@ -61,6 +61,9 @@ pub struct BumperSnapshot {
     pub label: String,
     pub color: Option<(u8, u8, u8)>,
     pub outer_color: Option<(u8, u8, u8)>,
+    /// Some(value) when this bumper has an award ladder — the points the
+    /// *next* hit will award (the currently-armed rung).
+    pub next_award: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +153,9 @@ struct BumperInfo {
     color: Option<(u8, u8, u8)>,
     outer_color: Option<(u8, u8, u8)>,
     shot_id: Option<String>,
+    // Empty = no award ladder; use the flat `score` field above unchanged.
+    award_ladder: Vec<u64>,
+    ladder_rung: usize,
 }
 
 // Slingshot / kicker wall: a WallElement with a non-zero kick value.
@@ -644,6 +650,8 @@ impl PhysicsWorld {
             score: b.score.unwrap_or(100),
             kick_force: b.kick.unwrap_or(8.0),
             lit_ticks: 0,
+            award_ladder: b.award_ladder.clone().unwrap_or_default(),
+            ladder_rung: 0,
             label,
             color: parse_color(&b.color),
             outer_color: parse_color(&b.outer_color),
@@ -981,7 +989,13 @@ impl PhysicsWorld {
             }
             for (i, nx, ny) in hits {
                 self.bumpers[i].lit_ticks = BUMPER_LIT_TICKS;
-                self.score_events.borrow_mut().push(self.bumpers[i].score);
+                let bump = &mut self.bumpers[i];
+                if bump.award_ladder.is_empty() {
+                    self.score_events.borrow_mut().push(bump.score);
+                } else {
+                    self.score_events.borrow_mut().push(bump.award_ladder[bump.ladder_rung]);
+                    bump.ladder_rung = (bump.ladder_rung + 1).min(bump.award_ladder.len() - 1);
+                }
                 self.sound_events.borrow_mut().push(PhysicsSound::BumperHit);
                 Self::record_shot_opt(&mut self.letter_groups, &self.bumpers[i].shot_id);
                 let kick = self.bumpers[i].kick_force;
@@ -1396,7 +1410,8 @@ impl PhysicsWorld {
 
     /// Freeze the ball at the launch position with gravity off so it appears
     /// waiting in the shooter lane between balls.  Also reactivates any
-    /// retract-when-hit walls (ball savers) for the new ball.
+    /// retract-when-hit walls (ball savers) and resets any bumper award
+    /// ladders to their first rung for the new ball.
     pub fn park_ball(&mut self) {
         let [lx, ly] = self.launch_pos;
         if let Some(h) = self.ball_handle {
@@ -1431,6 +1446,10 @@ impl PhysicsWorld {
                 }
             }
         }
+        // Reset award-ladder bumpers to their first rung for the new ball.
+        for bump in &mut self.bumpers {
+            bump.ladder_rung = 0;
+        }
     }
 
     pub fn field_height(&self) -> f32 { self.field_height }
@@ -1461,6 +1480,7 @@ impl PhysicsWorld {
             label: b.label.clone(),
             color: b.color,
             outer_color: b.outer_color,
+            next_award: (!b.award_ladder.is_empty()).then(|| b.award_ladder[b.ladder_rung]),
         }).collect();
 
         let kick_walls = self.kick_walls.iter()
@@ -1628,6 +1648,55 @@ mod all_tables_smoke {
                 assert!(raw.is_finite(), "table{n}: flipper angle is not finite: {raw}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod award_ladder_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    #[test]
+    fn ghoul_skull_climbs_the_ladder_then_holds_and_resets_on_new_ball() {
+        let table = load_table(9).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        let gi = world.bumpers.iter().position(|b| b.shot_id.as_deref() == Some("GhoulSkull"))
+            .expect("Party Land should have a GhoulSkull bumper");
+        assert_eq!(world.bumpers[gi].award_ladder, vec![5_000, 10_000, 20_000, 35_000, 50_000]);
+
+        // Park the ball directly on the bumper, motionless, so it re-triggers
+        // every time the hit debounce (BUMPER_LIT_TICKS) expires. Re-pinned
+        // every round below since each hit's kick impulse shoves it away.
+        let [bx, by] = world.bumpers[gi].position;
+        let ball_h = world.ball_handle.unwrap();
+
+        let input = InputState::default();
+        let mut hits = Vec::new();
+        for _ in 0..6 {
+            let body = world.bodies.get_mut(ball_h).unwrap();
+            body.set_translation(vector![bx, by], true);
+            body.set_linvel(vector![0.0, 0.0], true);
+            body.set_gravity_scale(0.0, true);
+
+            // Step until exactly one hit registers, rather than a fixed tick
+            // count — the debounce (BUMPER_LIT_TICKS) can otherwise let a
+            // second hit sneak in on the same round.
+            loop {
+                world.step(1.0 / 60.0, &input);
+                let evs = world.drain_score_events();
+                if let Some(&pts) = evs.first() {
+                    hits.push(pts);
+                    break;
+                }
+            }
+        }
+
+        assert_eq!(hits, vec![5_000, 10_000, 20_000, 35_000, 50_000, 50_000],
+            "ladder should climb rung by rung then hold at the top, got {hits:?}");
+        assert_eq!(world.bumpers[gi].ladder_rung, 4, "rung stays pinned at the last index");
+
+        world.park_ball();
+        assert_eq!(world.bumpers[gi].ladder_rung, 0, "a new ball resets the ladder to its first rung");
     }
 }
 

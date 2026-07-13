@@ -345,6 +345,15 @@ pub struct BumperDef {
     pub outer_color: Option<serde_json::Value>,
 
     pub score: Option<u64>,
+
+    /// Not part of Vector-Pinball's format: an Asciiverse-original extension
+    /// (currently only Party Land's Ghoul Skull) for an "advance the award"
+    /// bumper. When present, each hit awards `award_ladder[rung]` instead of
+    /// the flat `score` above, then advances `rung` (capping at the last
+    /// entry, where it holds for the rest of the ball). Resets to the first
+    /// rung on every new ball.
+    #[serde(rename = "awardLadder", default)]
+    pub award_ladder: Option<Vec<u64>>,
 }
 
 // ---------------------------------------------------------------------------
