@@ -174,12 +174,27 @@ pub struct TableDef {
     /// when all letters are lit, then resetting for replay.
     #[serde(rename = "letterAwards", default)]
     pub letter_awards: Vec<LetterAwardDef>,
+
+    /// Not part of Vector-Pinball's format: an Asciiverse-original extension
+    /// (currently only table 9 / Party Land). Lights once every word in
+    /// `letter_awards` has been completed at least once since the ball
+    /// started; the next hit on `shot` then collects `score` and un-lights
+    /// it. Requires `letter_awards` to be non-empty to ever light.
+    #[serde(default)]
+    pub jackpot: Option<JackpotDef>,
 }
 
 impl TableDef {
     pub fn ball_radius(&self) -> f32 { self.ball_radius.unwrap_or(0.5) }
     pub fn gravity_magnitude(&self) -> f32 { self.gravity.unwrap_or(4.0) }
     pub fn num_balls(&self) -> u8 { self.numballs.unwrap_or(3) }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct JackpotDef {
+    /// Element `id` of the shot that collects the jackpot once lit.
+    pub shot: String,
+    pub score: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

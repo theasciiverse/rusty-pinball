@@ -61,6 +61,9 @@ pub fn draw_dmd(frame: &mut Frame, area: Rect, game: &GameState, snap: &FieldSna
     if let Some(line) = award_ladder_line(snap) {
         centre_raw.push(line);
     }
+    if let Some(lit) = snap.jackpot_lit {
+        centre_raw.push(jackpot_line(lit));
+    }
     let centre_lines = dot_pad_lines(centre_raw, cols[1].width, inner.height, dot_style);
     frame.render_widget(Paragraph::new(centre_lines), cols[1]);
 
@@ -153,6 +156,16 @@ fn award_ladder_line(snap: &FieldSnapshot) -> Option<Line<'static>> {
         Span::styled("AWARD  ", Style::default().fg(Color::DarkGray)),
         Span::styled(format_score(bump.next_award.unwrap()), value_style),
     ]))
+}
+
+/// "JACKPOT" dim when unearned, bright magenta and bold once lit.
+fn jackpot_line(lit: bool) -> Line<'static> {
+    let style = if lit {
+        Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    Line::from(Span::styled("JACKPOT", style))
 }
 
 fn format_score(s: u64) -> String {

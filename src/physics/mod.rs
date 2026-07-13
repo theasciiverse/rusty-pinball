@@ -110,6 +110,8 @@ pub struct FieldSnapshot {
     pub rollover_groups: Vec<RolloverGroupSnapshot>,
     pub spinners: Vec<SpinnerSnapshot>,
     pub letter_groups: Vec<LetterGroupSnapshot>,
+    /// None = table has no jackpot; Some(lit) once one's configured.
+    pub jackpot_lit: Option<bool>,
     pub field_width: f32,
     pub field_height: f32,
     pub ball_layer: u8,
@@ -252,6 +254,19 @@ struct LetterGroupInfo {
     score: u64,
     // >0 while the "word complete" flash animation is running; 0 = idle.
     flash_ticks: u8,
+    // True once this word has been completed at least once since the ball
+    // started — independent of `lit`, which resets after every completion
+    // so the word can be spelled again. Feeds the jackpot's light condition.
+    completed_since_reset: bool,
+}
+
+// A shot that lights once every letter-award word has been completed at
+// least once this ball; the next hit on it then collects `score` and
+// un-lights. Not part of Vector-Pinball's format — see `JackpotDef`.
+struct JackpotInfo {
+    shot_id: String,
+    score: u64,
+    lit: bool,
 }
 
 const BUMPER_LIT_TICKS:   u8  = 6;
@@ -332,6 +347,7 @@ pub struct PhysicsWorld {
     rollover_groups:    Vec<RolloverGroupInfo>,
     spinners:           Vec<SpinnerInfo>,
     letter_groups:      Vec<LetterGroupInfo>,
+    jackpot:            Option<JackpotInfo>,
 
     // Collision-event channel: pipeline writes Started/Stopped events here.
     kick_evt_send: rapier2d::crossbeam::channel::Sender<CollisionEvent>,
@@ -523,7 +539,14 @@ impl PhysicsWorld {
             shot_ids: la.shots.clone(),
             score:    la.score.unwrap_or(0),
             flash_ticks: 0,
+            completed_since_reset: false,
         }).collect();
+
+        let jackpot = table.jackpot.as_ref().map(|j| JackpotInfo {
+            shot_id: j.shot.clone(),
+            score:   j.score,
+            lit:     false,
+        });
 
         PhysicsWorld {
             bodies,
@@ -549,6 +572,7 @@ impl PhysicsWorld {
             rollover_groups,
             spinners,
             letter_groups,
+            jackpot,
             layer_sensors,
             ball_layer: 0,
             score_events: RefCell::new(Vec::new()),
@@ -1004,7 +1028,9 @@ impl PhysicsWorld {
                     bump.ladder_rung = (bump.ladder_rung + 1).min(bump.award_ladder.len() - 1);
                 }
                 self.sound_events.borrow_mut().push(PhysicsSound::BumperHit);
-                Self::record_shot_opt(&mut self.letter_groups, &self.bumpers[i].shot_id);
+                if let Some(pts) = Self::record_shot_opt(&mut self.letter_groups, &mut self.jackpot, &self.bumpers[i].shot_id) {
+                    self.score_events.borrow_mut().push(pts);
+                }
                 let kick = self.bumpers[i].kick_force;
                 if let Some(ball_h) = self.ball_handle {
                     if let Some(body) = self.bodies.get_mut(ball_h) {
@@ -1064,7 +1090,9 @@ impl PhysicsWorld {
                 if self.kick_walls[i].score > 0 {
                     self.score_events.borrow_mut().push(self.kick_walls[i].score);
                 }
-                Self::record_shot_opt(&mut self.letter_groups, &self.kick_walls[i].shot_id);
+                if let Some(pts) = Self::record_shot_opt(&mut self.letter_groups, &mut self.jackpot, &self.kick_walls[i].shot_id) {
+                    self.score_events.borrow_mut().push(pts);
+                }
                 let kick = self.kick_walls[i].kick_force;
                 if let Some(ball_h) = self.ball_handle {
                     if let Some(body) = self.bodies.get_mut(ball_h) {
@@ -1112,7 +1140,9 @@ impl PhysicsWorld {
                 let all_clear = self.drop_target_groups[gi].targets.iter().all(|t| !t.active);
                 if all_clear {
                     self.score_events.borrow_mut().push(DROP_CLEAR_BONUS);
-                    Self::record_shot_opt(&mut self.letter_groups, &self.drop_target_groups[gi].shot_id);
+                    if let Some(pts) = Self::record_shot_opt(&mut self.letter_groups, &mut self.jackpot, &self.drop_target_groups[gi].shot_id) {
+                        self.score_events.borrow_mut().push(pts);
+                    }
                     for target in &mut self.drop_target_groups[gi].targets {
                         target.active = true;
                         if let Some(col) = self.colliders.get_mut(target.collider) {
@@ -1142,7 +1172,9 @@ impl PhysicsWorld {
                                 if pts > 0 {
                                     self.score_events.borrow_mut().push(pts);
                                 }
-                                Self::record_shot_opt(&mut self.letter_groups, &group.shot_id);
+                                if let Some(jp) = Self::record_shot_opt(&mut self.letter_groups, &mut self.jackpot, &group.shot_id) {
+                                    self.score_events.borrow_mut().push(jp);
+                                }
                             }
                         }
                     }
@@ -1206,7 +1238,9 @@ impl PhysicsWorld {
                                     (speed / sp.min_activation_speed) * sp.base_cycles_per_second;
                                 sp.seconds_to_next_cycle = 1.0 / sp.current_cycles_per_second;
                                 sp.status = SpinnerStatus::ActiveInvisible;
-                                Self::record_shot_opt(&mut self.letter_groups, &sp.shot_id);
+                                if let Some(pts) = Self::record_shot_opt(&mut self.letter_groups, &mut self.jackpot, &sp.shot_id) {
+                                    self.score_events.borrow_mut().push(pts);
+                                }
                             }
                         }
                     }
@@ -1241,7 +1275,19 @@ impl PhysicsWorld {
                 if group.score > 0 {
                     self.score_events.borrow_mut().push(group.score);
                 }
+                group.completed_since_reset = true;
                 for l in &mut group.lit { *l = false; }
+            }
+        }
+
+        // Jackpot lights once every letter-award word has been completed at
+        // least once this ball (requires at least one word to exist).
+        if let Some(jp) = &mut self.jackpot {
+            if !jp.lit
+                && !self.letter_groups.is_empty()
+                && self.letter_groups.iter().all(|g| g.completed_since_reset)
+            {
+                jp.lit = true;
             }
         }
 
@@ -1367,25 +1413,31 @@ impl PhysicsWorld {
         self.multiplier_events.borrow_mut().drain(..).collect()
     }
 
-    /// Lights the letter (in any letter-award word) whose shot id matches.
-    /// A word mid-completion-flash is left alone until it resets. Takes the
-    /// letter-groups slice directly rather than `&mut self` so it can be
-    /// called from inside a loop that already holds a disjoint borrow of
-    /// another `self` field (e.g. `for group in &mut self.rollover_groups`).
-    fn record_shot(letter_groups: &mut [LetterGroupInfo], id: &str) {
+    /// Lights the letter (in any letter-award word) whose shot id matches,
+    /// and collects the jackpot if it's lit and this shot is the one that
+    /// collects it — returning its score for the caller to apply. A word
+    /// mid-completion-flash is left alone until it resets. Takes the
+    /// letter-groups slice and jackpot directly rather than `&mut self` so
+    /// it can be called from inside a loop that already holds a disjoint
+    /// borrow of another `self` field (e.g. `for group in &mut self.rollover_groups`).
+    fn record_shot(letter_groups: &mut [LetterGroupInfo], jackpot: &mut Option<JackpotInfo>, id: &str) -> Option<u64> {
         for group in letter_groups {
             if group.flash_ticks > 0 { continue; }
             if let Some(pos) = group.shot_ids.iter().position(|s| s == id) {
                 group.lit[pos] = true;
             }
         }
+        let jp = jackpot.as_mut()?;
+        if jp.lit && jp.shot_id == id {
+            jp.lit = false;
+            return Some(jp.score);
+        }
+        None
     }
 
     /// Convenience wrapper for the common "shot id, if the element is named" case.
-    fn record_shot_opt(letter_groups: &mut [LetterGroupInfo], id: &Option<String>) {
-        if let Some(id) = id {
-            Self::record_shot(letter_groups, id);
-        }
+    fn record_shot_opt(letter_groups: &mut [LetterGroupInfo], jackpot: &mut Option<JackpotInfo>, id: &Option<String>) -> Option<u64> {
+        id.as_deref().and_then(|id| Self::record_shot(letter_groups, jackpot, id))
     }
 
     /// Advances a group's completion-flash timer: starts it (for
@@ -1424,8 +1476,9 @@ impl PhysicsWorld {
 
     /// Freeze the ball at the launch position with gravity off so it appears
     /// waiting in the shooter lane between balls.  Also reactivates any
-    /// retract-when-hit walls (ball savers) and resets any bumper award
-    /// ladders to their first rung for the new ball.
+    /// retract-when-hit walls (ball savers), resets any bumper award
+    /// ladders to their first rung, and un-lights the jackpot (and clears
+    /// letter-award completion progress toward it) for the new ball.
     pub fn park_ball(&mut self) {
         let [lx, ly] = self.launch_pos;
         if let Some(h) = self.ball_handle {
@@ -1463,6 +1516,14 @@ impl PhysicsWorld {
         // Reset award-ladder bumpers to their first rung for the new ball.
         for bump in &mut self.bumpers {
             bump.ladder_rung = 0;
+        }
+        // The jackpot must be earned fresh each ball: un-light it and clear
+        // every word's "completed this ball" flag.
+        if let Some(jp) = &mut self.jackpot {
+            jp.lit = false;
+        }
+        for group in &mut self.letter_groups {
+            group.completed_since_reset = false;
         }
     }
 
@@ -1556,6 +1617,7 @@ impl PhysicsWorld {
             rollover_groups,
             spinners,
             letter_groups,
+            jackpot_lit: self.jackpot.as_ref().map(|j| j.lit),
             field_width:  self.field_width,
             field_height: self.field_height,
             ball_layer: self.ball_layer,
@@ -1666,6 +1728,49 @@ mod all_tables_smoke {
 }
 
 #[cfg(test)]
+mod jackpot_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    #[test]
+    fn jackpot_lights_after_all_words_completed_then_collects_and_resets() {
+        let table = load_table(9).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        {
+            let jp = world.jackpot.as_ref().expect("Party Land should configure a jackpot");
+            assert_eq!(jp.shot_id, "GhoulSkull");
+            assert_eq!(jp.score, 100_000);
+            assert!(!jp.lit);
+        }
+
+        // Hitting the jackpot shot before it's lit shouldn't pay it out.
+        let pts = PhysicsWorld::record_shot(&mut world.letter_groups, &mut world.jackpot, "GhoulSkull");
+        assert_eq!(pts, None, "jackpot shouldn't pay out before it's lit");
+
+        // Mark every word completed (bypassing the full spell-it-out flow,
+        // already covered by letter_award_tests) and step once so the
+        // jackpot-lighting check re-evaluates.
+        for group in &mut world.letter_groups {
+            group.completed_since_reset = true;
+        }
+        let input = InputState::default();
+        world.step(1.0 / 60.0, &input);
+        assert!(world.jackpot.as_ref().unwrap().lit, "jackpot should light once every word has been completed");
+
+        // The same shot now collects it.
+        let pts = PhysicsWorld::record_shot(&mut world.letter_groups, &mut world.jackpot, "GhoulSkull");
+        assert_eq!(pts, Some(100_000));
+        assert!(!world.jackpot.as_ref().unwrap().lit, "collecting un-lights it");
+
+        // A new ball clears completion progress and (re-)un-lights the jackpot.
+        world.jackpot.as_mut().unwrap().lit = true; // force-relight to prove park_ball resets it too
+        world.park_ball();
+        assert!(!world.jackpot.as_ref().unwrap().lit, "a new ball must be earned again");
+        assert!(world.letter_groups.iter().all(|g| !g.completed_since_reset));
+    }
+}
+
+#[cfg(test)]
 mod multiplier_tests {
     use super::*;
     use crate::table::load_table;
@@ -1764,7 +1869,7 @@ mod letter_award_tests {
 
         let mad = world.letter_groups.iter().position(|g| g.word == "MAD").unwrap();
         for id in ["GhoulSkull", "CycloneRamp", "SkyrideRamp"] {
-            PhysicsWorld::record_shot(&mut world.letter_groups, id);
+            PhysicsWorld::record_shot(&mut world.letter_groups, &mut world.jackpot, id);
         }
         assert!(world.letter_groups[mad].lit.iter().all(|&l| l), "all three MAD shots were hit");
 
@@ -1782,7 +1887,7 @@ mod letter_award_tests {
     fn unrecognized_shot_id_lights_nothing() {
         let table = load_table(9).unwrap();
         let mut world = PhysicsWorld::from_table(&table);
-        PhysicsWorld::record_shot(&mut world.letter_groups, "NotARealShot");
+        PhysicsWorld::record_shot(&mut world.letter_groups, &mut world.jackpot, "NotARealShot");
         assert!(world.letter_groups.iter().all(|g| g.lit.iter().all(|&l| !l)));
     }
 }
