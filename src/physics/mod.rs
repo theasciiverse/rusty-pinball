@@ -106,10 +106,20 @@ pub struct FieldSnapshot {
     pub drop_targets: Vec<WallSnapshot>,
     pub rollover_groups: Vec<RolloverGroupSnapshot>,
     pub spinners: Vec<SpinnerSnapshot>,
+    pub letter_groups: Vec<LetterGroupSnapshot>,
     pub field_width: f32,
     pub field_height: f32,
     pub ball_layer: u8,
     pub ball_color: Option<(u8, u8, u8)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LetterGroupSnapshot {
+    pub word: String,
+    /// One entry per letter of `word`, in order.
+    pub lit: Vec<bool>,
+    /// True while the "word complete" celebration flash is running.
+    pub flashing: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +149,7 @@ struct BumperInfo {
     label: String,
     color: Option<(u8, u8, u8)>,
     outer_color: Option<(u8, u8, u8)>,
+    shot_id: Option<String>,
 }
 
 // Slingshot / kicker wall: a WallElement with a non-zero kick value.
@@ -160,6 +171,7 @@ struct KickWallInfo {
     interior_normal: [f32; 2],
     // Rapier collider handle — used for collision-event-based kick detection.
     collider_handle: ColliderHandle,
+    shot_id: Option<String>,
 }
 
 struct DropTargetInfo {
@@ -173,6 +185,7 @@ struct DropTargetGroupInfo {
     score:   u64,
     label:   String,
     color:   Option<(u8, u8, u8)>,
+    shot_id: Option<String>,
 }
 
 struct RolloverInfo {
@@ -191,6 +204,7 @@ struct RolloverGroupInfo {
     // >0 while the "all lit" flash animation is running; 0 = idle.
     flash_ticks:      u8,
     label:            String,
+    shot_id:          Option<String>,
 }
 
 struct LayerSensorInfo {
@@ -218,11 +232,24 @@ struct SpinnerInfo {
     current_cycles_per_second: f32,
     seconds_to_next_cycle: f32,
     label: String,
+    shot_id: Option<String>,
+}
+
+// A word (e.g. "MAD") spelled by hitting one named shot per letter, in any
+// order. Not part of Vector-Pinball's format — see `LetterAwardDef`.
+struct LetterGroupInfo {
+    word: String,
+    shot_ids: Vec<String>,
+    lit: Vec<bool>,
+    score: u64,
+    // >0 while the "word complete" flash animation is running; 0 = idle.
+    flash_ticks: u8,
 }
 
 const BUMPER_LIT_TICKS:   u8  = 6;
 const KICK_WALL_DEBOUNCE: u8  = 6;
 const DROP_CLEAR_BONUS:   u64 = 2_000;
+const LETTER_FLASH_TICKS: u8  = 32;
 
 // Flipper motor, matching Vector-Pinball's Box2D revolute-joint setup
 // (density 5.0, maxMotorTorque 1000). The joint's ForceBased motor model
@@ -296,6 +323,7 @@ pub struct PhysicsWorld {
     drop_target_groups: Vec<DropTargetGroupInfo>,
     rollover_groups:    Vec<RolloverGroupInfo>,
     spinners:           Vec<SpinnerInfo>,
+    letter_groups:      Vec<LetterGroupInfo>,
 
     // Collision-event channel: pipeline writes Started/Stopped events here.
     kick_evt_send: rapier2d::crossbeam::channel::Sender<CollisionEvent>,
@@ -385,6 +413,7 @@ impl PhysicsWorld {
                                 retract_pending: false,
                                 interior_normal,
                                 collider_handle: col,
+                                shot_id: w.id.clone(),
                             });
                             // Kick walls are rendered via the kick_walls path only;
                             // remove the segment add_wall just pushed to wall_segs.
@@ -477,6 +506,14 @@ impl PhysicsWorld {
         let (_force_send, _force_recv) =
             rapier2d::crossbeam::channel::unbounded::<rapier2d::geometry::ContactForceEvent>();
 
+        let letter_groups = table.letter_awards.iter().map(|la| LetterGroupInfo {
+            word:     la.word.clone(),
+            lit:      vec![false; la.shots.len()],
+            shot_ids: la.shots.clone(),
+            score:    la.score.unwrap_or(0),
+            flash_ticks: 0,
+        }).collect();
+
         PhysicsWorld {
             bodies,
             colliders,
@@ -500,6 +537,7 @@ impl PhysicsWorld {
             wall_segments: wall_segs,
             rollover_groups,
             spinners,
+            letter_groups,
             layer_sensors,
             ball_layer: 0,
             score_events: RefCell::new(Vec::new()),
@@ -609,6 +647,7 @@ impl PhysicsWorld {
             label,
             color: parse_color(&b.color),
             outer_color: parse_color(&b.outer_color),
+            shot_id: b.id.clone(),
         });
     }
 
@@ -754,7 +793,7 @@ impl PhysicsWorld {
             let ch = colliders.insert_with_parent(col, bh, bodies);
             DropTargetInfo { x1, y1, x2, y2, collider: ch, active: true }
         }).collect();
-        DropTargetGroupInfo { targets, score: d.score.unwrap_or(0), label, color: parse_color(&d.color) }
+        DropTargetGroupInfo { targets, score: d.score.unwrap_or(0), label, color: parse_color(&d.color), shot_id: d.id.clone() }
     }
 
     fn build_rollover_group(r: &RolloverGroupDef, label: String) -> RolloverGroupInfo {
@@ -776,6 +815,7 @@ impl PhysicsWorld {
             ignore_ball:      r.ignore_ball.unwrap_or(false),
             flash_ticks:      0,
             label,
+            shot_id: r.id.clone(),
         }
     }
 
@@ -792,6 +832,7 @@ impl PhysicsWorld {
             current_cycles_per_second: 0.0,
             seconds_to_next_cycle: 0.0,
             label,
+            shot_id: s.id.clone(),
         }
     }
 
@@ -942,6 +983,7 @@ impl PhysicsWorld {
                 self.bumpers[i].lit_ticks = BUMPER_LIT_TICKS;
                 self.score_events.borrow_mut().push(self.bumpers[i].score);
                 self.sound_events.borrow_mut().push(PhysicsSound::BumperHit);
+                Self::record_shot_opt(&mut self.letter_groups, &self.bumpers[i].shot_id);
                 let kick = self.bumpers[i].kick_force;
                 if let Some(ball_h) = self.ball_handle {
                     if let Some(body) = self.bodies.get_mut(ball_h) {
@@ -1001,6 +1043,7 @@ impl PhysicsWorld {
                 if self.kick_walls[i].score > 0 {
                     self.score_events.borrow_mut().push(self.kick_walls[i].score);
                 }
+                Self::record_shot_opt(&mut self.letter_groups, &self.kick_walls[i].shot_id);
                 let kick = self.kick_walls[i].kick_force;
                 if let Some(ball_h) = self.ball_handle {
                     if let Some(body) = self.bodies.get_mut(ball_h) {
@@ -1048,6 +1091,7 @@ impl PhysicsWorld {
                 let all_clear = self.drop_target_groups[gi].targets.iter().all(|t| !t.active);
                 if all_clear {
                     self.score_events.borrow_mut().push(DROP_CLEAR_BONUS);
+                    Self::record_shot_opt(&mut self.letter_groups, &self.drop_target_groups[gi].shot_id);
                     for target in &mut self.drop_target_groups[gi].targets {
                         target.active = true;
                         if let Some(col) = self.colliders.get_mut(target.collider) {
@@ -1077,29 +1121,20 @@ impl PhysicsWorld {
                                 if pts > 0 {
                                     self.score_events.borrow_mut().push(pts);
                                 }
+                                Self::record_shot_opt(&mut self.letter_groups, &group.shot_id);
                             }
                         }
                     }
                 }
 
-                // ── Group completion: start flash when all rollovers just became lit ──
-                if group.flash_ticks == 0
-                    && !group.rollovers.is_empty()
-                    && group.rollovers.iter().all(|rv| rv.lit)
-                {
-                    group.flash_ticks = ROLLOVER_FLASH_TICKS;
-                }
-
-                // ── Flash countdown → bonus + reset on completion ──
-                if group.flash_ticks > 0 {
-                    group.flash_ticks -= 1;
-                    if group.flash_ticks == 0 {
-                        if group.score > 0 {
-                            self.score_events.borrow_mut().push(group.score);
-                        }
-                        for rv in &mut group.rollovers {
-                            rv.lit = false;
-                        }
+                // ── Group completion: flash, then bonus + reset ──
+                let all_lit = !group.rollovers.is_empty() && group.rollovers.iter().all(|rv| rv.lit);
+                if Self::tick_completion_flash(&mut group.flash_ticks, ROLLOVER_FLASH_TICKS, all_lit) {
+                    if group.score > 0 {
+                        self.score_events.borrow_mut().push(group.score);
+                    }
+                    for rv in &mut group.rollovers {
+                        rv.lit = false;
                     }
                 }
 
@@ -1147,6 +1182,7 @@ impl PhysicsWorld {
                                     (speed / sp.min_activation_speed) * sp.base_cycles_per_second;
                                 sp.seconds_to_next_cycle = 1.0 / sp.current_cycles_per_second;
                                 sp.status = SpinnerStatus::ActiveInvisible;
+                                Self::record_shot_opt(&mut self.letter_groups, &sp.shot_id);
                             }
                         }
                     }
@@ -1170,6 +1206,18 @@ impl PhysicsWorld {
                         }
                     }
                 }
+            }
+        }
+
+        // Letter-award completion flash: shots were recorded into `lit` at
+        // their respective detection sites above via record_shot_opt().
+        for group in &mut self.letter_groups {
+            let all_lit = !group.lit.is_empty() && group.lit.iter().all(|&l| l);
+            if Self::tick_completion_flash(&mut group.flash_ticks, LETTER_FLASH_TICKS, all_lit) {
+                if group.score > 0 {
+                    self.score_events.borrow_mut().push(group.score);
+                }
+                for l in &mut group.lit { *l = false; }
             }
         }
 
@@ -1289,6 +1337,44 @@ impl PhysicsWorld {
 
     pub fn drain_score_events(&self) -> Vec<u64> {
         self.score_events.borrow_mut().drain(..).collect()
+    }
+
+    /// Lights the letter (in any letter-award word) whose shot id matches.
+    /// A word mid-completion-flash is left alone until it resets. Takes the
+    /// letter-groups slice directly rather than `&mut self` so it can be
+    /// called from inside a loop that already holds a disjoint borrow of
+    /// another `self` field (e.g. `for group in &mut self.rollover_groups`).
+    fn record_shot(letter_groups: &mut [LetterGroupInfo], id: &str) {
+        for group in letter_groups {
+            if group.flash_ticks > 0 { continue; }
+            if let Some(pos) = group.shot_ids.iter().position(|s| s == id) {
+                group.lit[pos] = true;
+            }
+        }
+    }
+
+    /// Convenience wrapper for the common "shot id, if the element is named" case.
+    fn record_shot_opt(letter_groups: &mut [LetterGroupInfo], id: &Option<String>) {
+        if let Some(id) = id {
+            Self::record_shot(letter_groups, id);
+        }
+    }
+
+    /// Advances a group's completion-flash timer: starts it (for
+    /// `flash_duration` ticks) the moment `all_lit` goes true while idle,
+    /// then counts down. Returns true on exactly the tick it reaches zero —
+    /// the caller's cue to award its bonus and reset. Shared by
+    /// `RolloverGroupInfo` and `LetterGroupInfo`, which both use this
+    /// flash-then-reset pattern for group completion.
+    fn tick_completion_flash(flash_ticks: &mut u8, flash_duration: u8, all_lit: bool) -> bool {
+        if *flash_ticks == 0 && all_lit {
+            *flash_ticks = flash_duration;
+        }
+        if *flash_ticks > 0 {
+            *flash_ticks -= 1;
+            return *flash_ticks == 0;
+        }
+        false
     }
 
     pub fn drain_sound_events(&self) -> Vec<PhysicsSound> {
@@ -1420,6 +1506,12 @@ impl PhysicsWorld {
             label: sp.label.clone(),
         }).collect();
 
+        let letter_groups = self.letter_groups.iter().map(|g| LetterGroupSnapshot {
+            word: g.word.clone(),
+            lit: g.lit.clone(),
+            flashing: g.flash_ticks > 0,
+        }).collect();
+
         FieldSnapshot {
             ball,
             walls: self.wall_segments.clone(),
@@ -1429,6 +1521,7 @@ impl PhysicsWorld {
             drop_targets,
             rollover_groups,
             spinners,
+            letter_groups,
             field_width:  self.field_width,
             field_height: self.field_height,
             ball_layer: self.ball_layer,
@@ -1535,6 +1628,42 @@ mod all_tables_smoke {
                 assert!(raw.is_finite(), "table{n}: flipper angle is not finite: {raw}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod letter_award_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    #[test]
+    fn party_land_letter_award_lights_completes_and_resets() {
+        let table = load_table(9).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        assert_eq!(world.letter_groups.len(), 3, "Party Land should define MAD/CRAZY/PARTY");
+
+        let mad = world.letter_groups.iter().position(|g| g.word == "MAD").unwrap();
+        for id in ["DemonHead", "CycloneRamp", "SkyrideRamp"] {
+            PhysicsWorld::record_shot(&mut world.letter_groups, id);
+        }
+        assert!(world.letter_groups[mad].lit.iter().all(|&l| l), "all three MAD shots were hit");
+
+        let input = InputState::default();
+        let mut events = Vec::new();
+        for _ in 0..=LETTER_FLASH_TICKS as usize {
+            world.step(1.0 / 60.0, &input);
+            events.extend(world.drain_score_events());
+        }
+        assert!(events.contains(&10_000), "MAD completion should award its configured 10000 pts, got {events:?}");
+        assert!(world.letter_groups[mad].lit.iter().all(|&l| !l), "letters reset after the word completes, ready to spell again");
+    }
+
+    #[test]
+    fn unrecognized_shot_id_lights_nothing() {
+        let table = load_table(9).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        PhysicsWorld::record_shot(&mut world.letter_groups, "NotARealShot");
+        assert!(world.letter_groups.iter().all(|g| g.lit.iter().all(|&l| !l)));
     }
 }
 

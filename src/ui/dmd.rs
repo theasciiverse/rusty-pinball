@@ -8,12 +8,12 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use crate::game::GameState;
+use crate::{game::GameState, physics::FieldSnapshot};
 
 const DOT: &str = "·";
 const DOT_COLOR: Color = Color::Rgb(80, 55, 20);
 
-pub fn draw_dmd(frame: &mut Frame, area: Rect, game: &GameState) {
+pub fn draw_dmd(frame: &mut Frame, area: Rect, game: &GameState, snap: &FieldSnapshot) {
     let dot_style   = Style::default().fg(DOT_COLOR);
     let score_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
     let hi_style    = Style::default().fg(Color::Cyan);
@@ -48,13 +48,17 @@ pub fn draw_dmd(frame: &mut Frame, area: Rect, game: &GameState) {
     ], cols[0].width, inner.height, dot_style);
     frame.render_widget(Paragraph::new(left_lines), cols[0]);
 
-    // ── Centre column: ball indicators ─────────────────────────────────────
-    let centre_lines = dot_pad_lines(vec![
+    // ── Centre column: ball indicators, plus letter-award progress (table 9) ──
+    let mut centre_raw = vec![
         Line::from(vec![
             Span::styled("BALLS  ", label_style),
             Span::styled(ball_indicator(game.balls_remaining), Style::default().fg(Color::Red)),
         ]),
-    ], cols[1].width, inner.height, dot_style);
+    ];
+    if !snap.letter_groups.is_empty() {
+        centre_raw.push(letter_awards_line(snap));
+    }
+    let centre_lines = dot_pad_lines(centre_raw, cols[1].width, inner.height, dot_style);
     frame.render_widget(Paragraph::new(centre_lines), cols[1]);
 
     // ── Right column: status right-justified row 0, hint right-justified last row ──
@@ -107,6 +111,29 @@ fn dot_pad_lines<'a>(lines: Vec<Line<'a>>, width: u16, height: u16, dot_style: S
         out.push(Line::from(Span::styled(DOT.repeat(w), dot_style)));
     }
     out
+}
+
+/// One line of space-separated words, each letter dim when unlit, bright
+/// yellow when lit, bright magenta (fully lit / mid-celebration) when the
+/// word is flashing complete.
+fn letter_awards_line(snap: &FieldSnapshot) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (gi, group) in snap.letter_groups.iter().enumerate() {
+        if gi > 0 {
+            spans.push(Span::raw("  "));
+        }
+        for (ch, &lit) in group.word.chars().zip(group.lit.iter()) {
+            let style = if group.flashing {
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
+            } else if lit {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            spans.push(Span::styled(ch.to_string(), style));
+        }
+    }
+    Line::from(spans)
 }
 
 fn format_score(s: u64) -> String {

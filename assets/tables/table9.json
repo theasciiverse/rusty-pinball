@@ -223,5 +223,11 @@
         { "color": [80, 120, 220], "position": [11.3, 26.6] }
       ]
     }
+  ],
+
+  "letterAwards": [
+    { "word": "MAD", "shots": ["DemonHead", "CycloneRamp", "SkyrideRamp"], "score": 10000 },
+    { "word": "CRAZY", "shots": ["LeftOrbit", "RightOrbit", "LeftOutlane", "RightOutlane", "CenterPost"], "score": 20000 },
+    { "word": "PARTY", "shots": ["LeftSinkhole", "Tunnel", "Arcade", "HiddenEntrance", "DuckTargets"], "score": 30000 }
   ]
 }

@@ -9,7 +9,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
 };
 
-use crate::{game::GameState, physics::PhysicsWorld, renderer::FieldRenderer};
+use crate::{game::GameState, physics::{FieldSnapshot, PhysicsWorld}, renderer::FieldRenderer};
 
 pub fn draw_menu(frame: &mut Frame, state: &menu::MenuState, sound_enabled: bool, high_scores: &[u64; 9]) {
     let area = frame.area();
@@ -37,8 +37,9 @@ pub fn draw(
         ])
         .split(area);
 
-    draw_play_area(frame, chunks[0], physics, renderer, camera_y, debug_ids);
-    dmd::draw_dmd(frame, chunks[1], game);
+    let snap = physics.snapshot();
+    draw_play_area(frame, chunks[0], &snap, renderer, camera_y, debug_ids);
+    dmd::draw_dmd(frame, chunks[1], game, &snap);
 
     if paused {
         draw_pause_overlay(frame, area);
@@ -83,7 +84,7 @@ fn draw_pause_overlay(frame: &mut Frame, area: Rect) {
 fn draw_play_area(
     frame: &mut Frame,
     area: Rect,
-    physics: &PhysicsWorld,
+    snap: &FieldSnapshot,
     renderer: &FieldRenderer,
     camera_y: f32,
     debug_ids: bool,
@@ -97,8 +98,7 @@ fn draw_play_area(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let snap     = physics.snapshot();
-    let rendered = renderer.render(&snap, camera_y, inner.width, inner.height, debug_ids);
+    let rendered = renderer.render(snap, camera_y, inner.width, inner.height, debug_ids);
 
     let cols = rendered.char_cols as usize;
     let rows = rendered.char_rows as usize;

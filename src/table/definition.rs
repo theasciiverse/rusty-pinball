@@ -167,12 +167,29 @@ pub struct TableDef {
     pub launch_dead_zone: Option<[f32; 4]>,
 
     pub elements: Vec<ElementDef>,
+
+    /// Not part of Vector-Pinball's format: an Asciiverse-original extension
+    /// (currently only table 9 / Party Land) that spells a word by lighting
+    /// one letter per named shot in `shots`, awarding `score` bonus points
+    /// when all letters are lit, then resetting for replay.
+    #[serde(rename = "letterAwards", default)]
+    pub letter_awards: Vec<LetterAwardDef>,
 }
 
 impl TableDef {
     pub fn ball_radius(&self) -> f32 { self.ball_radius.unwrap_or(0.5) }
     pub fn gravity_magnitude(&self) -> f32 { self.gravity.unwrap_or(4.0) }
     pub fn num_balls(&self) -> u8 { self.numballs.unwrap_or(3) }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LetterAwardDef {
+    pub word: String,
+    /// Element `id`s, in letter order; hitting the shot with a given id
+    /// lights the corresponding letter, in any order.
+    pub shots: Vec<String>,
+    #[serde(default)]
+    pub score: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
