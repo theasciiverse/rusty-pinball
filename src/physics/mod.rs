@@ -313,12 +313,12 @@ const ROLLOVER_FLASH_PHASES: u8 = 4;
 
 fn layer_group_for(layer: u8) -> InteractionGroups {
     let bit = Group::from_bits_truncate(1u32 << layer as u32);
-    InteractionGroups::new(bit, bit)
+    InteractionGroups::new(bit, bit, InteractionTestMode::And)
 }
 
 fn ball_groups_for(layer: u8) -> InteractionGroups {
     let bit = Group::from_bits_truncate(1u32 << layer as u32);
-    InteractionGroups::new(bit, Group::ALL)
+    InteractionGroups::new(bit, Group::ALL, InteractionTestMode::And)
 }
 
 #[derive(Clone)]
@@ -340,12 +340,12 @@ pub struct PhysicsWorld {
     // Rapier pipeline objects
     pipeline:      PhysicsPipeline,
     islands:       IslandManager,
-    broad_phase:   DefaultBroadPhase,
+    broad_phase:   BroadPhaseBvh,
     narrow_phase:  NarrowPhase,
     ccd_solver:    CCDSolver,
-    query_pipeline: QueryPipeline,
+    soft_bodies:   SoftBodySet,
 
-    gravity:       Vector<f32>,
+    gravity:       Vector,
 
     // Game objects
     ball_handle:        Option<RigidBodyHandle>,
@@ -409,7 +409,7 @@ impl PhysicsWorld {
 
         // Gravity points downward in rapier (negative y)
         let g = table.gravity_magnitude();
-        let gravity = vector![0.0_f32, -g];
+        let gravity = Vector::new(0.0_f32, -g);
 
         for (elem_idx, elem) in table.elements.iter().enumerate() {
             match elem {
@@ -490,7 +490,7 @@ impl PhysicsWorld {
 
         // Left and right outer boundary walls
         for (x, w) in [(0.0_f32, table.width), (table.width, table.width)] {
-            let rb = RigidBodyBuilder::fixed().translation(vector![x, table.height / 2.0]).build();
+            let rb = RigidBodyBuilder::fixed().translation(Vector::new(x, table.height / 2.0)).build();
             let h = bodies.insert(rb);
             let c = ColliderBuilder::cuboid(0.05, table.height / 2.0).build();
             colliders.insert_with_parent(c, h, &mut bodies);
@@ -506,7 +506,7 @@ impl PhysicsWorld {
             let cx     = (dz_xmin + dz_xmax) / 2.0;
             let half_w = (dz_xmax - dz_xmin) / 2.0;
             let bh = bodies.insert(
-                RigidBodyBuilder::fixed().translation(vector![cx, gate_y]).build()
+                RigidBodyBuilder::fixed().translation(Vector::new(cx, gate_y)).build()
             );
             let col = ColliderBuilder::cuboid(half_w, 0.05)
                 .collision_groups(InteractionGroups::none())  // disabled until ball clears
@@ -518,7 +518,7 @@ impl PhysicsWorld {
         // sits visibly in the shooter lane before the player fires it.
         let [lx, ly] = launch_pos;
         let idle_rb = RigidBodyBuilder::dynamic()
-            .translation(vector![lx, ly])
+            .translation(Vector::new(lx, ly))
             .gravity_scale(0.0)
             .build();
         let idle_h = bodies.insert(idle_rb);
@@ -556,10 +556,10 @@ impl PhysicsWorld {
             multibody_joints,
             pipeline:  PhysicsPipeline::new(),
             islands:   IslandManager::new(),
-            broad_phase: DefaultBroadPhase::new(),
+            broad_phase: BroadPhaseBvh::new(),
             narrow_phase: NarrowPhase::new(),
             ccd_solver: CCDSolver::new(),
-            query_pipeline: QueryPipeline::new(),
+            soft_bodies: SoftBodySet::new(),
             gravity,
             ball_handle,
             ball_collider,
@@ -618,7 +618,7 @@ impl PhysicsWorld {
         };
 
         let rb = RigidBodyBuilder::fixed()
-            .translation(vector![cx, cy])
+            .translation(Vector::new(cx, cy))
             .rotation(angle)
             .build();
         let h = bodies.insert(rb);
@@ -663,7 +663,7 @@ impl PhysicsWorld {
 
     fn add_bumper(b: &BumperDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, bumpers: &mut Vec<BumperInfo>, label: String) {
         let [x, y] = b.position;
-        let rb = RigidBodyBuilder::fixed().translation(vector![x, y]).build();
+        let rb = RigidBodyBuilder::fixed().translation(Vector::new(x, y)).build();
         let h = bodies.insert(rb);
         let col = ColliderBuilder::ball(b.radius)
             .restitution(0.8)
@@ -719,7 +719,7 @@ impl PhysicsWorld {
         // left it alone for a while. Flippers are few and need to always be
         // live, so the cost of never letting them sleep is negligible.
         let flipper_body = RigidBodyBuilder::dynamic()
-            .translation(vector![cx, cy])
+            .translation(Vector::new(cx, cy))
             .rotation(rot)
             .ccd_enabled(true)
             .can_sleep(false)
@@ -733,7 +733,7 @@ impl PhysicsWorld {
         colliders.insert_with_parent(col, h, bodies);
 
         let anchor_body = RigidBodyBuilder::fixed()
-            .translation(vector![f.position[0], f.position[1]])
+            .translation(Vector::new(f.position[0], f.position[1]))
             .build();
         let anchor_h = bodies.insert(anchor_body);
 
@@ -747,8 +747,8 @@ impl PhysicsWorld {
         // flipper_pose), so the limits and motor target need the same flip.
         let raw_limits = if is_right { [-max_angle, -min_angle] } else { [min_angle, max_angle] };
         let joint = RevoluteJointBuilder::new()
-            .local_anchor1(point![0.0, 0.0])
-            .local_anchor2(point![local_pivot_x, 0.0])
+            .local_anchor1(Vector::new(0.0, 0.0))
+            .local_anchor2(Vector::new(local_pivot_x, 0.0))
             .limits(raw_limits)
             .motor_model(MotorModel::ForceBased)
             .motor_max_force(FLIPPER_MAX_TORQUE)
@@ -819,7 +819,7 @@ impl PhysicsWorld {
             let angle = dy.atan2(dx);
             let bh = bodies.insert(
                 RigidBodyBuilder::fixed()
-                    .translation(vector![cx, cy])
+                    .translation(Vector::new(cx, cy))
                     .rotation(angle)
                     .build()
             );
@@ -897,16 +897,16 @@ impl PhysicsWorld {
 
         if let Some(h) = self.ball_handle {
             if let Some(body) = self.bodies.get_mut(h) {
-                body.set_translation(vector![lx, ly], true);
-                body.set_linvel(vector![actual_vx, actual_vy], true);
+                body.set_translation(Vector::new(lx, ly), true);
+                body.set_linvel(Vector::new(actual_vx, actual_vy), true);
                 body.set_angvel(0.0, true);
                 body.set_gravity_scale(1.0, true);
                 body.enable_ccd(true);
             }
         } else {
             let rb = RigidBodyBuilder::dynamic()
-                .translation(vector![lx, ly])
-                .linvel(vector![actual_vx, actual_vy])
+                .translation(Vector::new(lx, ly))
+                .linvel(Vector::new(actual_vx, actual_vy))
                 .ccd_enabled(true)
                 .build();
             let h = self.bodies.insert(rb);
@@ -952,7 +952,7 @@ impl PhysicsWorld {
             let should_engage = (fl.is_right && input.right_flipper)
                               || (!fl.is_right && input.left_flipper);
             let logical_target = if should_engage { fl.up_speed } else { -fl.down_speed };
-            if let Some(joint) = self.impulse_joints.get_mut(fl.joint_handle) {
+            if let Some(joint) = self.impulse_joints.get_mut(fl.joint_handle, true) {
                 joint.data.set_motor_velocity(
                     JointAxis::AngX,
                     Self::signed_motor_target(logical_target, fl.is_right),
@@ -965,7 +965,7 @@ impl PhysicsWorld {
                     let raw_angle = body.rotation().angle();
                     let logical_angle = if fl.is_right { -raw_angle } else { raw_angle };
                     if (fl.max_angle - logical_angle).abs() < FLIPPER_TOP_SLOWDOWN_ANGLE {
-                        if let Some(joint) = self.impulse_joints.get_mut(fl.joint_handle) {
+                        if let Some(joint) = self.impulse_joints.get_mut(fl.joint_handle, true) {
                             joint.data.set_motor_velocity(
                                 JointAxis::AngX,
                                 Self::signed_motor_target(FLIPPER_TOP_SLOWDOWN_SPEED, fl.is_right),
@@ -981,7 +981,7 @@ impl PhysicsWorld {
         params.dt = dt;
 
         self.pipeline.step(
-            &self.gravity,
+            self.gravity,
             &params,
             &mut self.islands,
             &mut self.broad_phase,
@@ -990,8 +990,8 @@ impl PhysicsWorld {
             &mut self.colliders,
             &mut self.impulse_joints,
             &mut self.multibody_joints,
+            &mut self.soft_bodies,
             &mut self.ccd_solver,
-            Some(&mut self.query_pipeline),
             &(),
             &(),
         );
@@ -1001,7 +1001,7 @@ impl PhysicsWorld {
             let mut hits: Vec<(usize, f32, f32)> = Vec::new(); // (index, nx, ny)
             if let Some(ball_h) = self.ball_handle {
                 if let Some(ball_body) = self.bodies.get(ball_h) {
-                    let bp = *ball_body.translation();
+                    let bp = ball_body.translation();
                     for (i, bump) in self.bumpers.iter().enumerate() {
                         if bump.lit_ticks > 0 { continue; }   // debounce while lit
                         let dx = bp.x - bump.position[0];
@@ -1035,7 +1035,7 @@ impl PhysicsWorld {
                 let kick = self.bumpers[i].kick_force;
                 if let Some(ball_h) = self.ball_handle {
                     if let Some(body) = self.bodies.get_mut(ball_h) {
-                        body.apply_impulse(vector![nx * kick, ny * kick], true);
+                        body.apply_impulse(Vector::new(nx * kick, ny * kick), true);
                     }
                 }
             }
@@ -1065,7 +1065,7 @@ impl PhysicsWorld {
             let mut hits: Vec<(usize, f32, f32)> = Vec::new();
             if let Some(ball_h) = self.ball_handle {
                 if let Some(ball_body) = self.bodies.get(ball_h) {
-                    let bp = *ball_body.translation();
+                    let bp = ball_body.translation();
                     for (i, kw) in self.kick_walls.iter().enumerate() {
                         if !kw.active || kw.debounce > 0 { continue; }
                         let (dist, _, _) = Self::point_to_segment_dist(bp.x, bp.y, kw.x1, kw.y1, kw.x2, kw.y2);
@@ -1095,7 +1095,7 @@ impl PhysicsWorld {
                 let kick = self.kick_walls[i].kick_force;
                 if let Some(ball_h) = self.ball_handle {
                     if let Some(body) = self.bodies.get_mut(ball_h) {
-                        body.apply_impulse(vector![nx * kick, ny * kick], true);
+                        body.apply_impulse(Vector::new(nx * kick, ny * kick), true);
                     }
                 }
             }
@@ -1111,7 +1111,7 @@ impl PhysicsWorld {
             let mut hits: Vec<(usize, usize)> = Vec::new();
             if let Some(ball_h) = self.ball_handle {
                 if let Some(ball_body) = self.bodies.get(ball_h) {
-                    let bp = *ball_body.translation();
+                    let bp = ball_body.translation();
                     for (gi, group) in self.drop_target_groups.iter().enumerate() {
                         for (ti, target) in group.targets.iter().enumerate() {
                             if !target.active { continue; }
@@ -1156,7 +1156,7 @@ impl PhysicsWorld {
         {
             let ball_pos = self.ball_handle
                 .and_then(|h| self.bodies.get(h))
-                .map(|b| *b.translation());
+                .map(|b| b.translation());
             for group in &mut self.rollover_groups {
                 // ── Ball activation (skip while flashing — group is mid-reset) ──
                 if !group.ignore_ball && group.flash_ticks == 0 {
@@ -1224,7 +1224,7 @@ impl PhysicsWorld {
         {
             let ball = self.ball_handle
                 .and_then(|h| self.bodies.get(h))
-                .map(|b| (*b.translation(), *b.linvel()));
+                .map(|b| (b.translation(), b.linvel()));
             for sp in &mut self.spinners {
                 if sp.status == SpinnerStatus::Inactive {
                     if let Some((pos, vel)) = ball {
@@ -1295,7 +1295,7 @@ impl PhysicsWorld {
         {
             let ball_pos = self.ball_handle
                 .and_then(|h| self.bodies.get(h))
-                .map(|b| *b.translation());
+                .map(|b| b.translation());
             if let Some(bp) = ball_pos {
                 let mut new_layer = self.ball_layer;
                 for sensor in &self.layer_sensors {
@@ -1365,10 +1365,10 @@ impl PhysicsWorld {
         (dist, nx, ny)
     }
 
-    pub fn ball_position(&self) -> Option<nalgebra::Vector2<f32>> {
+    pub fn ball_position(&self) -> Option<Vector> {
         let h = self.ball_handle?;
         let body = self.bodies.get(h)?;
-        Some(*body.translation())
+        Some(body.translation())
     }
 
     pub fn is_ball_drained(&self) -> bool {
@@ -1472,6 +1472,7 @@ impl PhysicsWorld {
                 &mut self.colliders,
                 &mut self.impulse_joints,
                 &mut self.multibody_joints,
+                &mut self.soft_bodies,
                 false,
             );
         }
@@ -1487,8 +1488,8 @@ impl PhysicsWorld {
         let [lx, ly] = self.launch_pos;
         if let Some(h) = self.ball_handle {
             if let Some(body) = self.bodies.get_mut(h) {
-                body.set_translation(vector![lx, ly], true);
-                body.set_linvel(vector![0.0, 0.0], true);
+                body.set_translation(Vector::new(lx, ly), true);
+                body.set_linvel(Vector::new(0.0, 0.0), true);
                 body.set_angvel(0.0, true);
                 body.set_gravity_scale(0.0, true);
             }
@@ -1549,7 +1550,7 @@ impl PhysicsWorld {
         let flippers: Vec<FlipperSnapshot> = self.flippers.iter().filter_map(|fl| {
             let body = self.bodies.get(fl.body_handle)?;
             let local_tip_x = if fl.is_right { -fl.half_len } else { fl.half_len };
-            let tip = body.position() * point![local_tip_x, 0.0];
+            let tip = body.position() * Vector::new(local_tip_x, 0.0);
             Some(FlipperSnapshot { x1: fl.pivot[0], y1: fl.pivot[1], x2: tip.x, y2: tip.y, label: fl.label.clone() })
         }).collect();
 
@@ -1650,8 +1651,8 @@ mod spinner_tests {
         assert!((sx - 1.26).abs() < 0.01 && (sy - 19.19).abs() < 0.01);
         let ball_h = world.ball_handle.expect("ball should exist");
         let body = world.bodies.get_mut(ball_h).unwrap();
-        body.set_translation(vector![sx, sy], true);
-        body.set_linvel(vector![0.0, 12.0], true); // well above default minActivationSpeed=4
+        body.set_translation(Vector::new(sx, sy), true);
+        body.set_linvel(Vector::new(0.0, 12.0), true); // well above default minActivationSpeed=4
         body.set_gravity_scale(0.0, true); // isolate spinner behavior from gravity/drain
 
         let input = InputState::default();
@@ -1685,8 +1686,8 @@ mod spinner_tests {
         let [sx, sy] = world.spinners[0].position;
         let ball_h = world.ball_handle.unwrap();
         let body = world.bodies.get_mut(ball_h).unwrap();
-        body.set_translation(vector![sx, sy], true);
-        body.set_linvel(vector![0.0, 1.0], true); // below minActivationSpeed=4
+        body.set_translation(Vector::new(sx, sy), true);
+        body.set_linvel(Vector::new(0.0, 1.0), true); // below minActivationSpeed=4
         body.set_gravity_scale(0.0, true);
 
         let input = InputState::default();
@@ -1837,8 +1838,8 @@ mod award_ladder_tests {
         let mut super_mode_events_per_hit = Vec::new();
         for _ in 0..6 {
             let body = world.bodies.get_mut(ball_h).unwrap();
-            body.set_translation(vector![bx, by], true);
-            body.set_linvel(vector![0.0, 0.0], true);
+            body.set_translation(Vector::new(bx, by), true);
+            body.set_linvel(Vector::new(0.0, 0.0), true);
             body.set_gravity_scale(0.0, true);
 
             // Step until exactly one hit registers, rather than a fixed tick
@@ -1908,8 +1909,8 @@ mod kick_wall_tests {
             let ball_h = world.ball_handle.unwrap();
             {
                 let body = world.bodies.get_mut(ball_h).unwrap();
-                body.set_translation(vector![start[0], start[1]], true);
-                body.set_linvel(vector![vx, vy], true);
+                body.set_translation(Vector::new(start[0], start[1]), true);
+                body.set_linvel(Vector::new(vx, vy), true);
                 body.set_gravity_scale(0.0, true);
             }
             let mut fired = false;
@@ -1958,8 +1959,8 @@ mod kick_wall_tests {
         let ball_h = world.ball_handle.unwrap();
         {
             let body = world.bodies.get_mut(ball_h).unwrap();
-            body.set_translation(vector![mx + inx * 1.0, my + iny * 1.0], true);
-            body.set_linvel(vector![-inx * 5.0, -iny * 5.0], true);
+            body.set_translation(Vector::new(mx + inx * 1.0, my + iny * 1.0), true);
+            body.set_linvel(Vector::new(-inx * 5.0, -iny * 5.0), true);
             body.set_gravity_scale(0.0, true);
         }
         let input = InputState::default();

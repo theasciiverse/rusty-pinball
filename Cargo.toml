@@ -14,8 +14,8 @@ ratatui    = "0.28"
 crossterm  = "0.27"
 
 # 2-D physics (Box2D equivalent)
-rapier2d   = { version = "0.22", features = ["default"] }
-nalgebra   = "0.33"
+rapier2d   = { version = "0.36", features = ["default"] }
+nalgebra   = "0.35"
 
 # Braille-pixel vector graphics
 drawille   = "0.2"
