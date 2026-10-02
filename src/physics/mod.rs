@@ -940,7 +940,7 @@ impl PhysicsWorld {
     }
 
     fn build_drop_target_group(d: &DropTargetGroupDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, label: String) -> DropTargetGroupInfo {
-        let targets = d.positions.iter().map(|&[x1, y1, x2, y2]| {
+        let targets = d.targets().iter().map(|&[x1, y1, x2, y2]| {
             let cx    = (x1 + x2) / 2.0;
             let cy    = (y1 + y2) / 2.0;
             let dx    = x2 - x1;
@@ -2951,6 +2951,66 @@ mod rotating_triangle_tests {
         for n in [1u8, 2, 3, 4, 6, 7, 8, 9] {
             let w = PhysicsWorld::from_table(&load_table(n).unwrap());
             assert!(w.rotating_triangles.is_empty() && w.moving_walls.is_empty(), "table {n}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod generated_drop_target_tests {
+    use super::*;
+    use crate::table::{load_table, ElementDef};
+
+    /// Table 3 describes its drop banks by wall, count and widths (no explicit
+    /// positions). They must come out with the right number of targets of the
+    /// right width, lying parallel to the wall at |gapFromWall| on the correct side.
+    #[test]
+    fn table_3_banks_are_generated_along_their_walls() {
+        let table = load_table(3).unwrap();
+        let mut seen = 0;
+        for elem in &table.elements {
+            let ElementDef::DropTargetGroupElement(d) = elem else { continue };
+            if !d.positions.is_empty() { continue; }
+            seen += 1;
+            let id = d.id.clone().unwrap();
+            let targets = d.targets();
+            assert_eq!(targets.len(), d.num_targets.unwrap() as usize, "{id}: target count");
+
+            let [sx, sy] = d.wall_start.unwrap();
+            let [ex, ey] = d.wall_end.unwrap();
+            let (wx, wy) = (ex - sx, ey - sy);
+            let wl = wx.hypot(wy);
+            let (ux, uy) = (wx / wl, wy / wl);           // along the wall
+            let (px, py) = (-uy, ux);                     // perpendicular (rotated +90 degrees)
+            let (gap, width) = (d.gap_from_wall.unwrap(), d.target_width.unwrap());
+            for (i, t) in targets.iter().enumerate() {
+                let len = (t[2] - t[0]).hypot(t[3] - t[1]);
+                assert!((len - width).abs() < 1e-3, "{id} target {i}: width {len}, expected {width}");
+                for (x, y) in [(t[0], t[1]), (t[2], t[3])] {
+                    let across = (x - sx) * px + (y - sy) * py;
+                    assert!((across - gap).abs() < 1e-3, "{id} target {i}: {across} from the wall line, expected {gap}");
+                }
+                let from_start = (t[0] - sx) * ux + (t[1] - sy) * uy;
+                let expected = d.start_distance_along_wall.unwrap() + i as f32 * (width + d.gap_between_targets.unwrap());
+                assert!((from_start - expected).abs() < 1e-3, "{id} target {i}: starts {from_start} along the wall, expected {expected}");
+            }
+        }
+        assert_eq!(seen, 4, "table 3 has four generated banks");
+
+        // And they exist in the world with targets in them.
+        let world = PhysicsWorld::from_table(&table);
+        let counts: Vec<usize> = world.drop_target_groups.iter().map(|g| g.targets.len()).collect();
+        assert_eq!(counts, vec![5, 2, 3, 3], "UpperMultiball, LowerMultiball, LeftSave, RightSave");
+    }
+
+    #[test]
+    fn explicit_positions_still_win() {
+        for n in [1u8, 4, 5, 6, 7, 8, 9] {
+            let table = load_table(n).unwrap();
+            for elem in &table.elements {
+                if let ElementDef::DropTargetGroupElement(d) = elem {
+                    if !d.positions.is_empty() { assert_eq!(d.targets(), d.positions, "table {n}"); }
+                }
+            }
         }
     }
 }

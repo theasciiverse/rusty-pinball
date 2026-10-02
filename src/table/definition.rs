@@ -490,6 +490,55 @@ pub struct DropTargetGroupDef {
     /// Each entry is [x1, y1, x2, y2] for one target segment
     #[serde(default, deserialize_with = "de_vec_xxyy")]
     pub positions: Vec<[f32; 4]>,
+
+    // Alternative to `positions` (used when it is empty or missing): lay
+    // `numTargets` targets along a wall, as in the original. See `targets()`.
+    #[serde(rename = "wallStart", default, deserialize_with = "de_xy_opt")]
+    pub wall_start: Option<[f32; 2]>,
+    /// Only gives the wall's direction.
+    #[serde(rename = "wallEnd", default, deserialize_with = "de_xy_opt")]
+    pub wall_end: Option<[f32; 2]>,
+    /// Perpendicular distance from the wall to the targets; negative flips sides.
+    #[serde(rename = "gapFromWall", default, deserialize_with = "de_numstr_opt")]
+    pub gap_from_wall: Option<f32>,
+    /// Distance from `wallStart` to the first target.
+    #[serde(rename = "startDistanceAlongWall", default, deserialize_with = "de_numstr_opt")]
+    pub start_distance_along_wall: Option<f32>,
+    #[serde(rename = "targetWidth", default, deserialize_with = "de_numstr_opt")]
+    pub target_width: Option<f32>,
+    #[serde(rename = "gapBetweenTargets", default, deserialize_with = "de_numstr_opt")]
+    pub gap_between_targets: Option<f32>,
+    #[serde(rename = "numTargets", default, deserialize_with = "de_numstr_opt")]
+    pub num_targets: Option<f32>,
+}
+
+impl DropTargetGroupDef {
+    /// The target segments [x1, y1, x2, y2]: the explicit `positions` if there
+    /// are any, otherwise generated along the wall exactly like the original's
+    /// DropTargetGroupElement (target i spans `start + i * (width + gap)` to
+    /// `+ width` along the wall, offset `gapFromWall` perpendicular to it).
+    pub fn targets(&self) -> Vec<[f32; 4]> {
+        if !self.positions.is_empty() {
+            return self.positions.clone();
+        }
+        let (Some([sx, sy]), Some([ex, ey])) = (self.wall_start, self.wall_end) else { return Vec::new() };
+        let n = self.num_targets.unwrap_or(0.0).max(0.0) as usize;
+        let wall_angle = (ey - sy).atan2(ex - sx);
+        let perp = wall_angle + std::f32::consts::FRAC_PI_2;
+        let gap = self.gap_from_wall.unwrap_or(0.0);
+        let (gx, gy) = (gap * perp.cos(), gap * perp.sin());
+        let width = self.target_width.unwrap_or(0.0);
+        let step = width + self.gap_between_targets.unwrap_or(0.0);
+        let start = self.start_distance_along_wall.unwrap_or(0.0);
+        (0..n).map(|i| {
+            let a0 = start + i as f32 * step;
+            let a1 = a0 + width;
+            [
+                sx + a0 * wall_angle.cos() + gx, sy + a0 * wall_angle.sin() + gy,
+                sx + a1 * wall_angle.cos() + gx, sy + a1 * wall_angle.sin() + gy,
+            ]
+        }).collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
