@@ -2803,7 +2803,7 @@ mod launch_barrier_tests {
             assert!(world.launch_barrier.as_ref().unwrap().active, "table {n}: closes at its sensor");
             let col = world.launch_barrier.as_ref().unwrap().collider;
             assert_eq!(world.colliders.get(col).unwrap().collision_groups(), InteractionGroups::all(), "table {n}: solid while closed");
-            assert_eq!(world.snapshot().walls.len(), world.wall_segments.len() + 1, "table {n}: drawn while closed");
+            assert_eq!(world.snapshot().walls.len(), world.wall_segments.len() + world.moving_walls.len() + 1, "table {n}: drawn while closed");
 
             let (ox, oy) = centre(open);
             place_ball(&mut world, ox, oy, 0.0, 0.0);
@@ -2816,7 +2816,7 @@ mod launch_barrier_tests {
             assert!(world.launch_barrier.as_ref().unwrap().active);
             world.park_ball();
             assert!(!world.launch_barrier.as_ref().unwrap().active, "table {n}: a new ball opens it again");
-            assert_eq!(world.snapshot().walls.len(), world.wall_segments.len(), "table {n}: not drawn when open");
+            assert_eq!(world.snapshot().walls.len(), world.wall_segments.len() + world.moving_walls.len(), "table {n}: not drawn when open");
         }
     }
 
