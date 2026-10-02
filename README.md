@@ -66,6 +66,12 @@ Running inside **tmux** is recommended for the best display experience.
 - Sound can be toggled on or off from the main menu without leaving it.
 - For the smoothest experience, run in a dedicated tmux pane or a full-screen terminal window.
 
+## Status against the original
+
+Tables 1 to 8 reproduce Vector Pinball's layouts and generic behavior, but not each table's own rules (multiball, ball locks,
+jackpots, lights): those live in per-table scripts we have not ported yet. [docs/ORIGINAL-PARITY.md](docs/ORIGINAL-PARITY.md) is
+the checklist of what is done and what is missing, table by table.
+
 ## Tables
 
 | # | Name |
