@@ -202,6 +202,17 @@ struct LaunchBarrierInfo {
 
 const LAUNCH_BARRIER_ID: &str = "LaunchBarrier";
 
+/// A wall a table script moves or retracts while playing (table 5's rotating
+/// triangle). Drawn from its live position; not part of the static wall list.
+struct MovingWallInfo {
+    id: String,
+    body: RigidBodyHandle,
+    collider: ColliderHandle,
+    x1: f32, y1: f32, x2: f32, y2: f32,
+    color: Option<(u8, u8, u8)>,
+    active: bool,
+}
+
 struct DropTargetInfo {
     x1: f32, y1: f32, x2: f32, y2: f32,
     collider: ColliderHandle,
@@ -415,6 +426,8 @@ pub struct PhysicsWorld {
     bumpers:            Vec<BumperInfo>,
     rotating_groups:    Vec<movers::RotatingGroup>,
     launch_barrier:     Option<LaunchBarrierInfo>,
+    moving_walls:       Vec<MovingWallInfo>,
+    rotating_triangles: Vec<movers::RotatingTriangle>,
     kick_walls:         Vec<KickWallInfo>,
     drop_target_groups: Vec<DropTargetGroupInfo>,
     rollover_groups:    Vec<RolloverGroupInfo>,
@@ -468,6 +481,7 @@ impl PhysicsWorld {
         let mut wall_segs          = Vec::new();
         let mut layer_sensors      = Vec::new();
         let mut launch_barrier: Option<LaunchBarrierInfo> = None;
+        let mut moving_walls: Vec<MovingWallInfo> = Vec::new();
         let (mut barrier_close_rect, mut barrier_open_rect) = (None, None);
 
         // Gravity points downward in rapier (negative y)
@@ -479,6 +493,17 @@ impl PhysicsWorld {
                 ElementDef::WallElement(w) => {
                     let label = label_for(elem_idx, &w.id);
                     let wall_col = Self::add_wall(w, &mut bodies, &mut colliders, &mut wall_segs, w.layer, Some(label.clone()), parse_color(&w.color));
+                    if let (Some(id), Some(col), Some([x1, y1, x2, y2])) = (w.id.as_deref(), wall_col, w.position) {
+                        if id.starts_with("TriangleWall") {
+                            if let Some(body) = colliders.get(col).and_then(|c| c.parent()) {
+                                wall_segs.pop();
+                                moving_walls.push(MovingWallInfo {
+                                    id: id.to_string(), body, collider: col,
+                                    x1, y1, x2, y2, color: parse_color(&w.color), active: true,
+                                });
+                            }
+                        }
+                    }
                     if w.id.as_deref() == Some(LAUNCH_BARRIER_ID) {
                         if let (Some(col), Some([x1, y1, x2, y2])) = (wall_col, w.position) {
                             // Starts open; drawn and solid only while closed.
@@ -656,6 +681,8 @@ impl PhysicsWorld {
             ball_color,
             flippers,
             rotating_groups: movers::build_rotating_groups(table, &bumpers_info),
+            rotating_triangles: movers::build_rotating_triangles(table, &moving_walls),
+            moving_walls,
             launch_barrier,
             bumpers: bumpers_info,
             kick_walls,
@@ -685,6 +712,7 @@ impl PhysicsWorld {
         // Put moving elements at their first-frame positions straight away,
         // as the original does on its first tick, so nothing jumps on frame one.
         movers::advance_rotating_groups(&mut world.rotating_groups, 0.0, &mut world.bumpers, &mut world.bodies);
+        movers::advance_rotating_triangles(&mut world.rotating_triangles, 0.0, &mut world.moving_walls, &mut world.bodies);
         world
     }
 
@@ -1110,6 +1138,7 @@ impl PhysicsWorld {
         // Moving table elements (orbiting bumpers etc.) advance in sim time,
         // after the physics step like the original's per-frame element ticks.
         movers::advance_rotating_groups(&mut self.rotating_groups, dt, &mut self.bumpers, &mut self.bodies);
+        movers::advance_rotating_triangles(&mut self.rotating_triangles, dt, &mut self.moving_walls, &mut self.bodies);
 
         // Launch barrier: closes once the ball passes its sensor, opens again
         // at the retract sensor (checked second, so it wins if they overlap).
@@ -1822,7 +1851,8 @@ impl PhysicsWorld {
 
         FieldSnapshot {
             ball,
-            walls: self.wall_segments.iter().cloned().chain(self.launch_barrier.iter().filter(|b| b.active).map(|b| WallSnapshot { x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2, layer: None, label: None, color: b.color })).collect(),
+            walls: self.wall_segments.iter().cloned().chain(self.moving_walls.iter().filter(|w| w.active).map(|w| WallSnapshot { x1: w.x1, y1: w.y1, x2: w.x2, y2: w.y2, layer: None, label: Some(w.id.clone()), color: w.color }))
+                .chain(self.launch_barrier.iter().filter(|b| b.active).map(|b| WallSnapshot { x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2, layer: None, label: None, color: b.color })).collect(),
             kick_walls,
             bumpers,
             flippers,
@@ -2840,6 +2870,87 @@ mod launch_barrier_tests {
                 if max_y > table.height - 1.2 { over += 1; }
             }
             assert!(over >= 16, "table {n}: only {over}/24 launches got over the top of the lane");
+        }
+    }
+}
+
+#[cfg(test)]
+mod rotating_triangle_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    fn wall<'a>(w: &'a PhysicsWorld, id: &str) -> &'a MovingWallInfo {
+        w.moving_walls.iter().find(|m| m.id == id).unwrap_or_else(|| panic!("no moving wall {id}"))
+    }
+
+    /// Table 5: an equilateral triangle (side 2) spins about (10, 18.86) at
+    /// 1 rad/s of sim time; its walls keep their length, their bodies sit at
+    /// the drawn midpoints, and the vertices stay on the circle.
+    #[test]
+    fn table_5_triangle_spins_as_a_rigid_equilateral_triangle() {
+        let table = load_table(5).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        assert_eq!(world.rotating_triangles.len(), 1);
+        assert_eq!(world.moving_walls.len(), 3);
+
+        let first_vertex = |w: &PhysicsWorld| { let m = wall(w, "TriangleWall1"); [m.x1, m.y1] };
+        let angle_of = |p: [f32; 2]| (p[1] - 18.86).atan2(p[0] - 10.0);
+        let start = angle_of(first_vertex(&world));
+        let input = InputState::default();
+        let frames = 40;
+        for _ in 0..frames { world.step_frame(0.033, &input); }
+        let sim_seconds = 0.033 * frames as f32 * table.time_ratio();
+
+        for id in ["TriangleWall1", "TriangleWall2", "TriangleWall3"] {
+            let m = wall(&world, id);
+            let len = (m.x2 - m.x1).hypot(m.y2 - m.y1);
+            assert!((len - 2.0).abs() < 1e-3, "{id} length {len}");
+            for (x, y) in [(m.x1, m.y1), (m.x2, m.y2)] {
+                let r = (x - 10.0).hypot(y - 18.86);
+                assert!((r - 3.0_f32.sqrt() * 2.0 / 3.0).abs() < 1e-3, "{id} vertex off the circle: r={r}");
+            }
+            let t = world.bodies.get(m.body).unwrap().translation();
+            assert!((t.x - (m.x1 + m.x2) / 2.0).abs() < 1e-3 && (t.y - (m.y1 + m.y2) / 2.0).abs() < 1e-3, "{id}: body not at drawn midpoint");
+        }
+        let turned = (angle_of(first_vertex(&world)) - start + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        let expected = (sim_seconds + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        assert!((turned - expected).abs() < 0.02, "turned {turned}, expected {expected} for {sim_seconds}s");
+    }
+
+    /// The ball hits a triangle wall where it is now, and the walls appear in the snapshot.
+    #[test]
+    fn the_ball_bounces_off_a_rotated_triangle_wall() {
+        let table = load_table(5).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        let input = InputState::default();
+        for _ in 0..25 { world.step_frame(0.033, &input); }
+        let snap_walls = world.snapshot().walls.iter().filter(|w| w.label.as_deref().map_or(false, |l| l.starts_with("TriangleWall"))).count();
+        assert_eq!(snap_walls, 3, "triangle walls are drawn");
+
+        let m = wall(&world, "TriangleWall2");
+        let (mx, my) = ((m.x1 + m.x2) / 2.0, (m.y1 + m.y2) / 2.0);
+        let (ox, oy) = (mx - 10.0, my - 18.86);
+        let l = ox.hypot(oy);
+        let out = [ox / l, oy / l];
+        let ball_h = world.ball_handle.unwrap();
+        let body = world.bodies.get_mut(ball_h).unwrap();
+        body.set_translation(Vector::new(mx + out[0] * 2.5, my + out[1] * 2.5), true);
+        body.set_linvel(Vector::new(-out[0] * 5.0, -out[1] * 5.0), true);
+        body.set_gravity_scale(0.0, true);
+        let mut bounced = false;
+        for _ in 0..20 {
+            world.step_frame(0.033, &input);
+            let v = world.bodies.get(ball_h).unwrap().linvel();
+            if v.x * out[0] + v.y * out[1] > 1.0 { bounced = true; break; }
+        }
+        assert!(bounced, "ball passed through the triangle's current position");
+    }
+
+    #[test]
+    fn other_tables_have_no_moving_walls() {
+        for n in [1u8, 2, 3, 4, 6, 7, 8, 9] {
+            let w = PhysicsWorld::from_table(&load_table(n).unwrap());
+            assert!(w.rotating_triangles.is_empty() && w.moving_walls.is_empty(), "table {n}");
         }
     }
 }

@@ -6,7 +6,7 @@
 use rapier2d::prelude::*;
 use std::f32::consts::TAU;
 
-use super::BumperInfo;
+use super::{BumperInfo, MovingWallInfo};
 use crate::table::TableDef;
 
 /// Bumpers spread evenly around a circle that rotates at a constant speed
@@ -93,6 +93,69 @@ pub(super) fn advance_rotating_groups(
             bumpers[bi].position = pos;
             if let Some(body) = bodies.get_mut(bumpers[bi].body) {
                 body.set_translation(Vector::new(pos[0], pos[1]), false);
+            }
+        }
+    }
+}
+
+/// Three walls forming an equilateral triangle that spins about a point
+/// (original: the rotating triangle in Field5Delegate, table 5). Each wall
+/// keeps its length; every frame its ends move to the next vertices.
+#[derive(Clone)]
+pub(super) struct RotatingTriangle {
+    /// Indices into the world's moving walls: wall `i` runs from vertex `i` to vertex `i + 1`.
+    walls: [usize; 3],
+    center: [f32; 2],
+    radius: f32,
+    angle: f32,
+    /// Radians per sim second at multiplier 1.
+    base_speed: f32,
+    /// 1 normally; the original sets -2 during multiball (backward, twice as fast).
+    pub(super) speed_multiplier: f32,
+}
+
+impl RotatingTriangle {
+    fn vertex(&self, k: usize) -> [f32; 2] {
+        // Vertex 0 at `angle`, vertex 1 a third of a turn ahead, vertex 2 a third behind.
+        let a = self.angle + match k % 3 { 0 => 0.0, 1 => TAU / 3.0, _ => -TAU / 3.0 };
+        [self.center[0] + self.radius * a.cos(), self.center[1] + self.radius * a.sin()]
+    }
+}
+
+pub(super) fn build_rotating_triangles(table: &TableDef, walls: &[MovingWallInfo]) -> Vec<RotatingTriangle> {
+    if table.delegate.as_deref() != Some("Field5Delegate") { return Vec::new(); }
+    let find = |id: &str| walls.iter().position(|w| w.id == id);
+    let (Some(a), Some(b), Some(c)) = (find("TriangleWall1"), find("TriangleWall2"), find("TriangleWall3")) else {
+        return Vec::new();
+    };
+    vec![RotatingTriangle {
+        walls: [a, b, c],
+        center: [10.0, 18.86],
+        // Equilateral triangle with sides of length 2.
+        radius: 3.0_f32.sqrt() * 2.0 / 3.0,
+        angle: TAU / 4.0,
+        base_speed: 1.0,
+        speed_multiplier: 1.0,
+    }]
+}
+
+/// Advances every triangle by `dt` sim seconds and moves its walls (bodies and
+/// the segments the renderer draws).
+pub(super) fn advance_rotating_triangles(
+    triangles: &mut [RotatingTriangle],
+    dt: f32,
+    walls: &mut [MovingWallInfo],
+    bodies: &mut RigidBodySet,
+) {
+    for t in triangles {
+        t.angle = (t.angle + t.speed_multiplier * t.base_speed * dt).rem_euclid(TAU);
+        for i in 0..3 {
+            let (p, q) = (t.vertex(i), t.vertex(i + 1));
+            let w = &mut walls[t.walls[i]];
+            w.x1 = p[0]; w.y1 = p[1]; w.x2 = q[0]; w.y2 = q[1];
+            if let Some(body) = bodies.get_mut(w.body) {
+                let mid = Vector::new((p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0);
+                body.set_position(Pose::new(mid, (q[1] - p[1]).atan2(q[0] - p[0])), false);
             }
         }
     }
