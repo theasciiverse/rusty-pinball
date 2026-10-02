@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, ModifierKeyCode};
 
 // Ticks a flipper hold lasts without a new key event before it retracts.
 // At 30 fps this is ~100 ms — enough to bridge the gap between terminal
@@ -50,12 +50,14 @@ impl InputState {
         let released = key.kind == KeyEventKind::Release;
 
         match key.code {
-            KeyCode::Char('z') | KeyCode::Left | KeyCode::Char('Z') => {
+            KeyCode::Char('z') | KeyCode::Left | KeyCode::Char('Z')
+            | KeyCode::Modifier(ModifierKeyCode::LeftShift) => {
                 if pressed  { self.left_ticks = FLIPPER_HOLD_TICKS; }
                 if released { self.left_ticks = 0; }
                 true
             }
-            KeyCode::Char('x') | KeyCode::Right | KeyCode::Char('X') => {
+            KeyCode::Char('x') | KeyCode::Right | KeyCode::Char('X')
+            | KeyCode::Modifier(ModifierKeyCode::RightShift) => {
                 if pressed  { self.right_ticks = FLIPPER_HOLD_TICKS; }
                 if released { self.right_ticks = 0; }
                 true
@@ -67,5 +69,32 @@ impl InputState {
             }
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyEventState, KeyModifiers};
+
+    fn ev(code: KeyCode, kind: KeyEventKind) -> KeyEvent {
+        KeyEvent { code, modifiers: KeyModifiers::NONE, kind, state: KeyEventState::NONE }
+    }
+
+    #[test]
+    fn left_and_right_shift_work_the_flippers_and_release_drops_them() {
+        let mut input = InputState::default();
+        assert!(input.handle_key(ev(KeyCode::Modifier(ModifierKeyCode::LeftShift), KeyEventKind::Press)));
+        input.tick();
+        assert!(input.left_flipper && !input.right_flipper);
+
+        assert!(input.handle_key(ev(KeyCode::Modifier(ModifierKeyCode::RightShift), KeyEventKind::Press)));
+        input.tick();
+        assert!(input.left_flipper && input.right_flipper);
+
+        input.handle_key(ev(KeyCode::Modifier(ModifierKeyCode::LeftShift), KeyEventKind::Release));
+        input.handle_key(ev(KeyCode::Modifier(ModifierKeyCode::RightShift), KeyEventKind::Release));
+        input.tick();
+        assert!(!input.left_flipper && !input.right_flipper);
     }
 }

@@ -284,6 +284,20 @@ const BUMPER_LIT_TICKS:   u8  = 6 * STEP_SCALE;
 // sim time now vs ~16.7 ms before): 12 substeps is ~110 ms, as 6 used to be.
 const BUMPER_DEBOUNCE_TICKS: u8 = 12;
 const KICK_WALL_DEBOUNCE: u8  = 12;
+// Contact model, matching the original (Box2D) Vector Pinball. Its ball and
+// bumpers are circles with friction 0.3 / restitution 0.6; walls, arcs, paths,
+// drop targets and flippers use Box2D's defaults (friction 0.2, restitution 0).
+// Box2D combines restitution as max (all colliders use Max here too) and
+// friction as sqrt(a*b); Rapier can't do the geometric mean, so wall friction is
+// picked so Rapier's average gives the same ball/wall value: (0.3 + 0.19) / 2
+// = 0.245 = sqrt(0.3 * 0.2).
+const BALL_RESTITUTION:   f32 = 0.6;
+const BALL_FRICTION:      f32 = 0.3;
+const BUMPER_FRICTION:    f32 = 0.3;
+const WALL_RESTITUTION:   f32 = 0.0;
+const WALL_FRICTION:      f32 = 0.19;
+// Restitution of the ball against a kick wall, applied by hand before the kick.
+const KICK_WALL_BOUNCE:   f32 = BALL_RESTITUTION;
 const DROP_CLEAR_BONUS:   u64 = 2_000;
 const LETTER_FLASH_TICKS: u8  = 32 * STEP_SCALE;
 // point_to_segment_dist measures to the wall's centerline, not its physical
@@ -533,9 +547,9 @@ impl PhysicsWorld {
             .build();
         let idle_h = bodies.insert(idle_rb);
         let idle_col = ColliderBuilder::ball(ball_radius)
-            .restitution(0.8)
+            .restitution(BALL_RESTITUTION)
             .restitution_combine_rule(CoefficientCombineRule::Max)
-            .friction(0.0)
+            .friction(BALL_FRICTION)
             .density(1.0)
             .active_events(ActiveEvents::COLLISION_EVENTS)
             .collision_groups(ball_groups_for(0))
@@ -621,7 +635,7 @@ impl PhysicsWorld {
         let angle = dy.atan2(dx);
         let half_w = len / 2.0;
         let half_h = 0.05_f32;
-        let restitution = w.restitution.unwrap_or(0.5);
+        let restitution = w.restitution.unwrap_or(WALL_RESTITUTION);
 
         let groups = match layer {
             Some(n) => layer_group_for(n),
@@ -636,7 +650,7 @@ impl PhysicsWorld {
         let col = ColliderBuilder::cuboid(half_w, half_h)
             .restitution(restitution)
             .restitution_combine_rule(CoefficientCombineRule::Max)
-            .friction(0.0)
+            .friction(WALL_FRICTION)
             .collision_groups(groups)
             .build();
         let col_h = colliders.insert_with_parent(col, h, bodies);
@@ -649,7 +663,7 @@ impl PhysicsWorld {
         for (i, (p0, p1)) in a.to_segments().into_iter().enumerate() {
             let dummy_def = WallDef {
                 position: Some([p0[0], p0[1], p1[0], p1[1]]),
-                id: None, color: None, kick: None, restitution: Some(0.8),
+                id: None, color: None, kick: None, restitution: None,
                 kill: None, disabled: None, retract_when_hit: None, score: None,
                 layer: None,
             };
@@ -677,7 +691,9 @@ impl PhysicsWorld {
         let rb = RigidBodyBuilder::fixed().translation(Vector::new(x, y)).build();
         let h = bodies.insert(rb);
         let col = ColliderBuilder::ball(b.radius)
-            .restitution(0.8)
+            .restitution(BALL_RESTITUTION)
+            .restitution_combine_rule(CoefficientCombineRule::Max)
+            .friction(BUMPER_FRICTION)
             .active_events(ActiveEvents::COLLISION_EVENTS)
             .build();
         colliders.insert_with_parent(col, h, bodies);
@@ -738,8 +754,9 @@ impl PhysicsWorld {
         let h = bodies.insert(flipper_body);
         let col = ColliderBuilder::cuboid(half_len, 0.12)
             .density(FLIPPER_DENSITY)
-            .restitution(0.0)
-            .friction(0.2)
+            .restitution(WALL_RESTITUTION)
+            .restitution_combine_rule(CoefficientCombineRule::Max)
+            .friction(WALL_FRICTION)
             .build();
         colliders.insert_with_parent(col, h, bodies);
 
@@ -835,9 +852,9 @@ impl PhysicsWorld {
                     .build()
             );
             let col = ColliderBuilder::cuboid(len / 2.0, 0.05)
-                .restitution(0.5)
+                .restitution(WALL_RESTITUTION)
                 .restitution_combine_rule(CoefficientCombineRule::Max)
-                .friction(0.0)
+                .friction(WALL_FRICTION)
                 .build();
             let ch = colliders.insert_with_parent(col, bh, bodies);
             DropTargetInfo { x1, y1, x2, y2, collider: ch, active: true }
@@ -922,9 +939,9 @@ impl PhysicsWorld {
                 .build();
             let h = self.bodies.insert(rb);
             let col = ColliderBuilder::ball(self.ball_radius)
-                .restitution(0.8)
+                .restitution(BALL_RESTITUTION)
                 .restitution_combine_rule(CoefficientCombineRule::Max)
-                .friction(0.0)
+                .friction(BALL_FRICTION)
                 .density(1.0)
                 .active_events(ActiveEvents::COLLISION_EVENTS)
                 .build();
@@ -1107,6 +1124,18 @@ impl PhysicsWorld {
                 let kick = self.kick_walls[i].kick_force;
                 if let Some(ball_h) = self.ball_handle {
                     if let Some(body) = self.bodies.get_mut(ball_h) {
+                        // The kick fires on proximity, just before contact. The
+                        // original applies it after the step has already bounced
+                        // the ball off the wall, so do that bounce here first.
+                        // Otherwise the kick only cancels the ball's approach
+                        // speed, and a ball saver (which retracts right away)
+                        // never actually throws the ball back into play.
+                        let v = body.linvel();
+                        let vn = v.x * nx + v.y * ny;
+                        if vn < 0.0 {
+                            let bounced = v - Vector::new(nx, ny) * ((1.0 + KICK_WALL_BOUNCE) * vn);
+                            body.set_linvel(bounced, true);
+                        }
                         body.apply_impulse(Vector::new(nx * kick, ny * kick), true);
                     }
                 }
@@ -1206,18 +1235,19 @@ impl PhysicsWorld {
                 }
 
                 // ── Flipper cycling — suspend while flashing ──
-                // Left press  → rotate_right(1): lit dot shifts toward higher index.
-                // Right press → rotate_left(1):  lit dot shifts toward lower index.
+                // Matches the original: a right press shifts the lit dots toward
+                // higher indices (rightward), a left press toward lower indices,
+                // and the right flipper wins if both fire on the same frame.
                 if group.cycle_on_flipper && group.flash_ticks == 0 {
                     let n = group.rollovers.len();
                     if n > 1 {
-                        if input.left_just_pressed {
+                        if input.right_just_pressed {
                             let last = group.rollovers[n - 1].lit;
                             for i in (1..n).rev() {
                                 group.rollovers[i].lit = group.rollovers[i - 1].lit;
                             }
                             group.rollovers[0].lit = last;
-                        } else if input.right_just_pressed {
+                        } else if input.left_just_pressed {
                             let first = group.rollovers[0].lit;
                             for i in 0..n - 1 {
                                 group.rollovers[i].lit = group.rollovers[i + 1].lit;
@@ -1560,8 +1590,15 @@ impl PhysicsWorld {
     /// table's `targetTimeRatio`), split into small substeps for accuracy.
     pub fn step_frame(&mut self, frame_secs: f32, input: &InputState) {
         let dt = frame_secs * self.time_ratio / PHYSICS_SUBSTEPS as f32;
-        for _ in 0..PHYSICS_SUBSTEPS {
-            self.step(dt, input);
+        // `*_just_pressed` is a one-frame edge (e.g. it rotates the lit
+        // rollovers once per flipper press), so only the first substep may
+        // see it; otherwise one press would act once per substep.
+        let mut later = input.clone();
+        later.left_just_pressed = false;
+        later.right_just_pressed = false;
+        self.step(dt, input);
+        for _ in 1..PHYSICS_SUBSTEPS {
+            self.step(dt, &later);
         }
     }
     /// Sim seconds advanced per real second (the table's `targetTimeRatio`).
@@ -2258,5 +2295,120 @@ mod time_ratio_tests {
             (dropped - expected).abs() < expected * 0.06,
             "dropped {dropped:.3} units in {t:.3}s real, expected ~{expected:.3}"
         );
+    }
+}
+
+#[cfg(test)]
+mod flipper_cycle_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    /// On Classic, pressing a flipper must shift the lit rollover dot by exactly
+    /// one position per press (right flipper = rightward, as in the original),
+    /// however many physics substeps a frame has, in both flipper-cycled groups.
+    #[test]
+    fn one_flipper_press_rotates_lit_rollovers_by_exactly_one() {
+        let table = load_table(1).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        let groups: Vec<usize> = world.rollover_groups.iter().enumerate()
+            .filter(|(_, g)| g.cycle_on_flipper).map(|(i, _)| i).collect();
+        assert_eq!(groups.len(), 2, "Classic has two flipper-cycled groups (bottom lanes and top lanes)");
+        let lit = |w: &PhysicsWorld, gi: usize| -> Vec<bool> { w.rollover_groups[gi].rollovers.iter().map(|r| r.lit).collect() };
+        for &gi in &groups {
+            for (i, r) in world.rollover_groups[gi].rollovers.iter_mut().enumerate() { r.lit = i == 1; }
+        }
+
+        let mut input = InputState::default();
+        input.right_flipper = true;
+        input.right_just_pressed = true;
+        world.step_frame(0.033, &input);
+        for &gi in &groups {
+            assert_eq!(lit(&world, gi), vec![false, false, true, false], "right press should move the lit dot right one");
+        }
+
+        input.right_just_pressed = false;
+        input.right_flipper = false;
+        input.left_flipper = true;
+        input.left_just_pressed = true;
+        world.step_frame(0.033, &input);
+        input.left_just_pressed = false;
+        world.step_frame(0.033, &input); // holding must not keep cycling
+        for &gi in &groups {
+            assert_eq!(lit(&world, gi), vec![false, true, false, false], "left press should move it back left one");
+        }
+    }
+}
+
+#[cfg(test)]
+mod ball_saver_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    /// A ball dropped onto a ball saver must be thrown back up into play (the
+    /// original bounces it off the wall, then adds the saver's kick), not just
+    /// have its fall cancelled and drop through when the saver retracts.
+    #[test]
+    fn ball_saver_throws_a_falling_ball_back_up_into_play() {
+        let table = load_table(1).unwrap();
+        for (label, x) in [("left", 0.78_f32), ("right", 18.05_f32)] {
+            let mut world = PhysicsWorld::from_table(&table);
+            let ball_h = world.ball_handle.expect("ball");
+            let body = world.bodies.get_mut(ball_h).unwrap();
+            body.set_translation(Vector::new(x, 8.0), true);
+            body.set_linvel(Vector::new(0.0, 0.0), true);
+            body.set_gravity_scale(1.0, true);
+
+            let input = InputState::default();
+            let (mut min_y, mut max_y_after) = (f32::MAX, 0.0_f32);
+            let mut hit = false;
+            for _ in 0..60 {
+                world.step_frame(0.033, &input);
+                let y = world.ball_position().expect("ball").y;
+                min_y = min_y.min(y);
+                if min_y < 6.5 { hit = true; } // on the way down to the saver
+                if hit { max_y_after = max_y_after.max(y); }
+            }
+            assert!(min_y > 4.0, "{label} saver: ball fell through to y={min_y:.2}");
+            assert!(max_y_after > 8.5, "{label} saver: ball only rebounded to y={max_y_after:.2}, expected a strong throw back up");
+        }
+    }
+}
+
+#[cfg(test)]
+mod slingshot_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    /// A ball driven into a slingshot must come off it clearly faster than it
+    /// arrived (bounce plus the wall's kick), not have its approach merely
+    /// cancelled. Original: out = 0.6 * in + kick / ball_mass (kick 3.5, mass ~0.785).
+    #[test]
+    fn slingshot_throws_an_approaching_ball_away_hard() {
+        let table = load_table(1).unwrap();
+        for incoming in [3.0_f32, 6.0, 10.0] {
+            let mut world = PhysicsWorld::from_table(&table);
+            let ki = world.kick_walls.iter().position(|k| !k.retract_when_hit && k.kick_force > 3.0 && k.x1 < 8.0)
+                .expect("Classic has a left slingshot");
+            let kw = &world.kick_walls[ki];
+            let (mx, my, n) = ((kw.x1 + kw.x2) / 2.0, (kw.y1 + kw.y2) / 2.0, kw.interior_normal);
+            let ball_h = world.ball_handle.unwrap();
+            let body = world.bodies.get_mut(ball_h).unwrap();
+            body.set_translation(Vector::new(mx + n[0] * 2.5, my + n[1] * 2.5), true);
+            body.set_linvel(Vector::new(-n[0] * incoming, -n[1] * incoming), true);
+            body.set_gravity_scale(0.0, true);
+
+            let input = InputState::default();
+            let mut best_out = f32::MIN;
+            for _ in 0..40 {
+                world.step_frame(0.033, &input);
+                let v = world.bodies.get(ball_h).unwrap().linvel();
+                best_out = best_out.max(v.x * n[0] + v.y * n[1]);
+            }
+            let original_like = 0.6 * incoming + 3.5 / 0.785;
+            assert!(
+                best_out > original_like * 0.97,
+                "approach {incoming}: left the slingshot at {best_out:.2}, expected about {original_like:.2} or more"
+            );
+        }
     }
 }

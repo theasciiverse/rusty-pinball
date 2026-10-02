@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyEvent},
+    event::{self, Event, KeyCode, KeyEventKind, KeyEvent, ModifierKeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -48,11 +48,13 @@ impl App {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen)?;
-        // Request key-release events on terminals that support the Kitty keyboard protocol.
-        // Silently ignored on terminals that don't.
+        // Request key-release events, and bare modifier keys (so Left/Right Shift
+        // can work the flippers), on terminals that support the Kitty keyboard
+        // protocol. Silently ignored on terminals that don't.
         let _ = execute!(stdout,
             crossterm::event::PushKeyboardEnhancementFlags(
                 crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                    | crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
             )
         );
         let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
@@ -128,7 +130,9 @@ impl App {
 
         // Escape from playing → back to menu (also clears pause).
         if is_playing {
-            if k.code == KeyCode::Esc || k.code == KeyCode::Char('q') {
+            if k.kind != KeyEventKind::Release
+                && (k.code == KeyCode::Esc || k.code == KeyCode::Char('q'))
+            {
                 self.screen = Screen::Menu;
                 self.paused = false;
                 return Ok(false);
@@ -144,6 +148,11 @@ impl App {
     }
 
     fn handle_menu_key(&mut self, k: KeyEvent) -> Result<bool> {
+        // With all-keys reporting on, terminals also send releases for ordinary
+        // keys; acting on them would double-fire Enter and quit on a q release.
+        if k.kind == KeyEventKind::Release {
+            return Ok(false);
+        }
         match k.code {
             KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(true),
             KeyCode::Up   | KeyCode::Char('k') => self.menu.move_up(),
@@ -210,8 +219,10 @@ impl App {
         }
 
         if k.kind == KeyEventKind::Press && self.sound_enabled {
-            let is_left  = matches!(k.code, KeyCode::Char('z') | KeyCode::Left);
-            let is_right = matches!(k.code, KeyCode::Char('x') | KeyCode::Right);
+            let is_left  = matches!(k.code, KeyCode::Char('z') | KeyCode::Left
+                | KeyCode::Modifier(ModifierKeyCode::LeftShift));
+            let is_right = matches!(k.code, KeyCode::Char('x') | KeyCode::Right
+                | KeyCode::Modifier(ModifierKeyCode::RightShift));
             if (is_left || is_right) && game.phase == Phase::Playing {
                 if let Some(a) = &mut self.audio { a.play(SoundTrigger::FlipperUp); }
             }

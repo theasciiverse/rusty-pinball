@@ -54,15 +54,15 @@ Running inside **tmux** is recommended for the best display experience.
 | Key | Action |
 |-----|--------|
 | `Space` | Launch ball |
-| `Z` / `←` | Left flipper |
-| `X` / `→` | Right flipper |
+| `Z` / `←` / Left Shift | Left flipper |
+| `X` / `→` / Right Shift | Right flipper |
 | `Enter` | Continue after ball lost / restart after game over |
 | `Esc` | Return to main menu |
 
 ## Tips
 
 - The game field is taller than the visible viewport — the camera follows the ball automatically.
-- The flippers respond to both letter keys (`Z`/`X`) and arrow keys, so you can use whichever feels more natural.
+- The flippers respond to letter keys (`Z`/`X`), arrow keys, and Left/Right Shift, so you can use whichever feels more natural. Shift on its own is only reported by terminals that support the Kitty keyboard protocol (kitty is one); elsewhere use `Z`/`X` or the arrows.
 - Sound can be toggled on or off from the main menu without leaving it.
 - For the smoothest experience, run in a dedicated tmux pane or a full-screen terminal window.
 
