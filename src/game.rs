@@ -58,16 +58,7 @@ impl GameState {
 
     pub fn sync(&mut self, physics: &PhysicsWorld) {
         if self.phase == Phase::Playing && physics.is_ball_drained() {
-            if self.balls_remaining > 0 {
-                self.balls_remaining -= 1;
-                self.phase = Phase::BallLost;
-            } else {
-                self.phase = Phase::GameOver;
-            }
-            // Multiplier and super mode are per-ball: a fresh ball always
-            // starts back at ×1, mode off.
-            self.multiplier = 1;
-            self.super_mode_ticks = 0;
+            self.ball_drained();
         }
 
         // Accumulate score from contact events emitted by physics
@@ -87,6 +78,18 @@ impl GameState {
         }
     }
 
+    /// The ball in play drained. `balls_remaining` counts the ball in play
+    /// (it starts at the table's `numballs`), so the game ends when the last
+    /// one is gone: a 3-ball game gives exactly 3 balls.
+    pub fn ball_drained(&mut self) {
+        self.balls_remaining = self.balls_remaining.saturating_sub(1);
+        self.phase = if self.balls_remaining == 0 { Phase::GameOver } else { Phase::BallLost };
+        // Multiplier and super mode are per-ball: a fresh ball always
+        // starts back at ×1, mode off.
+        self.multiplier = 1;
+        self.super_mode_ticks = 0;
+    }
+
     /// Adjusts the multiplier by `delta`, clamped to [1, MAX_MULTIPLIER] —
     /// it can never run away or drop below ×1.
     pub fn apply_multiplier_delta(&mut self, delta: i32) {
@@ -97,6 +100,29 @@ impl GameState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_three_ball_game_gives_exactly_three_balls() {
+        let mut game = GameState::new(3);
+        game.phase = Phase::Playing;
+        game.ball_drained();
+        assert_eq!((game.phase, game.balls_remaining), (Phase::BallLost, 2), "after ball 1");
+        game.phase = Phase::Playing;
+        game.ball_drained();
+        assert_eq!((game.phase, game.balls_remaining), (Phase::BallLost, 1), "after ball 2");
+        game.phase = Phase::Playing;
+        game.ball_drained();
+        assert_eq!((game.phase, game.balls_remaining), (Phase::GameOver, 0), "the third drain ends the game");
+    }
+
+    #[test]
+    fn a_ball_drain_resets_the_per_ball_multiplier_and_super_mode() {
+        let mut game = GameState::new(3);
+        game.multiplier = 4;
+        game.super_mode_ticks = 100;
+        game.ball_drained();
+        assert_eq!((game.multiplier, game.super_mode_ticks), (1, 0));
+    }
 
     #[test]
     fn multiplier_clamps_between_one_and_max() {

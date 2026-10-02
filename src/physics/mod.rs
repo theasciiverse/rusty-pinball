@@ -3002,6 +3002,22 @@ mod generated_drop_target_tests {
         assert_eq!(counts, vec![5, 2, 3, 3], "UpperMultiball, LowerMultiball, LeftSave, RightSave");
     }
 
+    /// The audit's worry: banks that silently load empty. Every drop bank on
+    /// every table must have at least one target, and no more than it asks for.
+    #[test]
+    fn every_drop_bank_on_every_table_has_targets() {
+        for n in 1..=9u8 {
+            let table = load_table(n).unwrap();
+            let world = PhysicsWorld::from_table(&table);
+            let banks: Vec<_> = table.elements.iter().filter_map(|e| match e { ElementDef::DropTargetGroupElement(d) => Some(d), _ => None }).collect();
+            assert_eq!(world.drop_target_groups.len(), banks.len(), "table {n}");
+            for (g, d) in world.drop_target_groups.iter().zip(&banks) {
+                assert!(!g.targets.is_empty(), "table {n}: bank {:?} loaded with no targets", d.id);
+                if let Some(want) = d.num_targets { assert_eq!(g.targets.len(), want as usize, "table {n}: bank {:?}", d.id); }
+            }
+        }
+    }
+
     #[test]
     fn explicit_positions_still_win() {
         for n in [1u8, 4, 5, 6, 7, 8, 9] {
