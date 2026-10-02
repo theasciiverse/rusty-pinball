@@ -145,6 +145,11 @@ pub struct TableDef {
     #[serde(default, deserialize_with = "de_numstr_opt")]
     pub gravity: Option<f32>,
 
+    /// Sim seconds advanced per real second. The original Vector Pinball runs
+    /// every table at ~2.3x; without it the ball feels like it is in water.
+    #[serde(rename = "targetTimeRatio", default, deserialize_with = "de_numstr_opt")]
+    pub target_time_ratio: Option<f32>,
+
     #[serde(default)]
     pub numballs: Option<u8>,
 
@@ -184,9 +189,13 @@ pub struct TableDef {
     pub jackpot: Option<JackpotDef>,
 }
 
+/// Matches the ratio the original Vector Pinball tables use (2.25 to 2.3).
+pub const DEFAULT_TIME_RATIO: f32 = 2.3;
+
 impl TableDef {
     pub fn ball_radius(&self) -> f32 { self.ball_radius.unwrap_or(0.5) }
     pub fn gravity_magnitude(&self) -> f32 { self.gravity.unwrap_or(4.0) }
+    pub fn time_ratio(&self) -> f32 { self.target_time_ratio.unwrap_or(DEFAULT_TIME_RATIO) }
     pub fn num_balls(&self) -> u8 { self.numballs.unwrap_or(3) }
 }
 

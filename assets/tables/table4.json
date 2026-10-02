@@ -214,7 +214,7 @@
         0,
         255
       ],
-      "kick": "5.25",
+      "kick": "3.5",
       "position": [
         "3.2",
         "8.77",
@@ -266,7 +266,7 @@
         0,
         255
       ],
-      "kick": "5.25",
+      "kick": "3.5",
       "position": [
         "15.6",
         "8.77",
@@ -745,7 +745,7 @@
         221
       ],
       "id": "LockedBallKicker1",
-      "kick": "9",
+      "kick": "6",
       "position": [
         "18.68",
         "13.2",
@@ -1139,7 +1139,7 @@
         221
       ],
       "id": "LockedBallKicker2",
-      "kick": "8.625",
+      "kick": "5.75",
       "position": [
         "17.22",
         "14.6",
@@ -1156,7 +1156,7 @@
         221
       ],
       "id": "LockedBallKicker3",
-      "kick": "8.25",
+      "kick": "5.5",
       "position": [
         "17.22",
         "16.0",
@@ -1166,7 +1166,7 @@
       "score": 1000
     }
   ],
-  "gravity": "6",
+  "gravity": "4",
   "height": "30",
   "launchDeadZone": [
     "18.8",

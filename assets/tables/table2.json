@@ -346,7 +346,7 @@
         0,
         255
       ],
-      "kick": 5.25,
+      "kick": 3.5,
       "position": [
         3.2,
         8.77,
@@ -398,7 +398,7 @@
         0,
         255
       ],
-      "kick": 5.25,
+      "kick": 3.5,
       "position": [
         15.6,
         8.77,
@@ -539,7 +539,7 @@
         224,
         224
       ],
-      "kick": 7.5,
+      "kick": 5,
       "position": [
         0.1,
         13,
@@ -926,7 +926,7 @@
       "upspeed": 9
     }
   ],
-  "gravity": 6.0,
+  "gravity": 4.0,
   "height": 30,
   "launchDeadZone": [
     "18.8",
@@ -940,7 +940,7 @@
   ],
   "launchVelocity": [
     "0",
-    "18.0"
+    "16.0"
   ],
   "launchVelocityRandomDelta": [
     "0",

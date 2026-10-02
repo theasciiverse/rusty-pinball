@@ -18,8 +18,6 @@ use crate::{
     ui::menu::{MenuState, MenuAction},
 };
 
-const PHYSICS_DT:    f32 = 1.0 / 60.0;
-const PHYSICS_STEPS: u32 = 2;
 const FRAME_MILLIS:  u64 = 33;
 
 enum Screen {
@@ -245,9 +243,7 @@ impl App {
         {
             if self.paused { return; }
             input.tick();
-            for _ in 0..PHYSICS_STEPS {
-                physics.step(PHYSICS_DT, input);
-            }
+            physics.step_frame(FRAME_MILLIS as f32 / 1000.0, input);
             let prev_phase = game.phase;
             game.sync(physics);
 

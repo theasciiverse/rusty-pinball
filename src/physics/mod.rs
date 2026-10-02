@@ -273,10 +273,19 @@ struct JackpotInfo {
     lit: bool,
 }
 
-const BUMPER_LIT_TICKS:   u8  = 6;
-const KICK_WALL_DEBOUNCE: u8  = 6;
+// Tick-counted timers below were tuned for 2 physics substeps per frame;
+// STEP_SCALE keeps their real-time length when PHYSICS_SUBSTEPS is higher.
+const PHYSICS_SUBSTEPS: u32 = 8;
+const STEP_SCALE:         u8  = (PHYSICS_SUBSTEPS / 2) as u8;
+// Solver iterations: Box2D (the original's engine) used 10 velocity iterations.
+const SOLVER_ITERATIONS:  usize = 10;
+const BUMPER_LIT_TICKS:   u8  = 6 * STEP_SCALE;
+// Kick/debounce is gameplay, so it follows sim time (substeps are ~9.5 ms of
+// sim time now vs ~16.7 ms before): 12 substeps is ~110 ms, as 6 used to be.
+const BUMPER_DEBOUNCE_TICKS: u8 = 12;
+const KICK_WALL_DEBOUNCE: u8  = 12;
 const DROP_CLEAR_BONUS:   u64 = 2_000;
-const LETTER_FLASH_TICKS: u8  = 32;
+const LETTER_FLASH_TICKS: u8  = 32 * STEP_SCALE;
 // point_to_segment_dist measures to the wall's centerline, not its physical
 // surface — the wall itself has a half-thickness of 0.05 (see add_wall), so
 // `ball_radius + 0.05` alone is the exact geometric touch point with zero
@@ -303,7 +312,7 @@ const FLIPPER_TOP_SLOWDOWN_SPEED: f32 = 0.5;
 // Rollover group completion flash: 4 phases × 8 sub-steps each.
 // At 2 sub-steps per frame (30 fps) each phase ≈ 133 ms; total ≈ 533 ms.
 // Phase 0 = unlit so the dots go dark immediately on completion (obvious feedback).
-const ROLLOVER_FLASH_TICKS:  u8 = 32;
+const ROLLOVER_FLASH_TICKS:  u8 = 32 * STEP_SCALE;
 const ROLLOVER_FLASH_PHASES: u8 = 4;
 
 // ── Layer collision groups ─────────────────────────────────────────────────────
@@ -351,6 +360,7 @@ pub struct PhysicsWorld {
     ball_handle:        Option<RigidBodyHandle>,
     ball_collider:  Option<ColliderHandle>,   // collider for the ball body
     ball_radius:        f32,
+    time_ratio:         f32,
     ball_color:         Option<(u8, u8, u8)>,
     flippers:           Vec<FlipperInfo>,
     bumpers:            Vec<BumperInfo>,
@@ -561,6 +571,7 @@ impl PhysicsWorld {
             ccd_solver: CCDSolver::new(),
             soft_bodies: SoftBodySet::new(),
             gravity,
+            time_ratio: table.time_ratio(),
             ball_handle,
             ball_collider,
             ball_radius,
@@ -979,6 +990,7 @@ impl PhysicsWorld {
 
         let mut params = IntegrationParameters::default();
         params.dt = dt;
+        params.num_solver_iterations = SOLVER_ITERATIONS;
 
         self.pipeline.step(
             self.gravity,
@@ -1003,7 +1015,7 @@ impl PhysicsWorld {
                 if let Some(ball_body) = self.bodies.get(ball_h) {
                     let bp = ball_body.translation();
                     for (i, bump) in self.bumpers.iter().enumerate() {
-                        if bump.lit_ticks > 0 { continue; }   // debounce while lit
+                        if bump.lit_ticks + BUMPER_DEBOUNCE_TICKS > BUMPER_LIT_TICKS { continue; }   // debounce right after a hit
                         let dx = bp.x - bump.position[0];
                         let dy = bp.y - bump.position[1];
                         let dist = (dx * dx + dy * dy).sqrt();
@@ -1535,6 +1547,25 @@ impl PhysicsWorld {
     }
 
     pub fn field_height(&self) -> f32 { self.field_height }
+
+    /// Current ball speed in sim units per sim second, if a ball exists.
+    #[cfg(test)]
+    fn ball_speed(&self) -> Option<f32> {
+        let body = self.bodies.get(self.ball_handle?)?;
+        Some(body.linvel().length())
+    }
+
+    /// Advances one rendered frame of `frame_secs` real seconds. Like the
+    /// original Vector Pinball, sim time runs faster than real time (the
+    /// table's `targetTimeRatio`), split into small substeps for accuracy.
+    pub fn step_frame(&mut self, frame_secs: f32, input: &InputState) {
+        let dt = frame_secs * self.time_ratio / PHYSICS_SUBSTEPS as f32;
+        for _ in 0..PHYSICS_SUBSTEPS {
+            self.step(dt, input);
+        }
+    }
+    /// Sim seconds advanced per real second (the table's `targetTimeRatio`).
+    pub fn time_ratio(&self) -> f32 { self.time_ratio }
     pub fn field_width(&self)  -> f32 { self.field_width }
 
     pub fn snapshot(&self) -> FieldSnapshot {
@@ -1730,6 +1761,45 @@ mod all_tables_smoke {
                 let raw = body.rotation().angle();
                 assert!(raw.is_finite(), "table{n}: flipper angle is not finite: {raw}");
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod game_speed_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    /// At the original's ~2.3x sim speed the ball must neither tunnel out of
+    /// the field nor fail to leave the shooter lane on a first launch.
+    #[test]
+    fn every_table_ball_stays_in_bounds_and_clears_the_launch_lane() {
+        for n in 1..=9u8 {
+            let table = load_table(n).unwrap_or_else(|e| panic!("table{n} failed to load: {e}"));
+            let mut world = PhysicsWorld::from_table(&table);
+            world.launch_ball();
+            let mut input = InputState::default();
+            let (mut max_y, mut max_speed) = (0.0_f32, 0.0_f32);
+            for i in 0..900 {
+                input.left_flipper = (i / 20) % 2 == 0;
+                input.right_flipper = (i / 20) % 2 == 1;
+                world.step_frame(0.033, &input);
+                if let Some(p) = world.ball_position() {
+                    assert!(
+                        p.x > -1.0 && p.x < table.width + 1.0 && p.y > -3.0 && p.y < table.height + 1.0,
+                        "table{n}: ball left the field at frame {i}: ({:.2}, {:.2})", p.x, p.y
+                    );
+                    max_y = max_y.max(p.y);
+                }
+                if let Some(v) = world.ball_speed() { max_speed = max_speed.max(v); }
+                if world.is_ball_drained() || world.is_ball_in_dead_zone() {
+                    // First-launch check only; once it drains, restart.
+                    world.park_ball();
+                    world.launch_ball();
+                }
+            }
+            eprintln!("table{n}: max y {max_y:.1} of {:.1}, max speed {max_speed:.1}", table.height);
+            assert!(max_y > table.height * 0.5, "table{n}: ball never got above y={max_y:.1} (field height {})", table.height);
         }
     }
 }
@@ -2153,6 +2223,40 @@ mod flipper_sleep {
         assert!(
             (angle - world.flippers[left_idx].max_angle).abs() < 0.1,
             "left flipper should still respond after sitting idle, got {angle}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod time_ratio_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    /// The original runs sim time at `targetTimeRatio` x real time, so a ball
+    /// in free fall drops 0.5 * g * (ratio * t)^2 after `t` real seconds. This
+    /// pins the "zippy, not underwater" feel against the original's numbers.
+    #[test]
+    fn free_fall_matches_original_time_scaling() {
+        let table = load_table(1).expect("table 1 should load");
+        let mut world = PhysicsWorld::from_table(&table);
+        let ball_h = world.ball_handle.expect("ball should exist");
+        let body = world.bodies.get_mut(ball_h).unwrap();
+        body.set_translation(Vector::new(10.0, 25.0), true);
+        body.set_linvel(Vector::new(0.0, 0.0), true);
+        body.set_gravity_scale(1.0, true);
+
+        let input = InputState::default();
+        let frame = 0.033;
+        let frames = 9; // ~0.3 s of real time
+        for _ in 0..frames {
+            world.step_frame(frame, &input);
+        }
+        let t = frame * frames as f32;
+        let expected = 0.5 * table.gravity_magnitude() * (table.time_ratio() * t).powi(2);
+        let dropped = 25.0 - world.ball_position().expect("ball").y;
+        assert!(
+            (dropped - expected).abs() < expected * 0.06,
+            "dropped {dropped:.3} units in {t:.3}s real, expected ~{expected:.3}"
         );
     }
 }
