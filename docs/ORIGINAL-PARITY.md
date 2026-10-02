@@ -6,7 +6,7 @@ that we do not yet do, so nothing gets forgotten. It exists because we kept find
 a time (rotating bumpers on table 2, the table 5 triangle, the table 4 lights); an audit on 2026-10-02 went through
 the whole original and this is the result.
 
-Status as of commit `da9595b` (branch `rapier-0.36`). Update this file when something lands.
+Status as of the multiball-core commit on branch `rapier-0.36` (previous audit baseline: `da9595b`). Update this file when something lands.
 
 - Detailed notes with original file and line references: [`parity/engine-and-app.md`](parity/engine-and-app.md),
   [`parity/tables-3-and-6.md`](parity/tables-3-and-6.md), [`parity/tables-7-and-8.md`](parity/tables-7-and-8.md).
@@ -31,7 +31,7 @@ These are the building blocks. Most per-table gaps are "needs C1 + C3 + C4" and 
 | ID | Capability | What it is in the original |
 |---|---|---|
 | C1 | Table script layer | Delegate callbacks: `gameStarted`, `ballLost`, `tick`, `processCollision`, `allDropTargetsInGroupHit`, `allRolloversInGroupActivated`, `ballInSensorRange`, `spinnerActivated`, `flippersActivated`, plus element lookup by id |
-| C2 | Multi-ball | A list of balls; `createBall`, `launchBall`, `removeBallWithoutBallLoss`; "balls <= 1" means multiball ended; multiball saver |
+| C2 | Multi-ball | A list of balls; `createBall`, `launchBall`, `removeBallWithoutBallLoss`; "balls <= 1" means multiball ended; multiball saver. **Core DONE** (ball list, extra launches, silent drain, lock removal, all elements react to every ball, all balls drawn); still missing: the multiball saver, per-ball colors and last-sensor id (C6, C7), and anything that starts a multiball (C1, C3, C4) |
 | C3 | Scheduled actions | `scheduleAction(ms, fn)` on game time (multiball launches, light shows, gate timers) |
 | C4 | Game messages | Timed text shown in the score line, with a message sound ("Ball Saved", "Multiball!", "Jackpot!", ...) |
 | C5 | Element control | `setRetracted`, `setVisible`, `setNewColor`; rollover setters (set all, set by index, activate first, `setIgnoreBall`); movable rollover circles; drop target make-visible; spinner score |
@@ -86,6 +86,7 @@ Landed on `rapier-0.36` (all with tests):
   flippers and bumpers keep the original's ball-contact friction.
 - Flipper-cycled rollovers step once per press, in the original's direction; Left/Right Shift work the flippers.
 - Table 2 orbiting bumpers; table 5 rotating triangle (`src/physics/movers.rs`).
+- Multi-ball core in the physics world (see C2): extra balls, silent drain while others remain, ball lock removal without loss, every element reacting to every ball, all balls drawn.
 - Launch barrier by sensors (tables 1, 2, 3, 5, 6, 7); drop banks reset after their `reset` delay (none = stays down);
   ball savers re-armed by clearing the matching bank, **not** on every new ball.
 - Found by this audit and fixed: table 3's four drop banks had no targets (`wallStart` form unparsed); a 3-ball game gave 4 balls;

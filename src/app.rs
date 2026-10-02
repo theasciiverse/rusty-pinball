@@ -258,14 +258,21 @@ impl App {
             let prev_phase = game.phase;
             game.sync(physics);
 
+            // A ball lock removed the last ball without it being lost: wait for
+            // a relaunch, and do not cost a ball.
+            if physics.take_relaunch_needed() && game.phase == Phase::Playing {
+                game.phase = Phase::WaitingToLaunch;
+            }
+
             let fh = physics.field_height();
             if let Some(pos) = physics.ball_position() {
                 let target = (pos.y - fh * 0.40).clamp(0.0, fh);
                 *camera_y += (target - *camera_y) * 0.15;
             }
 
-            // Ball fell back into the shooter lane without clearing the gate.
-            if game.phase == Phase::Playing && physics.is_ball_in_dead_zone() {
+            // Ball fell back into the shooter lane without clearing the gate. Only
+            // with a single ball: re-parking would end a multiball.
+            if game.phase == Phase::Playing && physics.ball_count() == 1 && physics.is_ball_in_dead_zone() {
                 game.phase = Phase::WaitingToLaunch;
                 physics.park_ball();
             }

@@ -184,7 +184,8 @@ impl FieldRenderer {
             label_at(&mut labels, to_cx(fl.x1), to_cy(fl.y1), &fl.label);
         }
 
-        if let Some(b) = &snap.ball {
+        // Every ball on the field (more than one during multiball).
+        for b in &snap.balls {
             let rx = ((snap.field_width * 0.025 / field_w)    * dot_w as f32) as u32;
             let ry = ((snap.field_width * 0.025 / viewport_h) * dot_h as f32) as u32;
             fill_ellipse(&mut pixels, &mut grid,
