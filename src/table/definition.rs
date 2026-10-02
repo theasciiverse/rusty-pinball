@@ -136,6 +136,11 @@ pub struct TableDef {
     pub delegate: Option<String>,
     pub version: Option<u32>,
 
+    /// Named numbers a table's delegate reads (e.g. table 2's rotating-bumper
+    /// speeds). Values may be numbers or numeric strings.
+    #[serde(default)]
+    pub variables: std::collections::HashMap<String, serde_json::Value>,
+
     #[serde(deserialize_with = "de_numstr")]
     pub width: f32,
 
@@ -193,6 +198,13 @@ pub struct TableDef {
 pub const DEFAULT_TIME_RATIO: f32 = 2.3;
 
 impl TableDef {
+    pub fn variable(&self, name: &str) -> Option<f32> {
+        match self.variables.get(name)? {
+            serde_json::Value::Number(n) => n.as_f64().map(|v| v as f32),
+            serde_json::Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        }
+    }
     pub fn ball_radius(&self) -> f32 { self.ball_radius.unwrap_or(0.5) }
     pub fn gravity_magnitude(&self) -> f32 { self.gravity.unwrap_or(4.0) }
     pub fn time_ratio(&self) -> f32 { self.target_time_ratio.unwrap_or(DEFAULT_TIME_RATIO) }

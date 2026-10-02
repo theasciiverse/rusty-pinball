@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+mod movers;
 use rapier2d::prelude::*;
 use crate::input::InputState;
 use crate::table::{
@@ -145,6 +146,7 @@ struct FlipperInfo {
 }
 
 struct BumperInfo {
+    body: RigidBodyHandle,
     position: [f32; 2],
     radius: f32,
     outer_radius: Option<f32>,
@@ -378,6 +380,7 @@ pub struct PhysicsWorld {
     ball_color:         Option<(u8, u8, u8)>,
     flippers:           Vec<FlipperInfo>,
     bumpers:            Vec<BumperInfo>,
+    rotating_groups:    Vec<movers::RotatingGroup>,
     kick_walls:         Vec<KickWallInfo>,
     drop_target_groups: Vec<DropTargetGroupInfo>,
     rollover_groups:    Vec<RolloverGroupInfo>,
@@ -573,7 +576,7 @@ impl PhysicsWorld {
             lit:     false,
         });
 
-        PhysicsWorld {
+        let mut world = PhysicsWorld {
             bodies,
             colliders,
             impulse_joints,
@@ -591,6 +594,7 @@ impl PhysicsWorld {
             ball_radius,
             ball_color,
             flippers,
+            rotating_groups: movers::build_rotating_groups(table, &bumpers_info),
             bumpers: bumpers_info,
             kick_walls,
             drop_target_groups,
@@ -615,7 +619,11 @@ impl PhysicsWorld {
             gate_y,
             gate_collider,
             gate_cleared: false,
-        }
+        };
+        // Put moving elements at their first-frame positions straight away,
+        // as the original does on its first tick, so nothing jumps on frame one.
+        movers::advance_rotating_groups(&mut world.rotating_groups, 0.0, &mut world.bumpers, &mut world.bodies);
+        world
     }
 
     // -----------------------------------------------------------------------
@@ -699,6 +707,7 @@ impl PhysicsWorld {
         colliders.insert_with_parent(col, h, bodies);
 
         bumpers.push(BumperInfo {
+            body: h,
             position: b.position,
             radius: b.radius,
             outer_radius: b.outer_radius,
@@ -1024,6 +1033,10 @@ impl PhysicsWorld {
             &(),
             &(),
         );
+
+        // Moving table elements (orbiting bumpers etc.) advance in sim time,
+        // after the physics step like the original's per-frame element ticks.
+        movers::advance_rotating_groups(&mut self.rotating_groups, dt, &mut self.bumpers, &mut self.bodies);
 
         // Bumper proximity detection: collect hits, then apply kicks + score
         {
@@ -2412,3 +2425,100 @@ mod slingshot_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod rotating_bumper_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    fn pos(w: &PhysicsWorld, id: &str) -> [f32; 2] {
+        w.bumpers.iter().find(|b| b.shot_id.as_deref() == Some(id)).expect(id).position
+    }
+
+    fn dist(a: [f32; 2], b: [f32; 2]) -> f32 { (a[0] - b[0]).hypot(a[1] - b[1]) }
+
+    /// Table 2: four bumpers orbit CenterBumper1 at 0.75 rad/s and two orbit
+    /// (9.35, 13) at -0.5 rad/s, in sim time, at constant radius, with the
+    /// physics bodies following the drawn positions.
+    #[test]
+    fn table_2_bumpers_orbit_at_the_original_speeds() {
+        let table = load_table(2).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        assert_eq!(world.rotating_groups.len(), 2, "table 2 has two rotating groups");
+
+        let center1 = pos(&world, "CenterBumper1");
+        let center2 = [9.35_f32, 13.0];
+        let ids1 = ["RotatingBumper1A", "RotatingBumper1B", "RotatingBumper1C", "RotatingBumper1D"];
+        let ids2 = ["RotatingBumper2A", "RotatingBumper2B"];
+        let r1 = dist(pos(&world, ids1[0]), center1);
+        let r2 = dist(pos(&world, ids2[0]), center2);
+        let angle = |p: [f32; 2], c: [f32; 2]| (p[1] - c[1]).atan2(p[0] - c[0]);
+        let (a1, a2) = (angle(pos(&world, ids1[0]), center1), angle(pos(&world, ids2[0]), center2));
+
+        // Two real seconds is about 4.6 sim seconds at the table's time ratio.
+        let input = InputState::default();
+        let frames = 60;
+        for _ in 0..frames { world.step_frame(0.033, &input); }
+        let sim_seconds = 0.033 * frames as f32 * table.time_ratio();
+
+        for id in ids1 { assert!((dist(pos(&world, id), center1) - r1).abs() < 1e-3, "{id} radius drifted"); }
+        for id in ids2 { assert!((dist(pos(&world, id), center2) - r2).abs() < 1e-3, "{id} radius drifted"); }
+
+        let turned = |now: f32, was: f32| (now - was + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        let d1 = turned(angle(pos(&world, ids1[0]), center1), a1);
+        let d2 = turned(angle(pos(&world, ids2[0]), center2), a2);
+        assert!((d1 - 0.75 * sim_seconds).abs() < 0.02 || (d1 - (0.75 * sim_seconds - std::f32::consts::TAU)).abs() < 0.02, "group 1 turned {d1}, expected {}", 0.75 * sim_seconds);
+        assert!((d2 + 0.5 * sim_seconds).abs() < 0.02 || (d2 - (-0.5 * sim_seconds + std::f32::consts::TAU)).abs() < 0.02, "group 2 turned {d2}, expected {}", -0.5 * sim_seconds);
+
+        // The collider moves with the bumper, and the opposite bumper stays opposite.
+        for id in ids1.iter().chain(ids2.iter()) {
+            let b = world.bumpers.iter().find(|b| b.shot_id.as_deref() == Some(id)).unwrap();
+            let t = world.bodies.get(b.body).unwrap().translation();
+            assert!(dist([t.x, t.y], b.position) < 1e-4, "{id}: body not at drawn position");
+        }
+        let (pa, pc) = (pos(&world, ids1[0]), pos(&world, ids1[2]));
+        assert!(dist([(pa[0] + pc[0]) / 2.0, (pa[1] + pc[1]) / 2.0], center1) < 1e-3, "A and C should stay opposite");
+    }
+
+    #[test]
+    fn tables_without_movers_have_no_rotating_groups() {
+        for n in [1u8, 3, 4, 8, 9] {
+            let world = PhysicsWorld::from_table(&load_table(n).unwrap());
+            assert!(world.rotating_groups.is_empty(), "table {n} should not rotate anything");
+        }
+    }
+
+    /// The ball must hit a rotating bumper where it is *now*, not where the
+    /// table file placed it.
+    #[test]
+    fn ball_collides_with_a_rotating_bumper_at_its_current_position() {
+        let table = load_table(2).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        let input = InputState::default();
+        for _ in 0..40 { world.step_frame(0.033, &input); } // let it move well away from the file's position
+
+        let moved = pos(&world, "RotatingBumper1A");
+        let file_pos = [14.0_f32, 19.6];
+        assert!(dist(moved, file_pos) > 1.5, "bumper should have moved away from its JSON position, at {moved:?}");
+
+        // Fire the ball radially inward at the bumper from the free side, outside the ring.
+        let center = pos(&world, "CenterBumper1");
+        let (dx, dy) = (moved[0] - center[0], moved[1] - center[1]);
+        let len = dx.hypot(dy);
+        let out = [dx / len, dy / len];
+        let ball_h = world.ball_handle.unwrap();
+        let body = world.bodies.get_mut(ball_h).unwrap();
+        body.set_translation(Vector::new(moved[0] + out[0] * 3.0, moved[1] + out[1] * 3.0), true);
+        body.set_linvel(Vector::new(-out[0] * 5.0, -out[1] * 5.0), true);
+        body.set_gravity_scale(0.0, true);
+
+        let mut bounced = false;
+        for _ in 0..30 {
+            world.step_frame(0.033, &input);
+            let v = world.bodies.get(ball_h).unwrap().linvel();
+            if v.x * out[0] + v.y * out[1] > 1.0 { bounced = true; break; }
+        }
+        assert!(bounced, "ball passed through the rotating bumper's current position");
+    }
+}
+
