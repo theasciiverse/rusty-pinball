@@ -62,17 +62,35 @@ These are the building blocks. Most per-table gaps are "needs C1 + C3 + C4" and 
 
 Reading it: **C1, C3, C4 and C5 are needed by every table, and C2 by seven of eight.** That is why they come first.
 
-## 3. Suggested order
+## 3. Plan
 
-1. **C1 + C3 + C4 together (small). DONE for tables 1 and 2.** A delegate trait with the callbacks, a scheduled-action queue on sim time, and a
-   timed message line in the DMD. Nothing visible changes until a table uses them, but everything below depends on them.
-2. **C5 + C6.** Element control by id and sensors by id with per-ball last-sensor memory. This unlocks table 8 completely
-   (it needs no multiball) and most of table 1 and 2's non-multiball rules.
-3. **C10.** Fractional multiplier and the original rollover semantics, which also removes our invented completion bonuses.
-4. **C2 + C12.** The multi-ball world, then multiball, ball lock, extra ball, mercy and multiball savers. Tables 1 to 7.
-5. **C7, C11.** Ball colors and force hooks (tables 5, 6), score animations.
-6. **C8, C9.** Full layer model and the shape renderer (table 7).
-7. **C13, C14** as time allows.
+Agreed with David: **round 1 is every table's moving and centre-piece functionality; multiball is round 2, for all
+tables together.**
+
+### Round 1: centre pieces and moving parts
+
+Shared building blocks first (each small, each tested), then the tables:
+
+1. **C6 sensors by id** with each ball's most recent sensor id (ramp and orbit direction detection).
+2. **C7 ball colors** (per ball, set at runtime, drawn) and a per-ball force hook (table 6's gravity wells).
+3. **C5 element control**: runtime color override and show/hide for elements, movable rollover circles, set ignoreBall.
+4. **C10 fractional multiplier** (table 4 adds 0.01 per bumper) and the original rollover scoring where a script owns it.
+5. **C9 shape renderer** (table 7 only).
+
+Then, roughly in this order: table 6 (planets, gravity, planet colors, ramps), table 4 (status grid, percent multiplier,
+ramp walls), table 5 (colored-ball diagram and lines, ramp bonuses), table 3 (bumper bonus and indicator rings), table 8
+(inserts, rack bonus, gates), table 7 (star map).
+
+Round 1 leaves out only what needs more than one ball: ball locks, multiball launches, jackpots, the multiball saver.
+
+### Round 2: multiball for all tables
+
+The multi-ball core and the script layer exist (tables 1 and 2 already have multiball). Round 2 adds, per table: tables 3, 4,
+5, 6, 7 multiball and locks, extra ball (table 5), the multiball saver, mercy ball, and the jackpots.
+
+### Later
+
+C11 score animations, C12 game flow extras (mercy ball, stuck-ball bump, unlimited balls), C13 audio parity, C14 app features.
 
 ## 4. Done so far (so it is not re-audited)
 
