@@ -188,6 +188,20 @@ struct KickWallInfo {
     shot_id: Option<String>,
 }
 
+/// The wall that closes the shooter lane's exit behind the ball so it can't
+/// roll back in (original: element id "LaunchBarrier", closed by the
+/// "LaunchBarrierSensor" rect and opened by "LaunchBarrierRetract").
+struct LaunchBarrierInfo {
+    x1: f32, y1: f32, x2: f32, y2: f32,
+    color: Option<(u8, u8, u8)>,
+    collider: ColliderHandle,
+    active: bool,
+    close_rect: Option<[f32; 4]>,
+    open_rect: Option<[f32; 4]>,
+}
+
+const LAUNCH_BARRIER_ID: &str = "LaunchBarrier";
+
 struct DropTargetInfo {
     x1: f32, y1: f32, x2: f32, y2: f32,
     collider: ColliderHandle,
@@ -196,6 +210,10 @@ struct DropTargetInfo {
 
 struct DropTargetGroupInfo {
     targets: Vec<DropTargetInfo>,
+    // Sim seconds after the last target falls until all come back. Like the
+    // original, a group with no reset (or 0) stays down once cleared.
+    reset_delay: Option<f32>,
+    reset_timer: Option<f32>,
     score:   u64,
     label:   String,
     color:   Option<(u8, u8, u8)>,
@@ -286,18 +304,22 @@ const BUMPER_LIT_TICKS:   u8  = 6 * STEP_SCALE;
 // sim time now vs ~16.7 ms before): 12 substeps is ~110 ms, as 6 used to be.
 const BUMPER_DEBOUNCE_TICKS: u8 = 12;
 const KICK_WALL_DEBOUNCE: u8  = 12;
-// Contact model, matching the original (Box2D) Vector Pinball. Its ball and
-// bumpers are circles with friction 0.3 / restitution 0.6; walls, arcs, paths,
-// drop targets and flippers use Box2D's defaults (friction 0.2, restitution 0).
-// Box2D combines restitution as max (all colliders use Max here too) and
-// friction as sqrt(a*b); Rapier can't do the geometric mean, so wall friction is
-// picked so Rapier's average gives the same ball/wall value: (0.3 + 0.19) / 2
-// = 0.245 = sqrt(0.3 * 0.2).
+// Contact model, matching the original (Box2D) Vector Pinball where it can.
+// Restitution matches exactly: ball and bumpers 0.6, everything else 0, and all
+// colliders combine as max like Box2D. Friction does not match for the guides:
+// the original's ball/wall friction is sqrt(0.3 * 0.2) = 0.245, but Rapier
+// loses much more speed to it on the curved shooter lane (measured: only about
+// 5 in 12 launches reached the top with it, vs 11 or 12 in 12 with almost none),
+// so lane, wall, arc, path and drop-target friction is kept low. Flippers and
+// bumpers keep the original's ball-contact friction (0.245 and 0.3), because
+// that is where grip and cradling matter. Rapier averages the two surfaces'
+// coefficients, so each is chosen to give that pair value with the ball's.
 const BALL_RESTITUTION:   f32 = 0.6;
-const BALL_FRICTION:      f32 = 0.3;
-const BUMPER_FRICTION:    f32 = 0.3;
+const BALL_FRICTION:      f32 = 0.05;
+const WALL_FRICTION:      f32 = 0.05;
+const FLIPPER_FRICTION:   f32 = 0.44;   // (0.05 + 0.44) / 2 = 0.245
+const BUMPER_FRICTION:    f32 = 0.55;   // (0.05 + 0.55) / 2 = 0.3
 const WALL_RESTITUTION:   f32 = 0.0;
-const WALL_FRICTION:      f32 = 0.19;
 // Restitution of the ball against a kick wall, applied by hand before the kick.
 const KICK_WALL_BOUNCE:   f32 = BALL_RESTITUTION;
 const DROP_CLEAR_BONUS:   u64 = 2_000;
@@ -330,6 +352,17 @@ const FLIPPER_TOP_SLOWDOWN_SPEED: f32 = 0.5;
 // Phase 0 = unlit so the dots go dark immediately on completion (obvious feedback).
 const ROLLOVER_FLASH_TICKS:  u8 = 32 * STEP_SCALE;
 const ROLLOVER_FLASH_PHASES: u8 = 4;
+
+/// Which ball saver a cleared drop-target bank re-arms, by element ids (the
+/// original's delegates: Field1/3/4/5/6/7 use the "...Save" ids, table 2 uses
+/// plain Left/Right).
+fn saver_for_drop_bank(group_id: &str) -> Option<&'static str> {
+    match group_id {
+        "DropTargetLeftSave" | "DropTargetLeft" => Some("BallSaver-left"),
+        "DropTargetRightSave" | "DropTargetRight" => Some("BallSaver-right"),
+        _ => None,
+    }
+}
 
 // ── Layer collision groups ─────────────────────────────────────────────────────
 // Bits 0-3 correspond to layers 0-3.  Universal walls use ALL bits (like
@@ -381,6 +414,7 @@ pub struct PhysicsWorld {
     flippers:           Vec<FlipperInfo>,
     bumpers:            Vec<BumperInfo>,
     rotating_groups:    Vec<movers::RotatingGroup>,
+    launch_barrier:     Option<LaunchBarrierInfo>,
     kick_walls:         Vec<KickWallInfo>,
     drop_target_groups: Vec<DropTargetGroupInfo>,
     rollover_groups:    Vec<RolloverGroupInfo>,
@@ -433,6 +467,8 @@ impl PhysicsWorld {
         let mut spinners           = Vec::new();
         let mut wall_segs          = Vec::new();
         let mut layer_sensors      = Vec::new();
+        let mut launch_barrier: Option<LaunchBarrierInfo> = None;
+        let (mut barrier_close_rect, mut barrier_open_rect) = (None, None);
 
         // Gravity points downward in rapier (negative y)
         let g = table.gravity_magnitude();
@@ -443,6 +479,21 @@ impl PhysicsWorld {
                 ElementDef::WallElement(w) => {
                     let label = label_for(elem_idx, &w.id);
                     let wall_col = Self::add_wall(w, &mut bodies, &mut colliders, &mut wall_segs, w.layer, Some(label.clone()), parse_color(&w.color));
+                    if w.id.as_deref() == Some(LAUNCH_BARRIER_ID) {
+                        if let (Some(col), Some([x1, y1, x2, y2])) = (wall_col, w.position) {
+                            // Starts open; drawn and solid only while closed.
+                            colliders.get_mut(col).unwrap().set_collision_groups(InteractionGroups::none());
+                            wall_segs.pop();
+                            launch_barrier = Some(LaunchBarrierInfo {
+                                x1, y1, x2, y2,
+                                color: parse_color(&w.color),
+                                collider: col,
+                                active: false,
+                                close_rect: None,
+                                open_rect: None,
+                            });
+                        }
+                    }
                     // Register slingshot / kicker if this wall has a kick value.
                     if w.disabled != Some(true) && w.kill != Some(true) {
                         if let (Some(kick), Some([x1, y1, x2, y2]), Some(col)) =
@@ -495,6 +546,11 @@ impl PhysicsWorld {
                     spinners.push(Self::build_spinner(s, label_for(elem_idx, &s.id)));
                 }
                 ElementDef::SensorElement(s) => {
+                    match s.id.as_deref() {
+                        Some("LaunchBarrierSensor")  => barrier_close_rect = s.rect,
+                        Some("LaunchBarrierRetract") => barrier_open_rect  = s.rect,
+                        _ => {}
+                    }
                     if let (Some(rect), Some(target)) = (s.rect, s.ball_layer) {
                         layer_sensors.push(LayerSensorInfo {
                             rect,
@@ -505,6 +561,11 @@ impl PhysicsWorld {
                 }
                 _ => {}
             }
+        }
+
+        if let Some(b) = &mut launch_barrier {
+            b.close_rect = barrier_close_rect;
+            b.open_rect = barrier_open_rect;
         }
 
         let ball_radius = table.ball_radius();
@@ -595,6 +656,7 @@ impl PhysicsWorld {
             ball_color,
             flippers,
             rotating_groups: movers::build_rotating_groups(table, &bumpers_info),
+            launch_barrier,
             bumpers: bumpers_info,
             kick_walls,
             drop_target_groups,
@@ -632,7 +694,10 @@ impl PhysicsWorld {
 
     fn add_wall(w: &WallDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, segs: &mut Vec<WallSnapshot>, layer: Option<u8>, label: Option<String>, color: Option<(u8, u8, u8)>) -> Option<ColliderHandle> {
         let pos = match &w.position { Some(p) => *p, None => return None };
-        if w.disabled == Some(true) || w.kill == Some(true) { return None; }
+        // Disabled walls are skipped, except the launch barrier, which starts
+        // open and is closed later by its sensor.
+        let is_barrier = w.id.as_deref() == Some(LAUNCH_BARRIER_ID);
+        if (w.disabled == Some(true) && !is_barrier) || w.kill == Some(true) { return None; }
 
         let [x1, y1, x2, y2] = pos;
         let cx = (x1 + x2) / 2.0;
@@ -765,7 +830,7 @@ impl PhysicsWorld {
             .density(FLIPPER_DENSITY)
             .restitution(WALL_RESTITUTION)
             .restitution_combine_rule(CoefficientCombineRule::Max)
-            .friction(WALL_FRICTION)
+            .friction(FLIPPER_FRICTION)
             .build();
         colliders.insert_with_parent(col, h, bodies);
 
@@ -868,7 +933,15 @@ impl PhysicsWorld {
             let ch = colliders.insert_with_parent(col, bh, bodies);
             DropTargetInfo { x1, y1, x2, y2, collider: ch, active: true }
         }).collect();
-        DropTargetGroupInfo { targets, score: d.score.unwrap_or(0), label, color: parse_color(&d.color), shot_id: d.id.clone() }
+        DropTargetGroupInfo {
+            targets,
+            reset_delay: d.reset.filter(|&r| r > 0.0),
+            reset_timer: None,
+            score: d.score.unwrap_or(0),
+            label,
+            color: parse_color(&d.color),
+            shot_id: d.id.clone(),
+        }
     }
 
     fn build_rollover_group(r: &RolloverGroupDef, label: String) -> RolloverGroupInfo {
@@ -1038,6 +1111,24 @@ impl PhysicsWorld {
         // after the physics step like the original's per-frame element ticks.
         movers::advance_rotating_groups(&mut self.rotating_groups, dt, &mut self.bumpers, &mut self.bodies);
 
+        // Launch barrier: closes once the ball passes its sensor, opens again
+        // at the retract sensor (checked second, so it wins if they overlap).
+        if let (Some(barrier), Some(ball_h)) = (&mut self.launch_barrier, self.ball_handle) {
+            if let Some(body) = self.bodies.get(ball_h) {
+                let p = body.translation();
+                let inside = |r: Option<[f32; 4]>| r.map_or(false, |[x0, y0, x1, y1]| p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1);
+                let was = barrier.active;
+                if inside(barrier.close_rect) { barrier.active = true; }
+                if inside(barrier.open_rect) { barrier.active = false; }
+                if barrier.active != was {
+                    let groups = if barrier.active { InteractionGroups::all() } else { InteractionGroups::none() };
+                    if let Some(col) = self.colliders.get_mut(barrier.collider) {
+                        col.set_collision_groups(groups);
+                    }
+                }
+            }
+        }
+
         // Bumper proximity detection: collect hits, then apply kicks + score
         {
             let mut hits: Vec<(usize, f32, f32)> = Vec::new(); // (index, nx, ny)
@@ -1180,6 +1271,7 @@ impl PhysicsWorld {
                     }
                 }
             }
+            let mut savers_to_restore: Vec<&'static str> = Vec::new();
             for (gi, ti) in hits {
                 let score = self.drop_target_groups[gi].score;
                 if score > 0 { self.score_events.borrow_mut().push(score); }
@@ -1196,12 +1288,32 @@ impl PhysicsWorld {
                     if let Some(pts) = Self::record_shot_opt(&mut self.letter_groups, &mut self.jackpot, &self.drop_target_groups[gi].shot_id) {
                         self.score_events.borrow_mut().push(pts);
                     }
-                    for target in &mut self.drop_target_groups[gi].targets {
-                        target.active = true;
-                        if let Some(col) = self.colliders.get_mut(target.collider) {
-                            col.set_collision_groups(InteractionGroups::all());
-                        }
+                    // The targets come back after the group's reset delay (in
+                    // sim time), or never if it has none, as in the original.
+                    self.drop_target_groups[gi].reset_timer = self.drop_target_groups[gi].reset_delay;
+                    if let Some(saver) = self.drop_target_groups[gi].shot_id.as_deref().and_then(saver_for_drop_bank) {
+                        savers_to_restore.push(saver);
                     }
+                }
+            }
+            for saver in savers_to_restore {
+                self.restore_ball_saver(saver);
+            }
+        }
+
+        // Cleared drop-target groups restore once their reset delay has run.
+        for gi in 0..self.drop_target_groups.len() {
+            let Some(timer) = self.drop_target_groups[gi].reset_timer else { continue };
+            let timer = timer - dt;
+            if timer > 0.0 {
+                self.drop_target_groups[gi].reset_timer = Some(timer);
+                continue;
+            }
+            self.drop_target_groups[gi].reset_timer = None;
+            for target in &mut self.drop_target_groups[gi].targets {
+                target.active = true;
+                if let Some(col) = self.colliders.get_mut(target.collider) {
+                    col.set_collision_groups(InteractionGroups::all());
                 }
             }
         }
@@ -1394,6 +1506,20 @@ impl PhysicsWorld {
         }
     }
 
+    /// Re-arms the ball saver with this element id: visible again, and its
+    /// collider back in the physics world.
+    fn restore_ball_saver(&mut self, id: &str) {
+        for kw in &mut self.kick_walls {
+            if kw.retract_when_hit && kw.shot_id.as_deref() == Some(id) {
+                kw.active = true;
+                kw.retract_pending = false;
+                if let Some(col) = self.colliders.get_mut(kw.collider_handle) {
+                    col.set_collision_groups(InteractionGroups::all());
+                }
+            }
+        }
+    }
+
     /// Distance from point (px,py) to segment (x1,y1)-(x2,y2), plus the unit
     /// normal pointing from the closest point on the segment toward (px,py).
     fn point_to_segment_dist(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> (f32, f32, f32) {
@@ -1534,8 +1660,7 @@ impl PhysicsWorld {
     }
 
     /// Freeze the ball at the launch position with gravity off so it appears
-    /// waiting in the shooter lane between balls.  Also reactivates any
-    /// retract-when-hit walls (ball savers), resets any bumper award
+    /// waiting in the shooter lane between balls.  Also resets any bumper award
     /// ladders (and their super-mode trigger) to fire again, and un-lights
     /// the jackpot (and clears letter-award completion progress toward it)
     /// for the new ball.
@@ -1563,16 +1688,16 @@ impl PhysicsWorld {
                 col.set_collision_groups(InteractionGroups::none());
             }
         }
-        // Reactivate ball-saver walls and re-enable their colliders.
-        for kw in &mut self.kick_walls {
-            if kw.retract_when_hit {
-                kw.active = true;
-                kw.retract_pending = false;
-                if let Some(col) = self.colliders.get_mut(kw.collider_handle) {
-                    col.set_collision_groups(InteractionGroups::all());
-                }
+        // New ball: the launch barrier opens again (original ballLost/gameStarted).
+        if let Some(barrier) = &mut self.launch_barrier {
+            barrier.active = false;
+            if let Some(col) = self.colliders.get_mut(barrier.collider) {
+                col.set_collision_groups(InteractionGroups::none());
             }
         }
+        // Ball savers are NOT re-armed here: in the original a used saver stays
+        // gone until the matching drop-target bank is cleared (see
+        // `saver_for_drop_bank`), not on every new ball.
         // Reset award-ladder bumpers to their first rung for the new ball,
         // and let their super-mode trigger fire again.
         for bump in &mut self.bumpers {
@@ -1697,7 +1822,7 @@ impl PhysicsWorld {
 
         FieldSnapshot {
             ball,
-            walls: self.wall_segments.clone(),
+            walls: self.wall_segments.iter().cloned().chain(self.launch_barrier.iter().filter(|b| b.active).map(|b| WallSnapshot { x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2, layer: None, label: None, color: b.color })).collect(),
             kick_walls,
             bumpers,
             flippers,
@@ -2090,7 +2215,7 @@ mod kick_wall_tests {
         assert!(!world.kick_walls[ki].active, "ball-saver retracts (deactivates) once hit");
 
         world.park_ball();
-        assert!(world.kick_walls[ki].active, "park_ball reactivates it for the next ball");
+        assert!(!world.kick_walls[ki].active, "a used ball saver stays gone for the next ball, as in the original");
     }
 }
 
@@ -2522,3 +2647,199 @@ mod rotating_bumper_tests {
     }
 }
 
+#[cfg(test)]
+mod drop_bank_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    /// Knocks down all but the last target of the bank with this id, then puts
+    /// the ball on the last one and steps a frame so it falls. Returns the
+    /// group's index.
+    fn clear_bank(world: &mut PhysicsWorld, id: &str) -> usize {
+        let gi = world.drop_target_groups.iter().position(|g| g.shot_id.as_deref() == Some(id))
+            .unwrap_or_else(|| panic!("no drop bank {id}"));
+        let last = world.drop_target_groups[gi].targets.len() - 1;
+        for ti in 0..last {
+            world.drop_target_groups[gi].targets[ti].active = false;
+            let ch = world.drop_target_groups[gi].targets[ti].collider;
+            world.colliders.get_mut(ch).unwrap().set_collision_groups(InteractionGroups::none());
+        }
+        let t = &world.drop_target_groups[gi].targets[last];
+        let (mx, my) = ((t.x1 + t.x2) / 2.0, (t.y1 + t.y2) / 2.0);
+        let ball_h = world.ball_handle.unwrap();
+        let body = world.bodies.get_mut(ball_h).unwrap();
+        body.set_translation(Vector::new(mx, my), true);
+        body.set_linvel(Vector::new(0.0, 0.0), true);
+        body.set_gravity_scale(0.0, true);
+        world.step_frame(0.033, &InputState::default());
+        gi
+    }
+
+    fn all_up(world: &PhysicsWorld, gi: usize) -> bool { world.drop_target_groups[gi].targets.iter().all(|t| t.active) }
+    fn all_down(world: &PhysicsWorld, gi: usize) -> bool { world.drop_target_groups[gi].targets.iter().all(|t| !t.active) }
+
+    /// Table 2's banks reset 2.0 sim seconds after the last target falls (about
+    /// 0.87 s of real time at 2.3x), not instantly.
+    #[test]
+    fn a_cleared_bank_comes_back_after_its_reset_delay() {
+        let table = load_table(2).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        let gi = clear_bank(&mut world, "DropTargetLeft");
+        assert!(all_down(&world, gi), "the bank should be down right after the last target falls");
+
+        // Park the ball somewhere harmless, then let time pass: 1.6 sim seconds is still before 2.0.
+        let ball_h = world.ball_handle.unwrap();
+        world.bodies.get_mut(ball_h).unwrap().set_translation(Vector::new(9.0, 3.0), true);
+        let input = InputState::default();
+        let frame_sim = 0.033 * table.time_ratio();
+        for _ in 0..(1.6 / frame_sim) as usize { world.step_frame(0.033, &input); }
+        assert!(all_down(&world, gi), "still down before the 2 second delay");
+        for _ in 0..(0.9 / frame_sim) as usize + 1 { world.step_frame(0.033, &input); }
+        assert!(all_up(&world, gi), "back up after the delay");
+    }
+
+    /// Original: a bank with no reset value stays down once cleared (table 8's inline targets).
+    #[test]
+    fn a_bank_without_a_reset_value_stays_down() {
+        let table = load_table(8).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        let gi = clear_bank(&mut world, "InlineTargets");
+        let ball_h = world.ball_handle.unwrap();
+        world.bodies.get_mut(ball_h).unwrap().set_translation(Vector::new(9.0, 3.0), true);
+        let input = InputState::default();
+        for _ in 0..300 { world.step_frame(0.033, &input); }
+        assert!(all_down(&world, gi), "a bank with no reset must not come back");
+    }
+
+    /// Clearing the left bank re-arms the left ball saver only; savers are not
+    /// re-armed by a new ball.
+    #[test]
+    fn clearing_the_matching_bank_restores_that_ball_saver_only() {
+        for (n, left_bank, right_bank) in [(1u8, "DropTargetLeftSave", "DropTargetRightSave"), (2, "DropTargetLeft", "DropTargetRight")] {
+            let table = load_table(n).unwrap();
+            let mut world = PhysicsWorld::from_table(&table);
+            let used_up = |w: &mut PhysicsWorld| for kw in &mut w.kick_walls {
+                if kw.retract_when_hit {
+                    kw.active = false;
+                    w.colliders.get_mut(kw.collider_handle).unwrap().set_collision_groups(InteractionGroups::none());
+                }
+            };
+            let saver = |w: &PhysicsWorld, id: &str| w.kick_walls.iter().find(|k| k.shot_id.as_deref() == Some(id)).unwrap().active;
+
+            used_up(&mut world);
+            world.park_ball();
+            assert!(!saver(&world, "BallSaver-left") && !saver(&world, "BallSaver-right"), "table {n}: a new ball does not re-arm savers");
+
+            clear_bank(&mut world, left_bank);
+            assert!(saver(&world, "BallSaver-left"), "table {n}: left bank restores the left saver");
+            assert!(!saver(&world, "BallSaver-right"), "table {n}: and not the right one");
+
+            clear_bank(&mut world, right_bank);
+            assert!(saver(&world, "BallSaver-right"), "table {n}: right bank restores the right saver");
+        }
+    }
+}
+
+#[cfg(test)]
+mod launch_barrier_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    fn place_ball(world: &mut PhysicsWorld, x: f32, y: f32, vx: f32, vy: f32) {
+        let h = world.ball_handle.unwrap();
+        let body = world.bodies.get_mut(h).unwrap();
+        body.set_translation(Vector::new(x, y), true);
+        body.set_linvel(Vector::new(vx, vy), true);
+        body.set_gravity_scale(0.0, true);
+    }
+
+    fn centre(r: [f32; 4]) -> (f32, f32) { ((r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0) }
+
+    #[test]
+    fn the_barrier_closes_at_its_sensor_opens_at_the_retract_sensor_and_on_a_new_ball() {
+        for n in [1u8, 2, 3, 5, 6, 7] {
+            let table = load_table(n).unwrap();
+            let mut world = PhysicsWorld::from_table(&table);
+            let (close, open) = {
+                let b = world.launch_barrier.as_ref().unwrap_or_else(|| panic!("table {n} has a launch barrier"));
+                (b.close_rect.expect("close sensor"), b.open_rect.expect("retract sensor"))
+            };
+            let input = InputState::default();
+            assert!(!world.launch_barrier.as_ref().unwrap().active, "table {n}: starts open");
+
+            let (cx, cy) = centre(close);
+            place_ball(&mut world, cx, cy, 0.0, 0.0);
+            world.step_frame(0.033, &input);
+            assert!(world.launch_barrier.as_ref().unwrap().active, "table {n}: closes at its sensor");
+            let col = world.launch_barrier.as_ref().unwrap().collider;
+            assert_eq!(world.colliders.get(col).unwrap().collision_groups(), InteractionGroups::all(), "table {n}: solid while closed");
+            assert_eq!(world.snapshot().walls.len(), world.wall_segments.len() + 1, "table {n}: drawn while closed");
+
+            let (ox, oy) = centre(open);
+            place_ball(&mut world, ox, oy, 0.0, 0.0);
+            world.step_frame(0.033, &input);
+            assert!(!world.launch_barrier.as_ref().unwrap().active, "table {n}: opens at the retract sensor");
+
+            let (cx, cy) = centre(close);
+            place_ball(&mut world, cx, cy, 0.0, 0.0);
+            world.step_frame(0.033, &input);
+            assert!(world.launch_barrier.as_ref().unwrap().active);
+            world.park_ball();
+            assert!(!world.launch_barrier.as_ref().unwrap().active, "table {n}: a new ball opens it again");
+            assert_eq!(world.snapshot().walls.len(), world.wall_segments.len(), "table {n}: not drawn when open");
+        }
+    }
+
+    /// Table 2: the barrier is a vertical wall at x=10 at the top of the lane's
+    /// exit. Closed, a ball coming from the left cannot get back in.
+    #[test]
+    fn a_closed_barrier_stops_the_ball_re_entering_the_lane() {
+        let table = load_table(2).unwrap();
+        let input = InputState::default();
+        for (closed, expect_blocked) in [(true, true), (false, false)] {
+            let mut world = PhysicsWorld::from_table(&table);
+            if closed {
+                let close = world.launch_barrier.as_ref().unwrap().close_rect.unwrap();
+                let (cx, cy) = centre(close);
+                place_ball(&mut world, cx, cy, 0.0, 0.0);
+                world.step_frame(0.033, &input);
+                assert!(world.launch_barrier.as_ref().unwrap().active);
+            }
+            // y=29.3 is the middle of the 1.2 gap between the lane wall end (28.7) and the top.
+            // Closed case: start left of the closing sensor (x 9.0 to 9.5). Open case: start
+            // just right of it, since crossing that sensor closes the barrier by design.
+            let start_x = if closed { 8.4 } else { 9.6 };
+            place_ball(&mut world, start_x, 29.3, 6.0, 0.0);
+            let mut max_x = 0.0_f32;
+            for _ in 0..30 {
+                world.step_frame(0.033, &input);
+                max_x = max_x.max(world.ball_position().unwrap().x);
+            }
+            if expect_blocked { assert!(max_x < 10.0, "closed barrier let the ball through to x={max_x:.2}"); }
+            else { assert!(max_x > 10.5, "open barrier should let the ball pass, got x={max_x:.2}"); }
+        }
+    }
+
+    /// The plunger has to clear the lane reliably (the launch jitter allows an
+    /// occasional short shot). Guards the friction settings: with the
+    /// original's wall friction under Rapier only about 40% got over the top.
+    #[test]
+    fn a_launch_normally_gets_over_the_top_of_the_lane() {
+        for n in [1u8, 2, 3] {
+            let table = load_table(n).unwrap();
+            let input = InputState::default();
+            let mut over = 0;
+            for _ in 0..24 {
+                let mut world = PhysicsWorld::from_table(&table);
+                world.launch_ball();
+                let mut max_y = 0.0_f32;
+                for _ in 0..200 {
+                    world.step_frame(0.033, &input);
+                    max_y = max_y.max(world.ball_position().unwrap().y);
+                }
+                if max_y > table.height - 1.2 { over += 1; }
+            }
+            assert!(over >= 16, "table {n}: only {over}/24 launches got over the top of the lane");
+        }
+    }
+}
