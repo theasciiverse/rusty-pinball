@@ -725,6 +725,9 @@ impl PhysicsWorld {
         // Disabled walls are skipped, except the launch barrier, which starts
         // open and is closed later by its sensor.
         let is_barrier = w.id.as_deref() == Some(LAUNCH_BARRIER_ID);
+        // ignoreBall walls have no body at all (the original draws them only when
+        // a table script shows them, which we do not run yet, so they stay hidden).
+        if w.ignore_ball == Some(true) { return None; }
         if (w.disabled == Some(true) && !is_barrier) || w.kill == Some(true) { return None; }
 
         let [x1, y1, x2, y2] = pos;
@@ -760,12 +763,13 @@ impl PhysicsWorld {
     }
 
     fn add_arc(a: &WallArcDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, segs: &mut Vec<WallSnapshot>, label: String) {
+        if a.ignore_ball == Some(true) { return; }
         let color = parse_color(&a.color);
         for (i, (p0, p1)) in a.to_segments().into_iter().enumerate() {
             let dummy_def = WallDef {
                 position: Some([p0[0], p0[1], p1[0], p1[1]]),
                 id: None, color: None, kick: None, restitution: None,
-                kill: None, disabled: None, retract_when_hit: None, score: None,
+                kill: None, disabled: None, retract_when_hit: None, ignore_ball: None, score: None,
                 layer: None,
             };
             let seg_label = if i == 0 { Some(label.clone()) } else { None };
@@ -774,12 +778,13 @@ impl PhysicsWorld {
     }
 
     fn add_path(p: &WallPathDef, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, segs: &mut Vec<WallSnapshot>, label: String) {
+        if p.ignore_ball == Some(true) { return; }
         let color = parse_color(&p.color);
         for (i, pair) in p.positions.windows(2).enumerate() {
             let dummy = WallDef {
                 position: Some([pair[0][0], pair[0][1], pair[1][0], pair[1][1]]),
                 id: None, color: None, kick: None, restitution: None,
-                kill: None, disabled: None, retract_when_hit: None, score: None,
+                kill: None, disabled: None, retract_when_hit: None, ignore_ball: None, score: None,
                 layer: None,
             };
             let seg_label = if i == 0 { Some(label.clone()) } else { None };
@@ -2859,17 +2864,20 @@ mod launch_barrier_tests {
             let table = load_table(n).unwrap();
             let input = InputState::default();
             let mut over = 0;
-            for _ in 0..24 {
+            // Measured over 200 launches: about 85% (table 1), 90% (2), 99% (3), the
+            // misses being the launch jitter's low end. 42 of 60 sits far below
+            // that and far above the ~42% the original's friction gave.
+            for _ in 0..60 {
                 let mut world = PhysicsWorld::from_table(&table);
                 world.launch_ball();
                 let mut max_y = 0.0_f32;
-                for _ in 0..200 {
+                for _ in 0..110 {
                     world.step_frame(0.033, &input);
                     max_y = max_y.max(world.ball_position().unwrap().y);
                 }
                 if max_y > table.height - 1.2 { over += 1; }
             }
-            assert!(over >= 16, "table {n}: only {over}/24 launches got over the top of the lane");
+            assert!(over >= 42, "table {n}: only {over}/60 launches got over the top of the lane");
         }
     }
 }
@@ -3028,5 +3036,55 @@ mod generated_drop_target_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod ignore_ball_tests {
+    use super::*;
+    use crate::table::{load_table, ElementDef};
+
+    fn has_label(w: &PhysicsWorld, idx: usize) -> bool {
+        let prefix = format!("{idx}:");
+        let exact = idx.to_string();
+        w.wall_segments.iter().any(|s| s.label.as_deref().map_or(false, |l| l == exact || l.starts_with(&prefix)))
+    }
+
+    /// `ignoreBall` walls, arcs and paths are drawn-only in the original: no body.
+    #[test]
+    fn ignore_ball_walls_arcs_and_paths_have_no_bodies() {
+        for n in 1..=9u8 {
+            let table = load_table(n).unwrap();
+            let world = PhysicsWorld::from_table(&table);
+            for (i, e) in table.elements.iter().enumerate() {
+                let ignored = match e {
+                    ElementDef::WallElement(w) => w.ignore_ball == Some(true),
+                    ElementDef::WallArcElement(a) => a.ignore_ball == Some(true),
+                    ElementDef::WallPathElement(p) => p.ignore_ball == Some(true),
+                    _ => false,
+                };
+                if ignored { assert!(!has_label(&world, i), "table {n} element {i} is ignoreBall but became a wall"); }
+            }
+        }
+    }
+
+    /// Table 5's twelve centre-diagram lines cross the middle of the field; a
+    /// ball must roll straight through them.
+    #[test]
+    fn a_ball_crosses_table_5s_centre_diagram_unimpeded() {
+        let table = load_table(5).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        let ball_h = world.ball_handle.unwrap();
+        let body = world.bodies.get_mut(ball_h).unwrap();
+        body.set_translation(Vector::new(5.2, 11.0), true);
+        body.set_linvel(Vector::new(6.0, 0.0), true);
+        body.set_gravity_scale(0.0, true);
+        let input = InputState::default();
+        let mut max_x = 0.0_f32;
+        for _ in 0..30 {
+            world.step_frame(0.033, &input);
+            max_x = max_x.max(world.ball_position().unwrap().x);
+        }
+        assert!(max_x > 13.0, "ball was stopped inside the centre diagram at x={max_x:.2}");
     }
 }

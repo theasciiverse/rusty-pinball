@@ -273,6 +273,11 @@ pub struct WallDef {
     #[serde(rename = "retractWhenHit")]
     pub retract_when_hit: Option<bool>,
 
+    /// Drawn (when the table's script shows it) but has no body: the ball
+    /// passes straight through, e.g. table 5's centre-diagram lines.
+    #[serde(rename = "ignoreBall", default)]
+    pub ignore_ball: Option<bool>,
+
     pub score: Option<u64>,
 
     /// Physics/render layer (0 = main field; 1/2/3 = elevated ramps/orbits).
@@ -287,6 +292,10 @@ pub struct WallDef {
 #[derive(Debug, Clone, Deserialize)]
 pub struct WallArcDef {
     pub id: Option<String>,
+
+    /// No body: the ball passes through (see `WallDef::ignore_ball`).
+    #[serde(rename = "ignoreBall", default)]
+    pub ignore_ball: Option<bool>,
 
     #[serde(deserialize_with = "de_xy")]
     pub center: [f32; 2],
@@ -344,6 +353,10 @@ impl WallArcDef {
 #[derive(Debug, Clone, Deserialize)]
 pub struct WallPathDef {
     pub id: Option<String>,
+
+    /// No body: the ball passes through (see `WallDef::ignore_ball`).
+    #[serde(rename = "ignoreBall", default)]
+    pub ignore_ball: Option<bool>,
 
     #[serde(deserialize_with = "de_vec_xy")]
     pub positions: Vec<[f32; 2]>,
