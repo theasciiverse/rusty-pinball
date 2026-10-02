@@ -6,7 +6,7 @@ that we do not yet do, so nothing gets forgotten. It exists because we kept find
 a time (rotating bumpers on table 2, the table 5 triangle, the table 4 lights); an audit on 2026-10-02 went through
 the whole original and this is the result.
 
-Status as of the multiball-core commit on branch `rapier-0.36` (previous audit baseline: `da9595b`). Update this file when something lands.
+Status as of the table-scripts commit on branch `rapier-0.36` (audit baseline: `da9595b`). Update this file when something lands.
 
 - Detailed notes with original file and line references: [`parity/engine-and-app.md`](parity/engine-and-app.md),
   [`parity/tables-3-and-6.md`](parity/tables-3-and-6.md), [`parity/tables-7-and-8.md`](parity/tables-7-and-8.md).
@@ -30,10 +30,10 @@ These are the building blocks. Most per-table gaps are "needs C1 + C3 + C4" and 
 
 | ID | Capability | What it is in the original |
 |---|---|---|
-| C1 | Table script layer | Delegate callbacks: `gameStarted`, `ballLost`, `tick`, `processCollision`, `allDropTargetsInGroupHit`, `allRolloversInGroupActivated`, `ballInSensorRange`, `spinnerActivated`, `flippersActivated`, plus element lookup by id |
+| C1 | Table script layer | Delegate callbacks: `gameStarted`, `ballLost`, `tick`, `processCollision`, `allDropTargetsInGroupHit`, `allRolloversInGroupActivated`, `ballInSensorRange`, `spinnerActivated`, `flippersActivated`, plus element lookup by id. **Framework DONE** (`src/physics/scripts.rs`): bumper hit, drop bank cleared, rollover group completed by a ball, scheduled timer, with helpers to light rollovers, re-arm savers, launch balls, show messages; scripts exist for tables 1 and 2. Still to add: `ballLost`, `gameStarted`, `tick`, `ballInSensorRange`, `spinnerActivated`, `processCollision` for other elements |
 | C2 | Multi-ball | A list of balls; `createBall`, `launchBall`, `removeBallWithoutBallLoss`; "balls <= 1" means multiball ended; multiball saver. **Core DONE** (ball list, extra launches, silent drain, lock removal, all elements react to every ball, all balls drawn); still missing: the multiball saver, per-ball colors and last-sensor id (C6, C7), and anything that starts a multiball (C1, C3, C4) |
-| C3 | Scheduled actions | `scheduleAction(ms, fn)` on game time (multiball launches, light shows, gate timers) |
-| C4 | Game messages | Timed text shown in the score line, with a message sound ("Ball Saved", "Multiball!", "Jackpot!", ...) |
+| C3 | Scheduled actions | `scheduleAction(ms, fn)` on game time (multiball launches, light shows, gate timers). **DONE** (`PhysicsWorld::schedule`, token callbacks, cleared on a new ball) |
+| C4 | Game messages | Timed text shown in the score line, with a message sound ("Ball Saved", "Multiball!", "Jackpot!", ...). **DONE** except the message sound: real-time duration, shown on the DMD's second right-hand row |
 | C5 | Element control | `setRetracted`, `setVisible`, `setNewColor`; rollover setters (set all, set by index, activate first, `setIgnoreBall`); movable rollover circles; drop target make-visible; spinner score |
 | C6 | Sensors by id | `ballInSensorRange` for every sensor, with each ball's most recent sensor id (ramp and orbit direction detection) |
 | C7 | Per-ball state | Ball primary and secondary colors (set at runtime), per-ball force hook (table 6 gravity wells) |
@@ -64,7 +64,7 @@ Reading it: **C1, C3, C4 and C5 are needed by every table, and C2 by seven of ei
 
 ## 3. Suggested order
 
-1. **C1 + C3 + C4 together (small).** A delegate trait with the callbacks, a scheduled-action queue on sim time, and a
+1. **C1 + C3 + C4 together (small). DONE for tables 1 and 2.** A delegate trait with the callbacks, a scheduled-action queue on sim time, and a
    timed message line in the DMD. Nothing visible changes until a table uses them, but everything below depends on them.
 2. **C5 + C6.** Element control by id and sensors by id with per-ball last-sensor memory. This unlocks table 8 completely
    (it needs no multiball) and most of table 1 and 2's non-multiball rules.
@@ -86,6 +86,7 @@ Landed on `rapier-0.36` (all with tests):
   flippers and bumpers keep the original's ball-contact friction.
 - Flipper-cycled rollovers step once per press, in the original's direction; Left/Right Shift work the flippers.
 - Table 2 orbiting bumpers; table 5 rotating triangle (`src/physics/movers.rs`).
+- Table scripts, scheduled actions, game messages, and working multiball on tables 1 and 2 (`scripts.rs`).
 - Multi-ball core in the physics world (see C2): extra balls, silent drain while others remain, ball lock removal without loss, every element reacting to every ball, all balls drawn.
 - Launch barrier by sensors (tables 1, 2, 3, 5, 6, 7); drop banks reset after their `reset` delay (none = stays down);
   ball savers re-armed by clearing the matching bank, **not** on every new ball.
@@ -124,11 +125,11 @@ Tables 3 and 6, and 7 and 8, are in the detail files. Tables 1, 2, 4, 5 and 9 fo
 
 | Behavior | Status |
 |---|---|
-| Any rollover group completes: group clears and the score multiplier goes up one (message "Nx Multiplier", 1500 ms) | PARTIAL. We flash, pay a completion bonus and reset; no multiplier (the JSON has no `multiplierStep`) and no message |
-| `ExtraBallRollovers` (ignoreBall lights) advance one light each time any drop bank clears | MISSING (C1, C5) |
-| `RampRollovers` completes while all extra-ball lights are lit: multiball | MISSING (C1, C2, C3, C4) |
-| Multiball: message, both ball savers restored, balls launched at +1000 ms and +3500 ms while fewer than 3 are in play | MISSING |
-| `DropTargetLeftSave` / `RightSave` re-arm the savers with a message | PARTIAL: savers re-arm; message missing (C4) |
+| Any rollover group completes: group clears and the score multiplier goes up one (message "Nx Multiplier", 1500 ms) | DONE (script) |
+| `ExtraBallRollovers` (ignoreBall lights) advance one light each time any drop bank clears | DONE (script), with "Shoot Ramp for Multiball" |
+| `RampRollovers` completes while all extra-ball lights are lit: multiball | DONE (script) |
+| Multiball: message, both ball savers restored, balls launched at +1000 ms and +3500 ms while fewer than 3 are in play | DONE. Not done: the multiball saver (a replacement ball for an early drain within 30 s), the "Ball Saved" message |
+| `DropTargetLeftSave` / `RightSave` re-arm the savers with a message | DONE |
 | Launch barrier closes behind the ball, opens for a new ball | DONE |
 | Ball savers, slingshots, bumpers, flippers, spinner-free layout | DONE |
 
@@ -138,10 +139,10 @@ Tables 3 and 6, and 7 and 8, are in the detail files. Tables 1, 2, 4, 5 and 9 fo
 |---|---|
 | Two groups of orbiting bumpers (4 around the centre bumper at 0.75 rad/s, 2 around (9.35, 13) at -0.5 rad/s) | DONE (`movers.rs`) |
 | `tick` and `isFieldActive`: motion continues with no ball | DONE |
-| Drop banks `DropTargetLeft` / `Right` re-arm their savers; message | PARTIAL: savers done, messages missing |
-| Banks advance the `ExtraBallRollovers` columns (left bank column 0, top-left column 1, right bank column 2, in steps of 3) | MISSING (C1, C5) |
-| Hit the red `CenterBumper1` with all `ExtraBallRollovers` lit: multiball (savers restored, balls at +1000 and +3500 ms, lights cleared) | MISSING (C1, C2, C3, C4) |
-| Rollover group completes: clears and multiplier +1 | PARTIAL (see table 1) |
+| Drop banks `DropTargetLeft` / `Right` re-arm their savers; message | DONE |
+| Banks advance the `ExtraBallRollovers` columns (left bank column 0, top-left column 1, right bank column 2, in steps of 3) | DONE (script), with "Shoot Red Bumper" |
+| Hit the red `CenterBumper1` with all `ExtraBallRollovers` lit: multiball (savers restored, balls at +1000 and +3500 ms, lights cleared) | DONE (script) |
+| Rollover group completes: clears and multiplier +1 | DONE (script) |
 | Launch barrier | DONE |
 | `LeftTubeBarrier` and `LeftTubeSensor` | Nothing to do: the delegate never reacts to that sensor, so the barrier stays disabled in the original too |
 | `kill` wall at the bottom | Handled by our drain line |

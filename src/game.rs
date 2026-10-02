@@ -26,6 +26,10 @@ pub struct GameState {
     pub multiplier: u32,
     /// Ticks (sync calls) left in the timed super mode; 0 = inactive.
     pub super_mode_ticks: u32,
+    /// The message being shown to the player and the ticks (sync calls, ~30 Hz,
+    /// so real time like the original) it has left. One at a time; a new one
+    /// replaces it.
+    pub message: Option<(String, u32)>,
 }
 
 impl GameState {
@@ -37,6 +41,21 @@ impl GameState {
             phase: Phase::WaitingToLaunch,
             multiplier: 1,
             super_mode_ticks: 0,
+            message: None,
+        }
+    }
+
+    /// Shows `text` for `ms` of real time, replacing any current message.
+    pub fn show_message(&mut self, text: impl Into<String>, ms: u32) {
+        let ticks = (ms * SYNC_HZ / 1000).max(1);
+        self.message = Some((text.into(), ticks));
+    }
+
+    /// Counts the current message down by one tick, clearing it when it runs out.
+    pub fn tick_message(&mut self) {
+        if let Some((_, ticks)) = &mut self.message {
+            *ticks = ticks.saturating_sub(1);
+            if *ticks == 0 { self.message = None; }
         }
     }
 
@@ -66,8 +85,15 @@ impl GameState {
             self.add_score(pts);
         }
 
+        self.tick_message();
         for delta in physics.drain_multiplier_events() {
             self.apply_multiplier_delta(delta);
+            if delta > 0 {
+                self.show_message(format!("{}x Multiplier", self.multiplier), 1500);
+            }
+        }
+        for (text, ms) in physics.drain_message_events() {
+            self.show_message(text, ms);
         }
 
         for _ in 0..physics.drain_super_mode_events() {
@@ -100,6 +126,20 @@ impl GameState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_message_lasts_its_real_time_then_clears_and_a_new_one_replaces_it() {
+        let mut game = GameState::new(3);
+        game.show_message("Multiball!", 2000);
+        for _ in 0..(2000 * SYNC_HZ / 1000 - 1) { game.tick_message(); }
+        assert_eq!(game.message.as_ref().map(|m| m.0.as_str()), Some("Multiball!"), "still showing just before 2 s");
+        game.tick_message();
+        assert!(game.message.is_none(), "gone after 2 s");
+
+        game.show_message("first", 3000);
+        game.show_message("second", 3000);
+        assert_eq!(game.message.as_ref().map(|m| m.0.as_str()), Some("second"));
+    }
 
     #[test]
     fn a_three_ball_game_gives_exactly_three_balls() {

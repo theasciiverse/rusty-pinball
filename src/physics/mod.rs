@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 mod movers;
+mod scripts;
 use rapier2d::prelude::*;
 use crate::input::InputState;
 use crate::table::{
@@ -211,6 +212,14 @@ struct MovingWallInfo {
     x1: f32, y1: f32, x2: f32, y2: f32,
     color: Option<(u8, u8, u8)>,
     active: bool,
+}
+
+/// Something that happened this step which the table's script may react to.
+enum ScriptEvent {
+    BumperHit(String),
+    DropBankCleared(String),
+    RolloverGroupCompleted(String),
+    Scheduled(u32),
 }
 
 /// One ball in play. `balls[0]` is the "primary" ball, the one parked in the
@@ -471,6 +480,12 @@ pub struct PhysicsWorld {
     gate_cleared:  bool,
     // The ball whose passage closes the gate (the one just launched).
     gate_ball:     Option<RigidBodyHandle>,
+    // Table rules (see scripts.rs), game-time timers it asked for (seconds of
+    // sim time left, token), events waiting for it, and messages for the player.
+    script:        Option<Box<dyn scripts::TableScript>>,
+    scheduled:     Vec<(f32, u32)>,
+    script_events: Vec<ScriptEvent>,
+    message_events: RefCell<Vec<(String, u32)>>,
     // Set when the last ball was removed without a ball loss (a lock); the
     // game must wait for a relaunch without costing a ball.
     relaunch_needed: bool,
@@ -719,6 +734,10 @@ impl PhysicsWorld {
             gate_cleared: false,
             gate_ball,
             relaunch_needed: false,
+            script: scripts::script_for(table),
+            scheduled: Vec::new(),
+            script_events: Vec::new(),
+            message_events: RefCell::new(Vec::new()),
         };
         // Put moving elements at their first-frame positions straight away,
         // as the original does on its first tick, so nothing jumps on frame one.
@@ -1277,6 +1296,9 @@ impl PhysicsWorld {
                     }
                 }
                 self.sound_events.borrow_mut().push(PhysicsSound::BumperHit);
+                if let Some(id) = self.bumpers[i].shot_id.clone() {
+                    self.script_events.push(ScriptEvent::BumperHit(id));
+                }
                 if let Some(pts) = Self::record_shot_opt(&mut self.letter_groups, &mut self.jackpot, &self.bumpers[i].shot_id) {
                     self.score_events.borrow_mut().push(pts);
                 }
@@ -1405,6 +1427,9 @@ impl PhysicsWorld {
                     // The targets come back after the group's reset delay (in
                     // sim time), or never if it has none, as in the original.
                     self.drop_target_groups[gi].reset_timer = self.drop_target_groups[gi].reset_delay;
+                    if let Some(id) = self.drop_target_groups[gi].shot_id.clone() {
+                        self.script_events.push(ScriptEvent::DropBankCleared(id));
+                    }
                     if let Some(saver) = self.drop_target_groups[gi].shot_id.as_deref().and_then(saver_for_drop_bank) {
                         savers_to_restore.push(saver);
                     }
@@ -1435,9 +1460,13 @@ impl PhysicsWorld {
         // Rollover detection, flipper cycling, and group-completion flash.
         {
             let ball_pos: Vec<Vector> = balls_now.iter().map(|b| b.1).collect();
+            // A table script owns group completion (the original's delegates do):
+            // no flash, no completion bonus, no automatic reset.
+            let script_rollovers = self.script.as_ref().map_or(false, |sc| sc.handles_rollovers());
             for group in &mut self.rollover_groups {
                 // ── Ball activation (skip while flashing — group is mid-reset) ──
                 if !group.ignore_ball && group.flash_ticks == 0 {
+                    let mut newly_lit = false;
                     for &bp in &ball_pos {
                         for rv in &mut group.rollovers {
                             if rv.lit { continue; }
@@ -1445,6 +1474,7 @@ impl PhysicsWorld {
                             let dy = bp.y - rv.y;
                             if dx * dx + dy * dy <= (rv.radius + self.ball_radius).powi(2) {
                                 rv.lit = true;
+                                newly_lit = true;
                                 let pts = if rv.score > 0 { rv.score } else { group.score };
                                 if pts > 0 {
                                     self.score_events.borrow_mut().push(pts);
@@ -1455,10 +1485,16 @@ impl PhysicsWorld {
                             }
                         }
                     }
+                    // A ball lit the last one: tell the table's script.
+                    if newly_lit && group.rollovers.iter().all(|rv| rv.lit) {
+                        if let Some(id) = group.shot_id.clone() {
+                            self.script_events.push(ScriptEvent::RolloverGroupCompleted(id));
+                        }
+                    }
                 }
 
                 // ── Group completion: flash, then bonus + reset ──
-                let all_lit = !group.rollovers.is_empty() && group.rollovers.iter().all(|rv| rv.lit);
+                let all_lit = !script_rollovers && !group.rollovers.is_empty() && group.rollovers.iter().all(|rv| rv.lit);
                 if Self::tick_completion_flash(&mut group.flash_ticks, ROLLOVER_FLASH_TICKS, all_lit) {
                     if group.score > 0 {
                         self.score_events.borrow_mut().push(group.score);
@@ -1623,6 +1659,104 @@ impl PhysicsWorld {
                 i += 1;
             }
         }
+
+        self.run_script(dt);
+    }
+
+    // -----------------------------------------------------------------------
+    // Table scripts: events in, helpers out (see scripts.rs)
+    // -----------------------------------------------------------------------
+
+    /// Fires due timers, then hands this step's events to the table script.
+    fn run_script(&mut self, dt: f32) {
+        if self.script.is_none() {
+            self.script_events.clear();
+            return;
+        }
+        let mut due = Vec::new();
+        for t in &mut self.scheduled { t.0 -= dt; }
+        self.scheduled.retain(|&(left, token)| {
+            if left <= 0.0 { due.push(token); false } else { true }
+        });
+        for token in due { self.script_events.push(ScriptEvent::Scheduled(token)); }
+
+        // A script's reaction can raise more events; allow a few rounds.
+        for _ in 0..8 {
+            if self.script_events.is_empty() { break; }
+            let events = std::mem::take(&mut self.script_events);
+            let mut script = self.script.take().unwrap();
+            for ev in events {
+                match ev {
+                    ScriptEvent::BumperHit(id) => script.bumper_hit(self, &id),
+                    ScriptEvent::DropBankCleared(id) => script.drop_bank_cleared(self, &id),
+                    ScriptEvent::RolloverGroupCompleted(id) => script.rollover_group_completed(self, &id),
+                    ScriptEvent::Scheduled(token) => script.scheduled(self, token),
+                }
+            }
+            self.script = Some(script);
+        }
+        self.script_events.clear();
+    }
+
+    /// Shows the player a message for `ms` of real time.
+    fn show_message(&self, text: &str, ms: u32) {
+        self.message_events.borrow_mut().push((text.to_string(), ms));
+    }
+
+    /// Runs the script's `scheduled(token)` after `game_ms` of game time (sim
+    /// time, which runs at the table's time ratio, like the original).
+    fn schedule(&mut self, game_ms: u32, token: u32) {
+        self.scheduled.push((game_ms as f32 / 1000.0, token));
+    }
+
+    /// Raises the score multiplier by one (the game state shows the message).
+    fn increment_multiplier(&self) {
+        self.multiplier_events.borrow_mut().push(1);
+    }
+
+    fn rollover_group(&self, id: &str) -> Option<&RolloverGroupInfo> {
+        self.rollover_groups.iter().find(|g| g.shot_id.as_deref() == Some(id))
+    }
+
+    fn rollover_group_mut(&mut self, id: &str) -> Option<&mut RolloverGroupInfo> {
+        self.rollover_groups.iter_mut().find(|g| g.shot_id.as_deref() == Some(id))
+    }
+
+    fn rollover_count(&self, id: &str) -> usize {
+        self.rollover_group(id).map_or(0, |g| g.rollovers.len())
+    }
+
+    fn rollover_lit(&self, id: &str, index: usize) -> bool {
+        self.rollover_group(id).and_then(|g| g.rollovers.get(index)).map_or(false, |r| r.lit)
+    }
+
+    fn rollovers_all_lit(&self, id: &str) -> bool {
+        self.rollover_group(id).map_or(false, |g| !g.rollovers.is_empty() && g.rollovers.iter().all(|r| r.lit))
+    }
+
+    fn set_rollover(&mut self, id: &str, index: usize, lit: bool) {
+        if let Some(r) = self.rollover_group_mut(id).and_then(|g| g.rollovers.get_mut(index)) {
+            r.lit = lit;
+        }
+    }
+
+    fn set_all_rollovers(&mut self, id: &str, lit: bool) {
+        if let Some(g) = self.rollover_group_mut(id) {
+            for r in &mut g.rollovers { r.lit = lit; }
+        }
+    }
+
+    /// Lights the first unlit rollover of the group; false if all were lit.
+    fn activate_first_unlit_rollover(&mut self, id: &str) -> bool {
+        match self.rollover_group_mut(id).and_then(|g| g.rollovers.iter_mut().find(|r| !r.lit)) {
+            Some(r) => { r.lit = true; true }
+            None => false,
+        }
+    }
+
+    /// Messages the player should see, with their durations in ms.
+    pub fn drain_message_events(&self) -> Vec<(String, u32)> {
+        self.message_events.borrow_mut().drain(..).collect()
     }
 
     /// Re-arms the ball saver with this element id: visible again, and its
@@ -1788,6 +1922,8 @@ impl PhysicsWorld {
     /// for the new ball.
     pub fn park_ball(&mut self) {
         self.place_parked_ball();
+        // Pending multiball launches belong to the ball that was just lost.
+        self.scheduled.clear();
         // New ball: the launch barrier opens again (original ballLost/gameStarted).
         if let Some(barrier) = &mut self.launch_barrier {
             barrier.active = false;
@@ -3338,5 +3474,313 @@ mod multiball_tests {
             if max_y > table.height - 1.2 { over += 1; }
         }
         assert!(over >= 12, "only {over}/20 extra launches got over the top of the lane");
+    }
+}
+
+#[cfg(test)]
+mod script_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    fn world_for(n: u8) -> (TableDef, PhysicsWorld) {
+        let table = load_table(n).unwrap();
+        let world = PhysicsWorld::from_table(&table);
+        (table, world)
+    }
+
+    fn place(w: &mut PhysicsWorld, i: usize, x: f32, y: f32) {
+        let body = w.bodies.get_mut(w.balls[i].body).unwrap();
+        body.set_translation(Vector::new(x, y), true);
+        body.set_linvel(Vector::new(0.0, 0.0), true);
+        body.set_gravity_scale(0.0, true);
+    }
+
+    /// Runs `secs` of SIM time (the original's game time) in real-frame steps.
+    fn run_sim_seconds(w: &mut PhysicsWorld, secs: f32) {
+        let frame = 0.033;
+        let frames = (secs / (frame * w.time_ratio())).ceil() as usize;
+        for _ in 0..frames { w.step_frame(frame, &InputState::default()); }
+    }
+
+    fn lit(w: &PhysicsWorld, id: &str) -> Vec<bool> {
+        w.rollover_group(id).unwrap().rollovers.iter().map(|r| r.lit).collect()
+    }
+
+    fn messages(w: &PhysicsWorld) -> Vec<String> {
+        w.drain_message_events().into_iter().map(|m| m.0).collect()
+    }
+
+    /// Knocks down all but the last target of the bank, then puts the ball on it.
+    /// The bank is put back to its starting state first (all targets up).
+    fn clear_bank(w: &mut PhysicsWorld, id: &str) {
+        let gi = w.drop_target_groups.iter().position(|g| g.shot_id.as_deref() == Some(id)).unwrap();
+        for t in &mut w.drop_target_groups[gi].targets {
+            t.active = true;
+            w.colliders.get_mut(t.collider).unwrap().set_collision_groups(InteractionGroups::all());
+        }
+        w.drop_target_groups[gi].reset_timer = None;
+        let last = w.drop_target_groups[gi].targets.len() - 1;
+        for ti in 0..last {
+            w.drop_target_groups[gi].targets[ti].active = false;
+            let ch = w.drop_target_groups[gi].targets[ti].collider;
+            w.colliders.get_mut(ch).unwrap().set_collision_groups(InteractionGroups::none());
+        }
+        let t = &w.drop_target_groups[gi].targets[last];
+        let (mx, my) = ((t.x1 + t.x2) / 2.0, (t.y1 + t.y2) / 2.0);
+        place(w, 0, mx, my);
+        w.step_frame(0.033, &InputState::default());
+    }
+
+    fn retract_savers(w: &mut PhysicsWorld) {
+        for kw in &mut w.kick_walls {
+            if kw.retract_when_hit {
+                kw.active = false;
+                w.colliders.get_mut(kw.collider_handle).unwrap().set_collision_groups(InteractionGroups::none());
+            }
+        }
+    }
+
+    fn savers_active(w: &PhysicsWorld) -> bool {
+        w.kick_walls.iter().filter(|k| k.retract_when_hit).all(|k| k.active)
+    }
+
+    fn rollover_pos(w: &PhysicsWorld, id: &str, i: usize) -> (f32, f32) {
+        let r = &w.rollover_group(id).unwrap().rollovers[i];
+        (r.x, r.y)
+    }
+
+    // ---------------- table 1: Classic ----------------
+
+    #[test]
+    fn classic_banks_light_the_extra_ball_lights_one_by_one_then_announce_multiball() {
+        let (_, mut world) = world_for(1);
+        for n in 1..=7 {
+            clear_bank(&mut world, "DropTargetLeftSave");
+            let on = lit(&world, "ExtraBallRollovers").iter().filter(|&&l| l).count();
+            assert_eq!(on, n, "after clearing a bank {n} time(s)");
+            if n < 7 { assert!(!messages(&world).iter().any(|m| m == "Shoot Ramp for Multiball")); }
+            run_sim_seconds(&mut world, 3.0); // the bank resets after 2 s
+        }
+        // (the 7th clear's message was produced before the loop's final wait)
+    }
+
+    #[test]
+    fn classic_announces_when_the_last_light_comes_on() {
+        let (_, mut world) = world_for(1);
+        for i in 0..6 { world.set_rollover("ExtraBallRollovers", i, true); }
+        messages(&world);
+        clear_bank(&mut world, "DropTargetTop");
+        assert!(lit(&world, "ExtraBallRollovers").iter().all(|&l| l));
+        assert!(messages(&world).iter().any(|m| m == "Shoot Ramp for Multiball"));
+    }
+
+    #[test]
+    fn classic_ramp_with_all_lights_lit_starts_multiball() {
+        let (_, mut world) = world_for(1);
+        world.set_all_rollovers("ExtraBallRollovers", true);
+        retract_savers(&mut world);
+        assert!(!savers_active(&world));
+        for i in 0..3 { world.set_rollover("RampRollovers", i, true); }
+        let (x, y) = rollover_pos(&world, "RampRollovers", 3);
+        place(&mut world, 0, x, y);
+        // One substep: the ball sits on the last rollover (gravity off), so a whole
+        // frame would relight it after the script clears the group.
+        world.step(1.0 / 240.0, &InputState::default());
+
+        let msgs = messages(&world);
+        assert!(msgs.iter().any(|m| m == "Multiball!"), "got {msgs:?}");
+        assert!(lit(&world, "ExtraBallRollovers").iter().all(|&l| !l), "the extra-ball lights are cleared");
+        assert!(lit(&world, "RampRollovers").iter().all(|&l| !l), "the ramp group is cleared by the script");
+        assert!(savers_active(&world), "both savers come back");
+        assert_eq!(world.ball_count(), 1, "the extra balls are not out yet");
+
+        run_sim_seconds(&mut world, 1.2);
+        assert_eq!(world.ball_count(), 2, "first extra ball at 1 s");
+        run_sim_seconds(&mut world, 2.6);
+        assert_eq!(world.ball_count(), 3, "second extra ball at 3.5 s");
+        run_sim_seconds(&mut world, 3.0);
+        assert!(world.ball_count() <= 3, "never more than three");
+    }
+
+    #[test]
+    fn classic_ramp_without_all_the_lights_is_just_a_multiplier() {
+        let (_, mut world) = world_for(1);
+        for i in 0..6 { world.set_rollover("ExtraBallRollovers", i, true); } // one short
+        for i in 0..3 { world.set_rollover("RampRollovers", i, true); }
+        let (x, y) = rollover_pos(&world, "RampRollovers", 3);
+        place(&mut world, 0, x, y);
+        world.step(1.0 / 240.0, &InputState::default());
+        place(&mut world, 0, 1.0, 20.0); // move the ball off the rollover before time passes
+        run_sim_seconds(&mut world, 4.0);
+        assert_eq!(world.ball_count(), 1, "no multiball");
+        assert!(!messages(&world).iter().any(|m| m == "Multiball!"));
+        assert_eq!(world.drain_multiplier_events(), vec![1], "but the group completion raised the multiplier");
+    }
+
+    /// The original leaves rollover completion to the delegate: no flash, no
+    /// completion bonus, no automatic reset; just the per-rollover score and the
+    /// multiplier step.
+    #[test]
+    fn a_scripted_table_completes_rollover_groups_the_original_way() {
+        let (_, mut world) = world_for(1);
+        for i in 0..3 { world.set_rollover("FlipperRollovers", i, true); }
+        let (x, y) = rollover_pos(&world, "FlipperRollovers", 3);
+        place(&mut world, 0, x, y);
+        world.step(1.0 / 240.0, &InputState::default()); // one substep, see the ramp test
+        assert!(lit(&world, "FlipperRollovers").iter().all(|&l| !l), "cleared at once, not after a flash");
+        assert_eq!(world.rollover_group("FlipperRollovers").unwrap().flash_ticks, 0);
+        assert_eq!(world.drain_score_events(), vec![500], "only the last rollover's own score, no completion bonus");
+        assert_eq!(world.drain_multiplier_events(), vec![1]);
+    }
+
+    #[test]
+    fn a_table_without_a_script_keeps_the_generic_completion() {
+        let (_, mut world) = world_for(4); // no script for Field4Delegate yet
+        assert!(world.script.is_none());
+        let id = world.rollover_groups.iter().find(|g| g.cycle_on_flipper).and_then(|g| g.shot_id.clone()).unwrap();
+        let n = world.rollover_count(&id);
+        for i in 0..n - 1 { world.set_rollover(&id, i, true); }
+        let (x, y) = rollover_pos(&world, &id, n - 1);
+        place(&mut world, 0, x, y);
+        world.step_frame(0.033, &InputState::default());
+        assert!(world.rollover_group(&id).unwrap().flash_ticks > 0 || lit(&world, &id).iter().all(|&l| l), "generic flash path still runs");
+    }
+
+    // ---------------- table 2: Round and Round ----------------
+
+    #[test]
+    fn round_and_round_banks_feed_their_columns_of_the_extra_ball_lights() {
+        let (_, mut world) = world_for(2);
+        clear_bank(&mut world, "DropTargetLeft");
+        assert_eq!(lit(&world, "ExtraBallRollovers").iter().enumerate().filter(|(_, &l)| l).map(|(i, _)| i).collect::<Vec<_>>(), vec![0]);
+        clear_bank(&mut world, "DropTargetRight");
+        clear_bank(&mut world, "DropTargetTopLeft");
+        let on: Vec<usize> = lit(&world, "ExtraBallRollovers").iter().enumerate().filter(|(_, &l)| l).map(|(i, _)| i).collect();
+        assert_eq!(on, vec![0, 1, 2], "left column 0, top left column 1, right column 2");
+
+        run_sim_seconds(&mut world, 3.0); // banks reset
+        clear_bank(&mut world, "DropTargetLeft");
+        let on: Vec<usize> = lit(&world, "ExtraBallRollovers").iter().enumerate().filter(|(_, &l)| l).map(|(i, _)| i).collect();
+        assert_eq!(on, vec![0, 1, 2, 3], "the left bank's next light is three along");
+    }
+
+    #[test]
+    fn round_and_round_centre_bumper_with_all_lights_lit_starts_multiball() {
+        let (_, mut world) = world_for(2);
+        world.set_all_rollovers("ExtraBallRollovers", true);
+        messages(&world);
+        let (bx, by, br) = {
+            let b = world.bumpers.iter().find(|b| b.shot_id.as_deref() == Some("CenterBumper1")).unwrap();
+            (b.position[0], b.position[1], b.radius)
+        };
+        let touch = by + br + world.ball_radius + 0.01;
+        place(&mut world, 0, bx, touch);
+        world.step(1.0 / 240.0, &InputState::default());
+        assert!(messages(&world).iter().any(|m| m == "Multiball!"));
+        assert!(lit(&world, "ExtraBallRollovers").iter().all(|&l| !l), "lights cleared");
+        run_sim_seconds(&mut world, 4.0);
+        assert_eq!(world.ball_count(), 3);
+    }
+
+    #[test]
+    fn round_and_round_centre_bumper_alone_does_not_start_multiball() {
+        let (_, mut world) = world_for(2);
+        for i in 0..8 { world.set_rollover("ExtraBallRollovers", i, true); } // one short of nine
+        let (bx, by, br) = {
+            let b = world.bumpers.iter().find(|b| b.shot_id.as_deref() == Some("CenterBumper1")).unwrap();
+            (b.position[0], b.position[1], b.radius)
+        };
+        let touch = by + br + world.ball_radius + 0.01;
+        place(&mut world, 0, bx, touch);
+        world.step(1.0 / 240.0, &InputState::default());
+        run_sim_seconds(&mut world, 4.0);
+        assert_eq!(world.ball_count(), 1);
+        assert!(!messages(&world).iter().any(|m| m == "Multiball!"));
+    }
+
+    /// Pending multiball launches belong to the ball that was lost.
+    #[test]
+    fn a_new_ball_cancels_pending_multiball_launches() {
+        let (_, mut world) = world_for(1);
+        world.schedule(1000, 1);
+        world.schedule(3500, 1);
+        world.park_ball();
+        run_sim_seconds(&mut world, 5.0);
+        assert_eq!(world.ball_count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod multiball_game_flow_tests {
+    use super::*;
+    use crate::game::{GameState, Phase};
+    use crate::table::load_table;
+
+    fn sink(w: &mut PhysicsWorld, i: usize) {
+        let body = w.bodies.get_mut(w.balls[i].body).unwrap();
+        body.set_translation(Vector::new(5.0 + i as f32, -2.0), true);
+        body.set_linvel(Vector::new(0.0, -1.0), true);
+    }
+
+    /// Through the real game state: the message reaches the player, draining
+    /// balls while others remain costs nothing, and only the last drain is a
+    /// ball lost.
+    #[test]
+    fn a_multiball_costs_one_ball_only_when_the_last_ball_drains() {
+        let table = load_table(1).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        let mut game = GameState::new(table.num_balls());
+        game.phase = Phase::Playing;
+        world.launch_ball();
+        let input = InputState::default();
+
+        // Start a multiball the way the table does: all lights lit, shoot the ramp.
+        world.set_all_rollovers("ExtraBallRollovers", true);
+        for i in 0..3 { world.set_rollover("RampRollovers", i, true); }
+        let (x, y) = { let r = &world.rollover_group("RampRollovers").unwrap().rollovers[3]; (r.x, r.y) };
+        {
+            let body = world.bodies.get_mut(world.balls[0].body).unwrap();
+            body.set_translation(Vector::new(x, y), true);
+            body.set_linvel(Vector::new(0.0, 0.0), true);
+            body.set_gravity_scale(0.0, true);
+        }
+        world.step(1.0 / 240.0, &input);
+        game.sync(&world);
+        assert_eq!(game.message.as_ref().map(|m| m.0.as_str()), Some("Multiball!"), "the player sees the message");
+        assert!(game.multiplier >= 2, "and the completion raised the multiplier");
+
+        for _ in 0..80 { world.step_frame(0.033, &input); game.sync(&world); } // out past 3.5 s of game time
+        assert_eq!(world.ball_count(), 3);
+
+        sink(&mut world, 2);
+        world.step_frame(0.033, &input);
+        game.sync(&world);
+        assert_eq!((game.phase, game.balls_remaining, world.ball_count()), (Phase::Playing, 3, 2), "one drained, nothing lost");
+
+        sink(&mut world, 1);
+        world.step_frame(0.033, &input);
+        game.sync(&world);
+        assert_eq!((game.phase, game.balls_remaining, world.ball_count()), (Phase::Playing, 3, 1), "two drained, still nothing lost");
+
+        sink(&mut world, 0);
+        world.step_frame(0.033, &input);
+        game.sync(&world);
+        assert_eq!((game.phase, game.balls_remaining), (Phase::BallLost, 2), "the last ball draining costs exactly one ball");
+    }
+
+    /// A lock takes the last ball off without losing it: the game waits for a
+    /// relaunch and the ball count does not change.
+    #[test]
+    fn a_lock_waits_for_a_relaunch_without_costing_a_ball() {
+        let table = load_table(1).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        let mut game = GameState::new(table.num_balls());
+        game.phase = Phase::Playing;
+        world.launch_ball();
+        world.remove_ball_without_loss(0);
+        // The app does this each tick:
+        if world.take_relaunch_needed() && game.phase == Phase::Playing { game.phase = Phase::WaitingToLaunch; }
+        assert_eq!((game.phase, game.balls_remaining), (Phase::WaitingToLaunch, 3));
+        assert!(!world.is_ball_drained());
     }
 }

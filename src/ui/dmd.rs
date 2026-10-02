@@ -88,8 +88,19 @@ pub fn draw_dmd(frame: &mut Frame, area: Rect, game: &GameState, snap: &FieldSna
         Span::styled(DOT.repeat(rw.saturating_sub(sw)), dot_style),
         status_span,
     ]));
-    for _ in 1..rh.saturating_sub(1) {
-        right_lines.push(Line::from(Span::styled(DOT.repeat(rw), dot_style)));
+    for row in 1..rh.saturating_sub(1) {
+        // Row 1 carries the current game message ("Multiball!", ...), right-aligned.
+        let message = if row == 1 { game.message.as_ref() } else { None };
+        if let Some((text, _)) = message {
+            let text: String = text.chars().take(rw).collect();
+            let tw = text.chars().count();
+            right_lines.push(Line::from(vec![
+                Span::styled(DOT.repeat(rw.saturating_sub(tw)), dot_style),
+                Span::styled(text, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            ]));
+        } else {
+            right_lines.push(Line::from(Span::styled(DOT.repeat(rw), dot_style)));
+        }
     }
     if rh > 1 {
         let hw = hint_span.content.chars().count();
