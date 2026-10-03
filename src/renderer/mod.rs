@@ -7,7 +7,7 @@
 ///
 /// `to_cx` / `to_cy` return signed i32 so that elements outside the current
 /// viewport produce negative or oversized values.  Every pixel write goes
-/// through `set_pixel`, which silently ignores out-of-bounds coordinates —
+/// through `set_pixel`, which silently ignores out-of-bounds coordinates,
 /// this prevents off-screen elements from being clamped to the screen edge.
 
 use ratatui::style::Color;
@@ -32,18 +32,18 @@ const COL_SPINNER:        Color = Color::Rgb(90, 70, 0);
 const COL_SPINNER_FLASH:  Color = Color::LightYellow;
 
 const COL_LAYER: [Color; 5] = [
-    Color::Gray,           // layer 0 — main field
-    Color::Green,          // layer 1 — left ramp
-    Color::Magenta,        // layer 2 — outer orbit
-    Color::Red,            // layer 3 — right ramp
-    Color::Yellow,         // layer 4 — table 7's ball lock lane
+    Color::Gray,           // layer 0: main field
+    Color::Green,          // layer 1: left ramp
+    Color::Magenta,        // layer 2: outer orbit
+    Color::Red,            // layer 3: right ramp
+    Color::Yellow,         // layer 4: table 7's ball lock lane
 ];
 
 /// Converts a table-JSON RGB triple to a ratatui `Color`.
 fn rgb((r, g, b): (u8, u8, u8)) -> Color { Color::Rgb(r, g, b) }
 
 /// A dimmed variant of an explicit element color, used for "unlit" rollover
-/// states — mirrors the ~31% brightness ratio between the built-in
+/// states; mirrors the ~31% brightness ratio between the built-in
 /// `COL_ROLLOVER_LIT` / `COL_ROLLOVER_UNLIT` pair.
 fn dim((r, g, b): (u8, u8, u8)) -> Color { Color::Rgb(r / 3, g / 3, b / 3) }
 
@@ -87,7 +87,7 @@ impl FieldRenderer {
         let field_w    = snap.field_width;
         let viewport_h = field_w * (dot_h as f32 / dot_w as f32);
 
-        // Signed coordinate helpers — no clamping; out-of-bounds dots are
+        // Signed coordinate helpers; no clamping; out-of-bounds dots are
         // dropped inside set_pixel without affecting on-screen elements.
         let to_cx = |gx: f32| -> i32 { ((gx / field_w) * dot_w as f32) as i32 };
         let to_cy = |gy: f32| -> i32 {
@@ -260,7 +260,7 @@ impl FieldRenderer {
             }
         }
 
-        // Overlay debug ID labels last, directly onto the character grid —
+        // Overlay debug ID labels last, directly onto the character grid,
         // braille sub-pixels can't render text, so labels overwrite whatever
         // was drawn at that char cell.
         if debug_ids {

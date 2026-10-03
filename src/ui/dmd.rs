@@ -159,7 +159,7 @@ fn letter_awards_line(snap: &FieldSnapshot) -> Line<'static> {
 
 /// "AWARD  35,000" for the first bumper carrying an award ladder (there's
 /// only ever one on a table today, but this doesn't assume it), bright
-/// yellow while lit (just hit — the value shown is already the *next* rung).
+/// yellow while lit (just hit; the value shown is already the *next* rung).
 fn award_ladder_line(snap: &FieldSnapshot) -> Option<Line<'static>> {
     let bump = snap.bumpers.iter().find(|b| b.next_award.is_some())?;
     let value_style = if bump.lit {

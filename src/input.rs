@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, ModifierKeyCode};
 
 // Ticks a flipper hold lasts without a new key event before it retracts.
-// At 30 fps this is ~100 ms — enough to bridge the gap between terminal
+// At 30 fps this is ~100 ms, enough to bridge the gap between terminal
 // key-repeat events on terminals that don't send Release events.
 // On terminals that do (Kitty protocol), Release zeroes the counter immediately.
 const FLIPPER_HOLD_TICKS: u8 = 3;

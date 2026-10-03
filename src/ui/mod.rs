@@ -32,7 +32,7 @@ pub fn draw(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(10),            // play area — takes all remaining space
+            Constraint::Min(10),            // play area: takes all remaining space
             Constraint::Length(DMD_HEIGHT), // DMD bar at bottom
         ])
         .split(area);

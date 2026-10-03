@@ -4,7 +4,7 @@ A terminal pinball game written in Rust, rendered entirely in braille-pixel vect
 
 ## Inspiration
 
-Rusty Pinball is inspired by [Vector Pinball](https://github.com/dozingcat/VectorPinball) by Brian Nenninger — an open-source Android pinball game with a clean physics-driven design and eight great tables. Tables 1–8's layouts and game logic in Rusty Pinball are derived from Vector Pinball's JSON table definitions; table 9 is an original layout authored in the same format.
+Rusty Pinball is inspired by [Vector Pinball](https://github.com/dozingcat/VectorPinball) by Brian Nenninger, an open-source Android pinball game with a clean physics-driven design and eight great tables. Tables 1-8's layouts and game logic in Rusty Pinball are derived from Vector Pinball's JSON table definitions; table 9 is an original layout authored in the same format.
 
 ## Features
 
@@ -13,7 +13,7 @@ Rusty Pinball is inspired by [Vector Pinball](https://github.com/dozingcat/Vecto
 - Braille vector graphics rendered with [drawille](https://github.com/asciimoo/drawille)
 - Dot-matrix display (DMD) showing score, hi-score, and ball count
 - The original's sound design: score dings, rollover notes, message and launch sounds, and music that comes in as you score
-- Runs entirely in the terminal — no GPU required
+- Runs entirely in the terminal, no GPU required
 
 ## Requirements
 
@@ -61,7 +61,7 @@ Running inside **tmux** is recommended for the best display experience.
 
 ## Tips
 
-- The game field is taller than the visible viewport — the camera follows the ball automatically.
+- The game field is taller than the visible viewport, the camera follows the ball automatically.
 - The flippers respond to letter keys (`Z`/`X`), arrow keys, and Left/Right Shift, so you can use whichever feels more natural. Shift on its own is only reported by terminals that support the Kitty keyboard protocol (kitty is one); elsewhere use `Z`/`X` or the arrows.
 - Sound can be toggled on or off from the main menu without leaving it.
 - For the smoothest experience, run in a dedicated tmux pane or a full-screen terminal window.
@@ -92,7 +92,7 @@ listed in [docs/ORIGINAL-PARITY.md](docs/ORIGINAL-PARITY.md); every change is in
 
 Rusty Pinball is released under the [GNU General Public License v2.0](LICENSE).
 
-Tables 1–8 in `assets/tables/` are derived from
+Tables 1-8 in `assets/tables/` are derived from
 [Vector Pinball](https://github.com/dozingcat/VectorPinball) by Brian Nenninger,
 also licensed under GPL-2.0. Table 9 (Party Land) is an original layout built
 in Vector Pinball's JSON format, recreating the shot layout of Digital

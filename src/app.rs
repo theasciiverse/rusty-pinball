@@ -123,7 +123,7 @@ impl App {
     fn handle_key(&mut self, k: KeyEvent) -> Result<bool> {
         let is_playing = matches!(&self.screen, Screen::Playing { .. });
 
-        // Pause toggle — P key while playing (not on GameOver screen).
+        // Pause toggle; P key while playing (not on GameOver screen).
         if is_playing && k.kind != KeyEventKind::Release
             && matches!(k.code, KeyCode::Char('p') | KeyCode::Char('P'))
         {
@@ -135,7 +135,7 @@ impl App {
             }
         }
 
-        // Debug object-ID overlay toggle — I key while playing.
+        // Debug object-ID overlay toggle; I key while playing.
         if is_playing && k.kind != KeyEventKind::Release
             && matches!(k.code, KeyCode::Char('i') | KeyCode::Char('I'))
         {

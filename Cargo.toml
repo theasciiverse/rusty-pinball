@@ -2,7 +2,7 @@
 name = "rusty-pinball"
 version = "0.2.0"
 edition = "2021"
-description = "TUI pinball — Rust + Rapier physics, Braille vector graphics"
+description = "TUI pinball: Rust + Rapier physics, Braille vector graphics"
 
 [[bin]]
 name = "rusty-pinball"

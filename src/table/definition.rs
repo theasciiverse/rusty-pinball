@@ -79,7 +79,7 @@ fn de_xxyy_opt<'de, D: Deserializer<'de>>(d: D) -> Result<Option<[f32; 4]>, D::E
 /// Vector-Pinball's `layer` property is a raw Box2D-world key and can be
 /// negative (table 8 uses `-1` for purely decorative arcs/rollovers that no
 /// ball ever occupies). Our layer system only assigns balls to layers 0-3,
-/// so any negative value is mapped to this unreachable sentinel — the
+/// so any negative value is mapped to this unreachable sentinel; the
 /// element is built (matching the original always creating a physics body)
 /// but, since no ball is ever on layer 31, it never collides and the
 /// per-layer renderer (which only draws `Some(n)` when `n == ball_layer`)
@@ -229,7 +229,7 @@ pub struct LetterAwardDef {
 }
 
 // ---------------------------------------------------------------------------
-// Element definitions — one variant per Java class
+// Element definitions; one variant per Java class
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
@@ -281,7 +281,7 @@ pub struct WallDef {
     pub score: Option<u64>,
 
     /// Physics/render layer (0 = main field; 1/2/3 = elevated ramps/orbits).
-    /// None means universal — active on all layers.
+    /// None means universal; active on all layers.
     #[serde(default, deserialize_with = "de_layer_opt")]
     pub layer: Option<u8>,
 
@@ -410,8 +410,8 @@ pub struct BumperDef {
     pub award_ladder: Option<Vec<u64>>,
 
     /// Not part of Vector-Pinball's format: an Asciiverse-original extension
-    /// (currently only Ghoul Skull). Only meaningful alongside `awardLadder`
-    /// — the first hit that reaches the ladder's last rung (once per ball)
+    /// (currently only Ghoul Skull). Only meaningful alongside `awardLadder`:
+    /// the first hit that reaches the ladder's last rung (once per ball)
     /// starts a timed super mode.
     #[serde(rename = "triggersSuperMode", default)]
     pub triggers_super_mode: bool,
@@ -486,7 +486,7 @@ pub struct RolloverGroupDef {
     pub reset: Option<f32>,
 
     /// Not part of Vector-Pinball's format: an Asciiverse-original extension
-    /// (currently only Party Land's Puke Rollovers) — raises the game's
+    /// (currently only Party Land's Puke Rollovers) that raises the game's
     /// score multiplier by this amount each time the group is completed
     /// (all rollovers lit), on top of the group's normal completion bonus.
     #[serde(rename = "multiplierStep", default)]

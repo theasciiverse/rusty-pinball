@@ -1,7 +1,7 @@
 use crate::physics::{PhysicsWorld, ScorePopup};
 
 // `sync()` runs once per rendered frame (app.rs's FRAME_MILLIS = 33ms), not
-// once per physics substep — so "ticks" here means "sync calls", at ~30 Hz.
+// once per physics substep, so "ticks" here means "sync calls", at ~30 Hz.
 const SYNC_HZ: u32 = 30;
 const SUPER_MODE_SECONDS: u32 = 15;
 const SUPER_MODE_TICKS: u32 = SUPER_MODE_SECONDS * SYNC_HZ;

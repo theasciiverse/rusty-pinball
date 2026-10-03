@@ -150,7 +150,7 @@ fn draw_list(frame: &mut Frame, area: Rect, state: &MenuState, sound_enabled: bo
     let hint        = "↑↓  Navigate    Enter  Select";
 
     // Arrow column (3 chars) sits to the left of the content column (50 chars).
-    // Together they are 53 chars — the same as the PINBALL title art — so both
+    // Together they are 53 chars, the same as the PINBALL title art, so both
     // blocks share the same visual centre when centred on screen.
     const ARROW_W:   u16   = 3;
     const CONTENT_W: u16   = 50;

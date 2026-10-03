@@ -15,7 +15,7 @@ use crate::table::{
 
 /// Reads a table JSON `color`/`outerColor` value (`[r,g,b]` or `[r,g,b,a]`,
 /// alpha ignored) into an RGB triple for the renderer. `None` means "no
-/// color was specified" — callers fall back to their element-type default.
+/// color was specified"; callers fall back to their element-type default.
 /// An `inactiveLayerColor` (RGBA) blended onto the black background, so the
 /// terminal gets an ordinary dim colour. None when it is fully transparent.
 fn parse_inactive_color(v: &Option<serde_json::Value>) -> Option<(u8, u8, u8)> {
@@ -41,7 +41,7 @@ fn parse_color(v: &Option<serde_json::Value>) -> Option<(u8, u8, u8)> {
 }
 
 /// Debug-overlay label for an element: its index into the table JSON's
-/// `elements` array, plus its `id` when the table names it — e.g. "20" for
+/// `elements` array, plus its `id` when the table names it, e.g. "20" for
 /// an anonymous wall, "20:LeftFlipper" for a named one. The index is always
 /// included so it still cross-references the raw JSON even when named.
 fn label_for(elem_idx: usize, id: &Option<String>) -> String {
@@ -106,7 +106,7 @@ pub struct BumperSnapshot {
     pub label: String,
     pub color: Option<(u8, u8, u8)>,
     pub outer_color: Option<(u8, u8, u8)>,
-    /// Some(value) when this bumper has an award ladder — the points the
+    /// Some(value) when this bumper has an award ladder; the points the
     /// *next* hit will award (the currently-armed rung).
     pub next_award: Option<u64>,
 }
@@ -220,7 +220,7 @@ struct BumperInfo {
     award_ladder: Vec<u64>,
     ladder_rung: usize,
     triggers_super_mode: bool,
-    // True once this bumper has fired its super-mode trigger this ball —
+    // True once this bumper has fired its super-mode trigger this ball,
     // reaching the top rung again (it holds there) won't re-fire it.
     super_mode_triggered: bool,
 }
@@ -238,13 +238,13 @@ struct KickWallInfo {
     retract_when_hit: bool,
     active: bool,
     // When true the rapier collider will be disabled at the START of the next
-    // step() call — one physics sub-step after the kick impulse was applied.
+    // step() call; one physics sub-step after the kick impulse was applied.
     // This gives rapier one full integration step to move the ball away before
     // the collider disappears.
     retract_pending: bool,
     // Perpendicular direction pointing toward the field interior (precomputed).
     interior_normal: [f32; 2],
-    // Rapier collider handle — used for collision-event-based kick detection.
+    // Rapier collider handle; used for collision-event-based kick detection.
     collider_handle: ColliderHandle,
     shot_id: Option<String>,
     // A kick wall on a wall that moves (table 5's triangle) follows it: its ends
@@ -424,7 +424,7 @@ struct SpinnerInfo {
 }
 
 // A word (e.g. "MAD") spelled by hitting one named shot per letter, in any
-// order. Not part of Vector-Pinball's format — see `LetterAwardDef`.
+// order. Not part of Vector-Pinball's format; see `LetterAwardDef`.
 struct LetterGroupInfo {
     word: String,
     shot_ids: Vec<String>,
@@ -433,14 +433,14 @@ struct LetterGroupInfo {
     // >0 while the "word complete" flash animation is running; 0 = idle.
     flash_ticks: u8,
     // True once this word has been completed at least once since the ball
-    // started — independent of `lit`, which resets after every completion
+    // started; independent of `lit`, which resets after every completion
     // so the word can be spelled again. Feeds the jackpot's light condition.
     completed_since_reset: bool,
 }
 
 // A shot that lights once every letter-award word has been completed at
 // least once this ball; the next hit on it then collects `score` and
-// un-lights. Not part of Vector-Pinball's format — see `JackpotDef`.
+// un-lights. Not part of Vector-Pinball's format; see `JackpotDef`.
 struct JackpotInfo {
     shot_id: String,
     score: u64,
@@ -479,7 +479,7 @@ const KICK_WALL_BOUNCE:   f32 = BALL_RESTITUTION;
 const DROP_CLEAR_BONUS:   u64 = 2_000;
 const LETTER_FLASH_TICKS: u8  = 32 * STEP_SCALE;
 // point_to_segment_dist measures to the wall's centerline, not its physical
-// surface — the wall itself has a half-thickness of 0.05 (see add_wall), so
+// surface; the wall itself has a half-thickness of 0.05 (see add_wall), so
 // `ball_radius + 0.05` alone is the exact geometric touch point with zero
 // real slack, not a margin on top of it. On a shallow/glancing approach the
 // ball can settle a hair short of that (deflected by neighboring geometry
@@ -489,7 +489,7 @@ const KICK_WALL_TOUCH_MARGIN: f32 = 0.10;
 
 // Flipper motor, matching Vector-Pinball's Box2D revolute-joint setup
 // (density 5.0, maxMotorTorque 1000). The joint's ForceBased motor model
-// solves force = damping * (vel - target_vel), clamped to ±max_force — a
+// solves force = damping * (vel - target_vel), clamped to ±max_force; a
 // high damping value makes the motor converge to its target velocity
 // almost immediately whenever there's a nonzero error, so max_force (the
 // torque cap) is what actually governs acceleration, same as Box2D.
@@ -847,7 +847,7 @@ impl PhysicsWorld {
         let launch_vel        = table.launch_velocity.unwrap_or([0.0, g * 3.0]);
         let launch_vel_delta  = table.launch_velocity_random_delta.unwrap_or([0.0, 0.0]);
 
-        // No physical floor — the kill wall at y≈0 is detected via drain_y.
+        // No physical floor; the kill wall at y≈0 is detected via drain_y.
 
         // Left and right outer boundary walls
         for (x, w) in [(0.0_f32, table.width), (table.width, table.width)] {
@@ -1118,12 +1118,12 @@ impl PhysicsWorld {
 
         // Matches Vector-Pinball's Box2D setup: a dynamic body on a motorized
         // revolute joint (density 5.0, CCD/"bullet" enabled), not a kinematic
-        // body — so the ball's own momentum genuinely affects the flipper,
+        // body, so the ball's own momentum genuinely affects the flipper,
         // instead of the flipper being an unstoppable, forceless puppet.
         //
         // can_sleep(false): a flipper resting at its limit for a few seconds
         // (no ball nearby) is exactly the low-velocity state Rapier's sleep
-        // system is designed to catch — and unlike the old kinematic body,
+        // system is designed to catch, and unlike the old kinematic body,
         // this one actually can fall asleep. Once asleep, changing the
         // joint's motor target does *not* wake it back up on its own, so the
         // flipper would go permanently unresponsive the first time a player
@@ -1152,10 +1152,10 @@ impl PhysicsWorld {
 
         // In the flipper's local (unrotated) frame the pivot sits at the
         // -half_len end for a left flipper and the +half_len end for a
-        // right one — see flipper_pose's doc comment for the derivation.
+        // right one; see flipper_pose's doc comment for the derivation.
         let local_pivot_x = if is_right { half_len } else { -half_len };
         // The anchor body never rotates, so the joint's raw angle equals the
-        // flipper body's absolute rotation directly — which is +logical_angle
+        // flipper body's absolute rotation directly, which is +logical_angle
         // for a left flipper and -logical_angle for a right one (again per
         // flipper_pose), so the limits and motor target need the same flip.
         let raw_limits = if is_right { [-max_angle, -min_angle] } else { [min_angle, max_angle] };
@@ -1460,7 +1460,7 @@ impl PhysicsWorld {
         // Drive flippers via their motorized joint (see add_flipper). Unlike
         // Vector-Pinball's clean Android touch events, our InputState.left/
         // right_flipper is a decaying counter that terminal key-repeat events
-        // keep refreshing — it can flicker false for a tick between repeats
+        // keep refreshing; it can flicker false for a tick between repeats
         // even while the key is physically held. So the motor target is set
         // unconditionally every tick from the current state (like the old
         // kinematic code did), not gated on a state *change*: gating on
@@ -1617,7 +1617,7 @@ impl PhysicsWorld {
         // Kick-wall (slingshot / ball-saver) proximity detection.
         //
         // Originally detected via Rapier's CollisionEvent::Started, matching
-        // Vector-Pinball's Box2D handleCollision approach — but that only
+        // Vector-Pinball's Box2D handleCollision approach, but that only
         // reliably fires on a square, fairly fast hit. A slingshot is almost
         // always brushed at a shallow/glancing angle as the ball rolls past
         // (not hit head-on), and at that angle CollisionEvent::Started often
@@ -1790,7 +1790,7 @@ impl PhysicsWorld {
                         if left - dt <= 0.0 { rv.lit = false; rv.reset_timer = None; } else { rv.reset_timer = Some(left - dt); }
                     }
                 }
-                // ── Ball activation (skip while flashing — group is mid-reset) ──
+                // ── Ball activation (skip while flashing; group is mid-reset) ──
                 if !group.ignore_ball && group.flash_ticks == 0 {
                     let mut newly_lit: Option<usize> = None;
                     for &(bi, bp, _) in &balls_now {
@@ -1839,7 +1839,7 @@ impl PhysicsWorld {
                     }
                 }
 
-                // ── Flipper cycling — suspend while flashing ──
+                // ── Flipper cycling; suspend while flashing ──
                 // Matches the original: a right press shifts the lit dots toward
                 // higher indices (rightward), a left press toward lower indices,
                 // and the right flipper wins if both fire on the same frame.
@@ -2495,7 +2495,7 @@ impl PhysicsWorld {
         if !(pos.x >= xmin - 0.2 && pos.x <= xmax + 0.2) { return false; }
         if self.gate_cleared {
             // Ball returned down the lane: must be descending (vy ≤ 0) so a
-            // freshly launched ball — still rising through the gate region —
+            // freshly launched ball; still rising through the gate region,
             // is never mistaken for a returning one.
             let vy = self.balls.first()
                 .and_then(|b| self.bodies.get(b.body))
@@ -2521,7 +2521,7 @@ impl PhysicsWorld {
 
     /// Lights the letter (in any letter-award word) whose shot id matches,
     /// and collects the jackpot if it's lit and this shot is the one that
-    /// collects it — returning its score for the caller to apply. A word
+    /// collects it, returning its score for the caller to apply. A word
     /// mid-completion-flash is left alone until it resets. Takes the
     /// letter-groups slice and jackpot directly rather than `&mut self` so
     /// it can be called from inside a loop that already holds a disjoint
@@ -2548,7 +2548,7 @@ impl PhysicsWorld {
 
     /// Advances a group's completion-flash timer: starts it (for
     /// `flash_duration` ticks) the moment `all_lit` goes true while idle,
-    /// then counts down. Returns true on exactly the tick it reaches zero —
+    /// then counts down. Returns true on exactly the tick it reaches zero,
     /// the caller's cue to award its bonus and reset. Shared by
     /// `RolloverGroupInfo` and `LetterGroupInfo`, which both use this
     /// flash-then-reset pattern for group completion.
@@ -2870,7 +2870,7 @@ mod spinner_tests {
 
         // Run enough steps for several flash cycles; collect score events.
         // (Other proximity-based mechanics near the spinner's coordinates,
-        // e.g. bumpers, may also fire — so check that 500-pt spinner scores
+        // e.g. bumpers, may also fire, so check that 500-pt spinner scores
         // occurred at all rather than asserting on the event stream's total.)
         let mut events = Vec::new();
         let mut saw_visible = false;
@@ -3091,7 +3091,7 @@ mod award_ladder_tests {
             body.set_gravity_scale(0.0, true);
 
             // Step until exactly one hit registers, rather than a fixed tick
-            // count — the debounce (BUMPER_LIT_TICKS) can otherwise let a
+            // count; the debounce (BUMPER_LIT_TICKS) can otherwise let a
             // second hit sneak in on the same round.
             let mut events_this_round = 0;
             loop {
@@ -3110,7 +3110,7 @@ mod award_ladder_tests {
             "ladder should climb rung by rung then hold at the top, got {hits:?}");
         assert_eq!(world.bumpers[gi].ladder_rung, 4, "rung stays pinned at the last index");
         assert_eq!(super_mode_events_per_hit, vec![0, 0, 0, 1, 0, 0],
-            "super mode should trigger exactly once — the hit that first reaches the top rung");
+            "super mode should trigger exactly once; the hit that first reaches the top rung");
 
         world.park_ball();
         assert_eq!(world.bumpers[gi].ladder_rung, 0, "a new ball resets the ladder to its first rung");
@@ -3128,7 +3128,7 @@ mod kick_wall_tests {
     // square, fairly fast hit. A slingshot is almost always brushed at a
     // shallow/glancing angle as the ball rolls past (not hit head-on), and
     // at that angle the event frequently never arrived at all against these
-    // thin wall colliders — confirmed empirically: 0/8 glancing trials at
+    // thin wall colliders; confirmed empirically: 0/8 glancing trials at
     // low-to-moderate speed fired before the fix (event-based), vs the
     // proximity-based detection below, which fires on every trial.
     #[test]
@@ -3143,7 +3143,7 @@ mod kick_wall_tests {
         let (tx, ty) = (dx / len, dy / len); // along the wall's length
 
         // Read the engine's own interior_normal (guaranteed to point away
-        // from the pocket, into the field — the same direction the kick
+        // from the pocket, into the field, the same direction the kick
         // impulse uses) rather than re-deriving it and risking a sign error.
         let probe = PhysicsWorld::from_table(&table);
         let ki = probe.kick_walls.iter()
@@ -3169,7 +3169,7 @@ mod kick_wall_tests {
             fired
         };
 
-        // Square hit, approaching head-on from the field side — was already reliable.
+        // Square hit, approaching head-on from the field side; was already reliable.
         let mid = [(x1 + x2) / 2.0 + inx * 1.5, (y1 + y2) / 2.0 + iny * 1.5];
         assert!(fire(-inx * 6.0, -iny * 6.0, mid), "a direct perpendicular hit should always kick");
 
@@ -3270,7 +3270,7 @@ mod flipper_input_flicker {
     }
 
     /// Regression test for a real bug: InputState.left_flipper/right_flipper
-    /// aren't a stable "held" boolean — they're a decaying counter that
+    /// aren't a stable "held" boolean; they're a decaying counter that
     /// terminal key-repeat events keep refreshing (see input.rs), so the
     /// flag can go false for a tick between repeats even while the key is
     /// physically held. Gating the motor-target update on a state *change*
@@ -3289,7 +3289,7 @@ mod flipper_input_flicker {
         let mut input = InputState::default();
         // One frame = input.tick() once, then PHYSICS_STEPS (2) physics
         // substeps, matching app.rs's tick(). Re-send the key-repeat event
-        // every 4 frames — slower than FLIPPER_HOLD_TICKS (3), so
+        // every 4 frames; slower than FLIPPER_HOLD_TICKS (3), so
         // left_flipper genuinely drops to false for a frame between repeats.
         for frame in 0..90 {
             if frame % 4 == 0 {
@@ -3374,7 +3374,7 @@ mod flipper_sleep {
     /// Regression test for a real bug: a dynamic flipper resting at its
     /// limit with no ball nearby is exactly the low-velocity state Rapier's
     /// sleep system is designed to catch, and once asleep, changing the
-    /// joint's motor target does *not* wake the body back up on its own —
+    /// joint's motor target does *not* wake the body back up on its own,
     /// so the flipper went permanently unresponsive the first time a player
     /// left it alone for a while (add_flipper now sets can_sleep(false)).
     #[test]
