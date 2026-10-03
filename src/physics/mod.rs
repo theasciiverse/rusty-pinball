@@ -4009,3 +4009,212 @@ mod script_building_block_tests {
         assert_eq!(world.drain_score_events(), vec![5000]);
     }
 }
+
+#[cfg(test)]
+mod table_6_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    const BALL_COLORS: [(u8, u8, u8); 5] = scripts::PLANET_BALL_COLORS;
+
+    fn orbiters() -> PhysicsWorld {
+        let mut world = PhysicsWorld::from_table(&load_table(6).unwrap());
+        world.script = Some(Box::new(scripts::Orbiters::new(12345)));
+        world
+    }
+
+    fn place(w: &mut PhysicsWorld, x: f32, y: f32) {
+        let body = w.bodies.get_mut(w.balls[0].body).unwrap();
+        body.set_translation(Vector::new(x, y), true);
+        body.set_linvel(Vector::new(0.0, 0.0), true);
+        body.set_gravity_scale(0.0, true);
+    }
+
+    fn run_sim_seconds(w: &mut PhysicsWorld, secs: f32) {
+        let frame = 0.033;
+        for _ in 0..(secs / (frame * w.time_ratio())).ceil() as usize { w.step_frame(frame, &InputState::default()); }
+    }
+
+    fn messages(w: &PhysicsWorld) -> Vec<String> { w.drain_message_events().into_iter().map(|m| m.0).collect() }
+
+    fn planet_angle(w: &PhysicsWorld, i: usize) -> f32 {
+        let (cx, cy) = w.rollover_center("Orbits", i).unwrap();
+        let (px, py) = w.rollover_center(&format!("Planet{}", i + 1), 0).unwrap();
+        (py - cy).atan2(px - cx)
+    }
+
+    #[test]
+    fn the_planets_orbit_their_rings_inner_ones_faster() {
+        let mut world = orbiters();
+        world.step_frame(0.033, &InputState::default());
+        let before: Vec<f32> = (0..5).map(|i| planet_angle(&world, i)).collect();
+        let sim_seconds = 0.5;
+        run_sim_seconds(&mut world, sim_seconds);
+        let elapsed = (sim_seconds / (0.033 * world.time_ratio())).ceil() * 0.033 * world.time_ratio();
+        for i in 0..5 {
+            let (cx, cy) = world.rollover_center("Orbits", i).unwrap();
+            let (px, py) = world.rollover_center(&format!("Planet{}", i + 1), 0).unwrap();
+            let ring = world.rollover_radius("Orbits", i).unwrap();
+            assert!(((px - cx).hypot(py - cy) - ring).abs() < 1e-3, "planet {} left its ring", i + 1);
+            let turned = (planet_angle(&world, i) - before[i] + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+            let speed = turned / elapsed;
+            let (lo, hi) = (0.9 / (i + 1) as f32, 1.1 / (i + 1) as f32);
+            assert!(speed >= lo - 0.03 && speed <= hi + 0.03, "planet {}: {speed:.3} rad/s, expected {lo:.3} to {hi:.3}", i + 1);
+        }
+    }
+
+    #[test]
+    fn the_sun_is_always_lit_and_planets_keep_moving_with_no_ball_launched() {
+        let mut world = orbiters();
+        world.step_frame(0.033, &InputState::default());
+        assert!(world.rollover_lit("Sun", 0));
+        let a = world.rollover_center("Planet1", 0).unwrap();
+        run_sim_seconds(&mut world, 0.5);
+        let b = world.rollover_center("Planet1", 0).unwrap();
+        assert!((a.0 - b.0).abs() + (a.1 - b.1).abs() > 0.05, "planet 1 moved");
+    }
+
+    /// The sun and the planets pull on a ball within range of the sun.
+    #[test]
+    fn the_sun_and_planets_pull_a_ball_in_range_but_not_one_far_away() {
+        let mut world = orbiters();
+        world.step(1.0 / 240.0, &InputState::default()); // init
+        let (sx, sy) = world.rollover_center("Sun", 0).unwrap();
+
+        place(&mut world, sx + 5.0, sy + 3.0);
+        world.step(1.0 / 240.0, &InputState::default());
+        let v = world.bodies.get(world.balls[0].body).unwrap().linvel();
+        let toward_sun = v.x * (sx - (sx + 5.0)) + v.y * (sy - (sy + 3.0));
+        assert!(toward_sun > 0.0, "pulled toward the sun, v={v:?}");
+
+        place(&mut world, sx + 9.0, sy + 3.0); // beyond 8 units
+        world.step(1.0 / 240.0, &InputState::default());
+        let v = world.bodies.get(world.balls[0].body).unwrap().linvel();
+        assert!(v.length() < 1e-3, "nothing pulls a ball outside the range, v={v:?}");
+    }
+
+    #[test]
+    fn rolling_over_a_planet_gives_the_ball_its_colour_and_the_planet_starts_pulsing() {
+        let mut world = orbiters();
+        world.step(1.0 / 240.0, &InputState::default());
+        let (x, y) = world.rollover_center("Planet3", 0).unwrap();
+        place(&mut world, x, y);
+        world.step(1.0 / 240.0, &InputState::default());
+        assert_eq!(world.ball_color(0), Some(BALL_COLORS[2]), "the ball took planet 3's colour");
+        world.step(1.0 / 240.0, &InputState::default());
+        assert!(world.rollover_lit("Planet3", 0), "planet 3 is in progress (lit) while a ball has its colour");
+        assert!(!world.rollover_lit("Planet1", 0), "the others stay off");
+
+        world.park_ball(); // a new ball has the default colour
+        world.step(1.0 / 240.0, &InputState::default());
+        assert!(!world.rollover_lit("Planet3", 0), "back to off");
+    }
+
+    #[test]
+    fn a_ball_of_the_right_colour_switches_a_planet_on_through_its_rollovers() {
+        let mut world = orbiters();
+        world.step(1.0 / 240.0, &InputState::default());
+        world.set_ball_color(0, Some(BALL_COLORS[1])); // planet 2's colour
+        world.set_rollover("Planet2Rollovers", 0, true);
+        world.set_rollover("Planet2Rollovers", 1, true);
+        let (x, y) = world.rollover_center("Planet2Rollovers", 2).unwrap();
+        place(&mut world, x, y);
+        world.drain_score_events();
+        world.step(1.0 / 240.0, &InputState::default());
+
+        let scores = world.drain_score_events();
+        assert_eq!(scores.iter().filter(|&&p| p == 5000).count(), 2, "5000 for the rollovers and 5000 for the planet: {scores:?}");
+        assert!(messages(&world).iter().any(|m| m == "Planet 2 Activated!"));
+        world.step(1.0 / 240.0, &InputState::default());
+        assert!(world.rollover_lit("Planet2", 0), "planet 2 stays lit once on");
+        assert!(!world.rollover_lit("Planet2Rollovers", 0), "the rollovers cleared");
+    }
+
+    #[test]
+    fn the_wrong_colour_scores_the_rollovers_but_does_not_activate_the_planet() {
+        let mut world = orbiters();
+        world.step(1.0 / 240.0, &InputState::default());
+        world.set_ball_color(0, Some(BALL_COLORS[0]));
+        world.set_rollover("Planet2Rollovers", 0, true);
+        world.set_rollover("Planet2Rollovers", 1, true);
+        let (x, y) = world.rollover_center("Planet2Rollovers", 2).unwrap();
+        place(&mut world, x, y);
+        world.drain_score_events();
+        world.step(1.0 / 240.0, &InputState::default());
+        let scores = world.drain_score_events();
+        assert_eq!(scores.iter().filter(|&&p| p == 5000).count(), 1, "only the rollover award: {scores:?}");
+        assert!(!messages(&world).iter().any(|m| m.contains("Activated")));
+    }
+
+    // ----- ramps: two detectors in order -----
+
+    /// The ramp awards among the score events (other elements the test ball
+    /// happens to overlap, such as 1000-point rollovers, are not the point).
+    fn ramp_awards(w: &PhysicsWorld) -> Vec<u64> {
+        w.drain_score_events().into_iter().filter(|&p| p >= 2500).collect()
+    }
+
+    fn through(w: &mut PhysicsWorld, id: &str) {
+        let s = w.sensors.iter().find(|s| s.id == id).unwrap_or_else(|| panic!("no sensor {id}"));
+        let (x, y) = ((s.rect[0] + s.rect[2]) / 2.0, (s.rect[1] + s.rect[3]) / 2.0);
+        w.balls[0].layer = s.from_layer.unwrap_or(w.balls[0].layer);
+        place(w, x, y);
+        w.step(1.0 / 240.0, &InputState::default());
+    }
+
+    #[test]
+    fn a_ramp_scores_in_one_direction_and_the_bonus_stacks_for_twelve_seconds() {
+        let mut world = orbiters();
+        world.step(1.0 / 240.0, &InputState::default());
+        world.drain_score_events();
+
+        through(&mut world, "LeftLoopDetector_Enter");
+        through(&mut world, "LeftLoopDetector_Trigger");
+        assert_eq!(ramp_awards(&world), vec![2500], "first ramp");
+
+        through(&mut world, "LeftLoopDetector_Enter");
+        through(&mut world, "LeftLoopDetector_Trigger");
+        assert_eq!(ramp_awards(&world), vec![5000], "second ramp within 12 s is doubled");
+        assert!(messages(&world).iter().any(|m| m == "2x Ramp"));
+
+        place(&mut world, 1.0, 1.0);
+        run_sim_seconds(&mut world, 13.0);
+        through(&mut world, "LeftLoopDetector_Enter");
+        through(&mut world, "LeftLoopDetector_Trigger");
+        assert_eq!(ramp_awards(&world), vec![2500], "the window ran out, back to the base score");
+    }
+
+    #[test]
+    fn a_ball_going_the_wrong_way_through_a_ramp_scores_nothing() {
+        let mut world = orbiters();
+        world.step(1.0 / 240.0, &InputState::default());
+        world.drain_score_events();
+        through(&mut world, "LeftLoopDetector_Trigger");
+        assert!(ramp_awards(&world).is_empty());
+    }
+
+    #[test]
+    fn the_orbit_scores_from_either_end_and_counts_for_planet_5() {
+        let mut world = orbiters();
+        world.step(1.0 / 240.0, &InputState::default());
+        world.set_ball_color(0, Some(BALL_COLORS[4]));
+        world.drain_score_events();
+        through(&mut world, "OrbitDetector_Right");
+        through(&mut world, "OrbitDetector_Left");
+        let scores = world.drain_score_events();
+        assert!(scores.contains(&2500) && scores.contains(&5000), "ramp 2500 plus planet 5000: {scores:?}");
+        assert!(messages(&world).iter().any(|m| m == "Planet 5 Activated!"));
+    }
+
+    #[test]
+    fn the_planet_bank_the_flipper_rollovers_and_the_savers_follow_the_original() {
+        let mut world = orbiters();
+        world.step(1.0 / 240.0, &InputState::default());
+        let n = world.rollover_count("FlipperRollovers");
+        for i in 0..n - 1 { world.set_rollover("FlipperRollovers", i, true); }
+        let (x, y) = world.rollover_center("FlipperRollovers", n - 1).unwrap();
+        place(&mut world, x, y);
+        world.step(1.0 / 240.0, &InputState::default());
+        assert_eq!(world.drain_multiplier_events(), vec![1]);
+    }
+}

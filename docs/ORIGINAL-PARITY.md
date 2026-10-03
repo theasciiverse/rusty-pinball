@@ -83,6 +83,18 @@ ramp walls), table 5 (colored-ball diagram and lines, ramp bonuses), table 3 (bu
 
 Round 1 leaves out only what needs more than one ball: ball locks, multiball launches, jackpots, the multiball saver.
 
+### Round 1 status
+
+| Table | Centre pieces and moving parts | Status |
+|---|---|---|
+| 2 | Orbiting bumpers | DONE |
+| 5 | Rotating triangle | DONE. Colored-ball diagram, ramps, extra-ball barriers: TODO |
+| 6 | Orbiting planets, planet gravity, planet colors and activation, ramp detectors | DONE (all five planets on starts multiball, round 2) |
+| 4 | Status grid lit by bumpers, percent multiplier, ramp walls | TODO |
+| 3 | Bumper bonus, indicator rings | TODO |
+| 8 | Insert lights, rack bonus, gates | TODO |
+| 7 | Star-map field, constellations | TODO |
+
 ### Round 2: multiball for all tables
 
 The multi-ball core and the script layer exist (tables 1 and 2 already have multiball). Round 2 adds, per table: tables 3, 4,
