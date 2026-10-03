@@ -410,6 +410,11 @@ pub struct BumperDef {
     /// starts a timed super mode.
     #[serde(rename = "triggersSuperMode", default)]
     pub triggers_super_mode: bool,
+
+    /// Physics layer (none = layer 0, where the ball starts). Table 7's mini
+    /// table is on layer 1.
+    #[serde(default, deserialize_with = "de_layer_opt")]
+    pub layer: Option<u8>,
 }
 
 // ---------------------------------------------------------------------------
@@ -438,6 +443,9 @@ pub struct FlipperDef {
 
     #[serde(deserialize_with = "de_numstr")]
     pub downspeed: f32,
+
+    #[serde(default, deserialize_with = "de_layer_opt")]
+    pub layer: Option<u8>,
 }
 
 impl FlipperDef {
@@ -474,6 +482,9 @@ pub struct RolloverGroupDef {
     /// (all rollovers lit), on top of the group's normal completion bonus.
     #[serde(rename = "multiplierStep", default)]
     pub multiplier_step: Option<u32>,
+
+    #[serde(default, deserialize_with = "de_layer_opt")]
+    pub layer: Option<u8>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -523,6 +534,9 @@ pub struct DropTargetGroupDef {
     pub gap_between_targets: Option<f32>,
     #[serde(rename = "numTargets", default, deserialize_with = "de_numstr_opt")]
     pub num_targets: Option<f32>,
+
+    #[serde(default, deserialize_with = "de_layer_opt")]
+    pub layer: Option<u8>,
 }
 
 impl DropTargetGroupDef {

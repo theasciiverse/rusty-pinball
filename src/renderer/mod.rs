@@ -31,11 +31,12 @@ const COL_ROLLOVER_UNLIT: Color = Color::Rgb(0, 80, 80);
 const COL_SPINNER:        Color = Color::Rgb(90, 70, 0);
 const COL_SPINNER_FLASH:  Color = Color::LightYellow;
 
-const COL_LAYER: [Color; 4] = [
+const COL_LAYER: [Color; 5] = [
     Color::Gray,           // layer 0 — main field
     Color::Green,          // layer 1 — left ramp
     Color::Magenta,        // layer 2 — outer orbit
     Color::Red,            // layer 3 — right ramp
+    Color::Yellow,         // layer 4 — table 7's ball lock lane
 ];
 
 /// Converts a table-JSON RGB triple to a ratatui `Color`.
@@ -120,7 +121,7 @@ impl FieldRenderer {
         for w in &snap.walls {
             let color = match w.layer {
                 None    => w.color.map(rgb).unwrap_or(COL_WALL),
-                Some(n) if n == snap.ball_layer => COL_LAYER[n.min(3) as usize],
+                Some(n) if snap.occupied_layers & (1u32 << n.min(31)) != 0 => COL_LAYER[n.min(4) as usize],
                 Some(_) => continue,  // inactive layer — not visible from below
             };
             draw_line(&mut pixels, &mut grid,

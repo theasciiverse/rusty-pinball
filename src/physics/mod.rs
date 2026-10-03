@@ -129,6 +129,8 @@ pub struct FieldSnapshot {
     pub field_width: f32,
     pub field_height: f32,
     pub ball_layer: u8,
+    /// Bit n set when a ball is on layer n; layered walls are drawn only then.
+    pub occupied_layers: u32,
     pub ball_color: Option<(u8, u8, u8)>,
 }
 
@@ -146,6 +148,7 @@ pub struct LetterGroupSnapshot {
 // ---------------------------------------------------------------------------
 
 struct FlipperInfo {
+    layer:        u8,
     body_handle:  RigidBodyHandle,
     joint_handle: ImpulseJointHandle,
     pivot:        [f32; 2],
@@ -159,6 +162,7 @@ struct FlipperInfo {
 }
 
 struct BumperInfo {
+    layer: u8,
     // Colours a script put on the bumper at runtime (table 3's heat).
     color_override: Option<(u8, u8, u8)>,
     outer_override: Option<(u8, u8, u8)>,
@@ -184,6 +188,7 @@ struct BumperInfo {
 
 // Slingshot / kicker wall: a WallElement with a non-zero kick value.
 struct KickWallInfo {
+    layer: u8,
     x1: f32, y1: f32,
     x2: f32, y2: f32,
     kick_force: f32,
@@ -231,6 +236,7 @@ const MULTIBALL_SAVER_SECONDS: f32 = 30.0;
 /// A wall a table script moves or retracts while playing (table 5's rotating
 /// triangle). Drawn from its live position; not part of the static wall list.
 struct MovingWallInfo {
+    layer: u8,
     id: String,
     body: RigidBodyHandle,
     collider: ColliderHandle,
@@ -292,6 +298,7 @@ struct DropTargetInfo {
 }
 
 struct DropTargetGroupInfo {
+    layer: u8,
     targets: Vec<DropTargetInfo>,
     // Sim seconds after the last target falls until all come back. Like the
     // original, a group with no reset (or 0) stays down once cleared.
@@ -319,6 +326,7 @@ struct RolloverInfo {
 }
 
 struct RolloverGroupInfo {
+    layer:            u8,
     rollovers:        Vec<RolloverInfo>,
     score:            u64,   // group-level score: per-rollover fallback AND completion bonus
     cycle_on_flipper: bool,
@@ -636,6 +644,7 @@ impl PhysicsWorld {
                                 wall_segs.pop();
                                 moving_index = Some(moving_walls.len());
                                 moving_walls.push(MovingWallInfo {
+                                    layer: w.layer.unwrap_or(0),
                                     id: id.to_string(), body, collider: col,
                                     x1, y1, x2, y2, color: parse_color(&w.color), active: true,
                                 });
@@ -677,6 +686,7 @@ impl PhysicsWorld {
                                 [-nx, -ny]
                             };
                             kick_walls.push(KickWallInfo {
+                                layer: w.layer.unwrap_or(0),
                                 x1, y1, x2, y2,
                                 kick_force: kick,
                                 score: w.score.unwrap_or(0),
@@ -917,10 +927,9 @@ impl PhysicsWorld {
         let half_h = 0.05_f32;
         let restitution = w.restitution.unwrap_or(WALL_RESTITUTION);
 
-        let groups = match layer {
-            Some(n) => layer_group_for(n),
-            None    => InteractionGroups::all(),
-        };
+        // As in the original, where each layer is its own world and an element
+        // with no layer belongs to layer 0: a ball on another layer passes through.
+        let groups = layer_group_for(layer.unwrap_or(0));
 
         let rb = RigidBodyBuilder::fixed()
             .translation(Vector::new(cx, cy))
@@ -977,10 +986,12 @@ impl PhysicsWorld {
             .restitution_combine_rule(CoefficientCombineRule::Max)
             .friction(BUMPER_FRICTION)
             .active_events(ActiveEvents::COLLISION_EVENTS)
+            .collision_groups(layer_group_for(b.layer.unwrap_or(0)))
             .build();
         colliders.insert_with_parent(col, h, bodies);
 
         bumpers.push(BumperInfo {
+            layer: b.layer.unwrap_or(0),
             color_override: None,
             outer_override: None,
             body: h,
@@ -1042,6 +1053,7 @@ impl PhysicsWorld {
             .restitution(WALL_RESTITUTION)
             .restitution_combine_rule(CoefficientCombineRule::Max)
             .friction(FLIPPER_FRICTION)
+            .collision_groups(layer_group_for(f.layer.unwrap_or(0)))
             .build();
         colliders.insert_with_parent(col, h, bodies);
 
@@ -1072,6 +1084,7 @@ impl PhysicsWorld {
         let joint_h = impulse_joints.insert(anchor_h, h, joint, true);
 
         flippers.push(FlipperInfo {
+            layer: f.layer.unwrap_or(0),
             body_handle: h,
             joint_handle: joint_h,
             pivot:       f.position,
@@ -1140,11 +1153,13 @@ impl PhysicsWorld {
                 .restitution(WALL_RESTITUTION)
                 .restitution_combine_rule(CoefficientCombineRule::Max)
                 .friction(WALL_FRICTION)
+                .collision_groups(layer_group_for(d.layer.unwrap_or(0)))
                 .build();
             let ch = colliders.insert_with_parent(col, bh, bodies);
             DropTargetInfo { x1, y1, x2, y2, collider: ch, active: true }
         }).collect();
         DropTargetGroupInfo {
+            layer: d.layer.unwrap_or(0),
             targets,
             reset_delay: d.reset.filter(|&r| r > 0.0),
             reset_timer: None,
@@ -1171,6 +1186,7 @@ impl PhysicsWorld {
             reset_timer: None,
         }).collect();
         RolloverGroupInfo {
+            layer:            r.layer.unwrap_or(0),
             rollovers,
             score:            group_score,
             cycle_on_flipper: r.cycle_on_flipper.unwrap_or(false),
@@ -1448,6 +1464,7 @@ impl PhysicsWorld {
                 {
                     for (i, bump) in self.bumpers.iter().enumerate() {
                         if hits.iter().any(|h| h.0 == i) { continue; }
+                        if self.balls[bi].layer != bump.layer { continue; }
                         if bump.lit_ticks + BUMPER_DEBOUNCE_TICKS > BUMPER_LIT_TICKS { continue; }   // debounce right after a hit
                         let dx = bp.x - bump.position[0];
                         let dy = bp.y - bump.position[1];
@@ -1517,6 +1534,7 @@ impl PhysicsWorld {
                     for (i, kw) in self.kick_walls.iter().enumerate() {
                         if !kw.active || kw.debounce > 0 { continue; }
                         if hits.iter().any(|h| h.0 == i) { continue; }
+                        if self.balls[bi].layer != kw.layer { continue; }
                         let (dist, _, _) = Self::point_to_segment_dist(bp.x, bp.y, kw.x1, kw.y1, kw.x2, kw.y2);
                         if dist < self.ball_radius + KICK_WALL_TOUCH_MARGIN {
                             // Push toward the side the ball is on, like the original
@@ -1584,6 +1602,7 @@ impl PhysicsWorld {
             for &(bi, bp, _) in &balls_now {
                 {
                     for (gi, group) in self.drop_target_groups.iter().enumerate() {
+                        if self.balls[bi].layer != group.layer { continue; }
                         for (ti, target) in group.targets.iter().enumerate() {
                             if !target.active { continue; }
                             let (dist, _, _) = Self::point_to_segment_dist(
@@ -1644,10 +1663,11 @@ impl PhysicsWorld {
                 continue;
             }
             self.drop_target_groups[gi].reset_timer = None;
+            let groups = layer_group_for(self.drop_target_groups[gi].layer);
             for target in &mut self.drop_target_groups[gi].targets {
                 target.active = true;
                 if let Some(col) = self.colliders.get_mut(target.collider) {
-                    col.set_collision_groups(InteractionGroups::all());
+                    col.set_collision_groups(groups);
                 }
             }
         }
@@ -1668,6 +1688,7 @@ impl PhysicsWorld {
                 if !group.ignore_ball && group.flash_ticks == 0 {
                     let mut newly_lit: Option<usize> = None;
                     for &(bi, bp, _) in &balls_now {
+                        if self.balls[bi].layer != group.layer { continue; }
                         for rv in &mut group.rollovers {
                             if rv.lit { continue; }
                             let dx = bp.x - rv.x;
@@ -2028,8 +2049,9 @@ impl PhysicsWorld {
     /// Retracts or extends a wall by id: a kick wall, a scripted wall or the
     /// launch barrier. A retracted wall is neither solid nor drawn.
     fn set_wall_retracted(&mut self, id: &str, retracted: bool) {
-        let groups = if retracted { InteractionGroups::none() } else { InteractionGroups::all() };
+        let solid = |layer: u8| if retracted { InteractionGroups::none() } else { layer_group_for(layer) };
         if let Some(kw) = self.kick_walls.iter_mut().find(|k| k.shot_id.as_deref() == Some(id)) {
+            let groups = solid(kw.layer);
             kw.active = !retracted;
             kw.retract_pending = false;
             let follows = kw.follows;
@@ -2038,6 +2060,7 @@ impl PhysicsWorld {
             return;
         }
         if let Some(mw) = self.moving_walls.iter_mut().find(|m| m.id == id) {
+            let groups = solid(mw.layer);
             mw.active = !retracted;
             if let Some(col) = self.colliders.get_mut(mw.collider) { col.set_collision_groups(groups); }
             return;
@@ -2045,7 +2068,7 @@ impl PhysicsWorld {
         if id == LAUNCH_BARRIER_ID {
             if let Some(b) = &mut self.launch_barrier {
                 b.active = !retracted;
-                if let Some(col) = self.colliders.get_mut(b.collider) { col.set_collision_groups(groups); }
+                if let Some(col) = self.colliders.get_mut(b.collider) { col.set_collision_groups(solid(0)); }
             }
         }
     }
@@ -2080,9 +2103,10 @@ impl PhysicsWorld {
     /// Knocks a target down or puts it back up.
     fn set_drop_target_down(&mut self, id: &str, index: usize, down: bool) {
         let Some(g) = self.drop_target_groups.iter_mut().find(|g| g.shot_id.as_deref() == Some(id)) else { return };
+        let layer = g.layer;
         let Some(t) = g.targets.get_mut(index) else { return };
         t.active = !down;
-        let groups = if down { InteractionGroups::none() } else { InteractionGroups::all() };
+        let groups = if down { InteractionGroups::none() } else { layer_group_for(layer) };
         let collider = t.collider;
         if let Some(col) = self.colliders.get_mut(collider) { col.set_collision_groups(groups); }
     }
@@ -2137,6 +2161,15 @@ impl PhysicsWorld {
         self.shapes = shapes;
     }
 
+    /// Moves a ball to another layer (the original's `Ball.moveToLayer`): it
+    /// then only touches that layer's elements.
+    fn set_ball_layer(&mut self, ball: usize, layer: u8) {
+        let Some(b) = self.balls.get_mut(ball) else { return };
+        b.layer = layer;
+        let collider = b.collider;
+        if let Some(col) = self.colliders.get_mut(collider) { col.set_collision_groups(ball_groups_for(layer)); }
+    }
+
     fn ball_layer_of(&self, ball: usize) -> u8 {
         self.balls.get(ball).map_or(0, |b| b.layer)
     }
@@ -2144,6 +2177,32 @@ impl PhysicsWorld {
     fn set_ball_velocity(&mut self, ball: usize, vx: f32, vy: f32) {
         if let Some(body) = self.balls.get(ball).and_then(|b| self.bodies.get_mut(b.body)) {
             body.set_linvel(Vector::new(vx, vy), true);
+        }
+    }
+
+    /// Puts a ball at `(x, y)` on `layer` (the original's `createBall`, table 7's
+    /// locked balls reappear where they were held). Returns its index.
+    fn add_ball_at(&mut self, x: f32, y: f32, layer: u8) -> usize {
+        let ball = self.new_ball([x, y], [0.0, 0.0], 1.0);
+        self.balls.push(ball);
+        let index = self.balls.len() - 1;
+        self.set_ball_layer(index, layer);
+        if self.multiball_start_time.is_none() { self.multiball_start_time = Some(self.game_time); }
+        index
+    }
+
+    /// Moves a ball and stops it dead (a held ball).
+    fn hold_ball_at(&mut self, ball: usize, x: f32, y: f32) {
+        if let Some(body) = self.balls.get(ball).and_then(|b| self.bodies.get_mut(b.body)) {
+            body.set_translation(Vector::new(x, y), true);
+            body.set_linvel(Vector::new(0.0, 0.0), true);
+            body.set_angvel(0.0, true);
+        }
+    }
+
+    fn set_ball_gravity_scale(&mut self, ball: usize, scale: f32) {
+        if let Some(body) = self.balls.get(ball).and_then(|b| self.bodies.get_mut(b.body)) {
+            body.set_gravity_scale(scale, true);
         }
     }
 
@@ -2249,7 +2308,7 @@ impl PhysicsWorld {
                 kw.active = true;
                 kw.retract_pending = false;
                 if let Some(col) = self.colliders.get_mut(kw.collider_handle) {
-                    col.set_collision_groups(InteractionGroups::all());
+                    col.set_collision_groups(layer_group_for(kw.layer));
                 }
             }
         }
@@ -2501,18 +2560,21 @@ impl PhysicsWorld {
         let balls: Vec<BallSnapshot> = self.live_balls().into_iter()
             .map(|(i, t, v)| BallSnapshot { x: t.x, y: t.y, vx: v.x, vy: v.y, color: self.balls[i].color })
             .collect();
+        // Elements on another layer (table 7's mini table) show only while a ball is on it.
+        let occupied_layers = self.balls.iter().fold(0u32, |m, b| m | (1u32 << b.layer.min(31)));
+        let shown = |layer: u8| layer == 0 || occupied_layers & (1u32 << layer.min(31)) != 0;
 
         // Read the tip position straight from the physics body's actual
         // transform (translation + rotation) rather than a separately
         // tracked angle, now that the flipper is a real dynamic body.
-        let flippers: Vec<FlipperSnapshot> = self.flippers.iter().filter_map(|fl| {
+        let flippers: Vec<FlipperSnapshot> = self.flippers.iter().filter(|fl| shown(fl.layer)).filter_map(|fl| {
             let body = self.bodies.get(fl.body_handle)?;
             let local_tip_x = if fl.is_right { -fl.half_len } else { fl.half_len };
             let tip = body.position() * Vector::new(local_tip_x, 0.0);
             Some(FlipperSnapshot { x1: fl.pivot[0], y1: fl.pivot[1], x2: tip.x, y2: tip.y, label: fl.label.clone() })
         }).collect();
 
-        let bumpers = self.bumpers.iter().map(|b| BumperSnapshot {
+        let bumpers = self.bumpers.iter().filter(|b| shown(b.layer)).map(|b| BumperSnapshot {
             x: b.position[0], y: b.position[1],
             radius: b.radius,
             outer_radius: b.outer_radius,
@@ -2524,11 +2586,11 @@ impl PhysicsWorld {
         }).collect();
 
         let kick_walls = self.kick_walls.iter()
-            .filter(|kw| kw.active && kw.follows.is_none())
+            .filter(|kw| kw.active && kw.follows.is_none() && shown(kw.layer))
             .map(|kw| WallSnapshot { x1: kw.x1, y1: kw.y1, x2: kw.x2, y2: kw.y2, layer: None, label: Some(kw.label.clone()), color: None })
             .collect();
 
-        let drop_targets: Vec<WallSnapshot> = self.drop_target_groups.iter()
+        let drop_targets: Vec<WallSnapshot> = self.drop_target_groups.iter().filter(|g| shown(g.layer))
             .flat_map(|g| g.targets.iter().enumerate().filter(|(_, t)| t.active)
                 .map(move |(i, t)| (g.label.clone(), g.color, i, t)))
             .map(|(glabel, color, i, t)| WallSnapshot {
@@ -2538,7 +2600,7 @@ impl PhysicsWorld {
             })
             .collect();
 
-        let rollover_groups = self.rollover_groups.iter().map(|g| {
+        let rollover_groups = self.rollover_groups.iter().filter(|g| shown(g.layer)).map(|g| {
             // During the completion flash the renderer overrides all rollovers
             // to blink together.  4 phases: lit → unlit → lit → unlit → reset.
             let flash_override = if g.flash_ticks > 0 {
@@ -2589,6 +2651,7 @@ impl PhysicsWorld {
             field_width:  self.field_width,
             field_height: self.field_height,
             ball_layer: self.balls.first().map_or(0, |b| b.layer),
+            occupied_layers,
             ball_color: self.ball_color,
         }
     }
@@ -5643,9 +5706,15 @@ mod table_7_tests {
         for ti in 0..last { w.set_drop_target_down("MiniFieldTopTargets", ti, true); }
         let t = &w.drop_target_groups[gi].targets[last];
         let (mx, my) = ((t.x1 + t.x2) / 2.0, (t.y1 + t.y2) / 2.0);
+        // The mini table is layer 1: a ball on the main layer does not touch its targets.
+        place(&mut w, mx, my);
+        step(&mut w);
+        assert!(!messages(&w).iter().any(|m| m == "Ramp bonus increased"));
+        w.set_ball_layer(0, 1);
         place(&mut w, mx, my);
         step(&mut w);
         assert!(messages(&w).iter().any(|m| m == "Ramp bonus increased"));
+        w.set_ball_layer(0, 0);
         w.drain_score_events();
         through(&mut w, "LeftLoopDetector");
         assert!(w.drain_score_events().contains(&6000), "5000 plus 1000");
@@ -6451,5 +6520,233 @@ mod table_5_multiball_tests {
         messages(&w);
         light_center(&mut w);
         assert!(messages(&w).iter().any(|m| m == "Shoot the Pyramid!"), "ready again, not a jackpot");
+    }
+}
+
+#[cfg(test)]
+mod table_7_lock_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    const CONSTELLATION_NAMES: [&str; 6] = ["Canis Major", "Gemini", "Leo", "Orion", "Sagittarius", "Ursa Major"];
+
+    fn world7() -> PhysicsWorld {
+        let mut w = PhysicsWorld::from_table(&load_table(7).unwrap());
+        w.script = Some(Box::new(scripts::AdAstra::new(7)));
+        w.step(1.0 / 240.0, &InputState::default());
+        w
+    }
+
+    fn place(w: &mut PhysicsWorld, x: f32, y: f32) {
+        let body = w.bodies.get_mut(w.balls[0].body).unwrap();
+        body.set_translation(Vector::new(x, y), true);
+        body.set_linvel(Vector::new(0.0, 0.0), true);
+        body.set_gravity_scale(0.0, true);
+    }
+
+    fn step(w: &mut PhysicsWorld) { w.step(1.0 / 240.0, &InputState::default()); }
+
+    /// Runs `secs` of sim time with every ball held still, so a random release
+    /// cannot send one down the table before the test looks.
+    fn run_frozen(w: &mut PhysicsWorld, secs: f32) {
+        let frame = 0.033;
+        for _ in 0..(secs / (frame * w.time_ratio())).ceil() as usize {
+            w.step_frame(frame, &InputState::default());
+            for b in &w.balls {
+                if let Some(body) = w.bodies.get_mut(b.body) {
+                    body.set_linvel(Vector::new(0.0, 0.0), true);
+                    body.set_gravity_scale(0.0, true);
+                }
+            }
+        }
+    }
+
+    fn messages(w: &PhysicsWorld) -> Vec<String> { w.drain_message_events().into_iter().map(|m| m.0).collect() }
+
+    fn into_sensor(w: &mut PhysicsWorld, id: &str, layer: u8) {
+        let s = w.sensors.iter().find(|s| s.id == id).unwrap_or_else(|| panic!("no sensor {id}"));
+        let (x, y) = ((s.rect[0] + s.rect[2]) / 2.0, (s.rect[1] + s.rect[3]) / 2.0);
+        w.set_ball_layer(0, layer);
+        place(w, x, y);
+        step(w);
+    }
+
+    fn circles(w: &PhysicsWorld) -> Vec<(f32, f32, (u8, u8, u8))> {
+        w.snapshot().shapes.iter().filter_map(|s| match *s { Shape::Circle { x, y, color, .. } => Some((x, y, color)), _ => None }).collect()
+    }
+
+    fn unlit_target(w: &PhysicsWorld) -> Option<(f32, f32)> {
+        circles(w).into_iter().filter(|c| c.2.0 == 0 && c.2.2 == 0 && c.2.1 > 0).max_by_key(|c| c.2.1).map(|c| (c.0, c.1))
+    }
+
+    /// Shoots a loop to pick a constellation, waits for the view to arrive and
+    /// rolls the ball over every star of it.
+    fn complete_constellation(w: &mut PhysicsWorld) {
+        w.balls[0].last_sensor = None; // a loop counts once per pass
+        into_sensor(w, "LeftLoopDetector", 2);
+        w.set_ball_layer(0, 0);
+        place(w, 1.0, 1.0);
+        assert!(messages(w).iter().any(|m| CONSTELLATION_NAMES.contains(&m.as_str())), "a constellation was picked");
+        run_frozen(w, 11.0);
+        for _ in 0..60 {
+            let Some((x, y)) = unlit_target(w) else { break };
+            place(w, x, y);
+            step(w);
+            step(w);
+        }
+        place(w, 1.0, 1.0);
+        step(w);
+    }
+
+    fn lock_into(w: &mut PhysicsWorld, i: usize) {
+        step(w); // the script opens the lock to a ball
+        let (x, y) = w.rollover_center(&format!("BallLockRollover{}", i + 1), 0).unwrap();
+        w.set_ball_layer(0, 4);
+        place(w, x, y);
+        step(w);
+    }
+
+    /// Each layer is its own world, as in the original: a ball on an orbit passes over
+    /// the main field's walls and bumpers and comes back down at its flipper lane.
+    #[test]
+    fn the_loops_carry_a_ball_round_on_their_own_layer_and_back_to_the_main_field() {
+        for (start, expected_layer) in [([3.0f32, 20.0f32], 2u8), ([16.8, 20.0], 3)] {
+            let mut w = world7();
+            w.set_ball_layer(0, 0);
+            {
+                let b = w.bodies.get_mut(w.balls[0].body).unwrap();
+                b.set_translation(Vector::new(start[0], start[1]), true);
+                b.set_linvel(Vector::new(0.0, 9.0), true);
+                b.set_gravity_scale(1.0, true);
+            }
+            let mut layers = vec![0u8];
+            for _ in 0..2400 {
+                step(&mut w);
+                let l = w.balls[0].layer;
+                if *layers.last().unwrap() != l { layers.push(l); }
+            }
+            assert_eq!(layers, vec![0, expected_layer, 0], "start {start:?}");
+            let y = w.bodies.get(w.balls[0].body).unwrap().translation().y;
+            assert!(y < 9.0, "the ball came down the flipper lane: y {y}");
+        }
+    }
+
+    #[test]
+    fn mini_table_pieces_are_inert_unless_a_ball_is_on_that_layer() {
+        let mut w = world7();
+        let b = w.bumpers.iter().position(|b| b.layer == 1).expect("a mini table bumper");
+        let (x, y) = (w.bumpers[b].position[0], w.bumpers[b].position[1] + w.bumpers[b].radius + w.ball_radius + 0.01);
+        w.drain_score_events();
+        place(&mut w, x, y);
+        for _ in 0..4 { step(&mut w); }
+        assert!(!w.drain_score_events().contains(&1000), "a main-layer ball does not touch it");
+        assert!(w.snapshot().bumpers.iter().all(|s| (s.x - x).abs() > 0.01), "and it is not drawn");
+        w.set_ball_layer(0, 1);
+        place(&mut w, x, y);
+        for _ in 0..16 { step(&mut w); place(&mut w, x, y); }
+        assert!(w.drain_score_events().contains(&1000), "a mini table ball does");
+        assert!(w.snapshot().bumpers.iter().any(|s| (s.x - x).abs() < 0.01), "and it is drawn");
+    }
+
+    #[test]
+    fn a_finished_constellation_sends_the_ball_to_the_lock_lane_otherwise_the_mini_table() {
+        let mut w = world7();
+        into_sensor(&mut w, "MiniTableOrBallLockSensor", 0);
+        assert_eq!(w.balls[0].layer, 1, "nothing to lock: the mini table");
+
+        let mut w = world7();
+        complete_constellation(&mut w);
+        assert!(messages(&w).iter().any(|m| m == "Ball Lock Ready"));
+        into_sensor(&mut w, "MiniTableOrBallLockSensor", 0);
+        assert_eq!(w.balls[0].layer, 4, "the lock lane");
+    }
+
+    #[test]
+    fn a_ball_in_the_lock_is_taken_and_the_next_lock_opens() {
+        let mut w = world7();
+        assert!(!w.group_ignores_ball("BallLockRollover1"), "the first lock is open");
+        assert!(w.group_ignores_ball("BallLockRollover2"));
+        complete_constellation(&mut w);
+        messages(&w);
+        lock_into(&mut w, 0);
+        assert!(messages(&w).iter().any(|m| m == "Ball 1 Locked"));
+        assert!(w.take_relaunch_needed(), "a fresh ball waits in the lane");
+        step(&mut w);
+        assert!(w.rollover_lit("BallLockRollover1", 0), "the light stays on");
+        assert!(w.group_ignores_ball("BallLockRollover1"));
+        assert!(!w.group_ignores_ball("BallLockRollover2"), "the next lock is open");
+    }
+
+    #[test]
+    fn a_ball_on_the_main_layer_does_not_reach_the_lock() {
+        let mut w = world7();
+        step(&mut w);
+        let (x, y) = w.rollover_center("BallLockRollover1", 0).unwrap();
+        place(&mut w, x, y);
+        step(&mut w);
+        step(&mut w);
+        assert!(!messages(&w).iter().any(|m| m == "Ball 1 Locked"));
+    }
+
+    fn start_multiball(w: &mut PhysicsWorld) {
+        for i in 0..3 {
+            complete_constellation(w);
+            lock_into(w, i);
+        }
+    }
+
+    #[test]
+    fn the_third_lock_starts_a_multiball_that_releases_three_balls() {
+        let mut w = world7();
+        start_multiball(&mut w);
+        let msgs = messages(&w);
+        assert!(msgs.iter().any(|m| m == "Multiball!"), "got {msgs:?}");
+        assert_eq!(w.ball_count(), 1, "the ball is held over the last lock");
+        run_frozen(&mut w, 1.2);
+        assert!(!w.rollover_lit("BallLockRollover3", 0), "a lock light goes out as its ball is released");
+        run_frozen(&mut w, 2.6);
+        assert_eq!(w.ball_count(), 2);
+        run_frozen(&mut w, 2.6);
+        assert_eq!(w.ball_count(), 3);
+        assert!(!w.rollover_lit("BallLockRollover1", 0) && !w.rollover_lit("BallLockRollover2", 0));
+    }
+
+    #[test]
+    fn all_six_constellations_in_a_multiball_make_the_jackpot() {
+        let mut w = world7();
+        start_multiball(&mut w);
+        run_frozen(&mut w, 6.5);
+        assert_eq!(w.ball_count(), 3);
+        messages(&w);
+        // The three locks locked three constellations already; the other three are done in the
+        // multiball. After each one the view flies back (10 s) before the next loop shot picks another.
+        let mut msgs = Vec::new();
+        for _ in 0..3 {
+            complete_constellation(&mut w);
+            msgs.extend(messages(&w));
+            run_frozen(&mut w, 11.0);
+        }
+        assert!(msgs.iter().any(|m| m == "Shoot ramp for jackpot"), "got {msgs:?}");
+        assert!(msgs.iter().any(|m| m.ends_with(" complete")), "the others said so");
+        w.drain_score_events();
+        into_sensor(&mut w, "MiniFieldDetector", 1);
+        assert!(messages(&w).iter().any(|m| m == "Jackpot!"));
+        assert!(w.drain_score_events().contains(&100_000));
+    }
+
+    #[test]
+    fn the_multiball_ends_at_one_ball_and_the_locks_start_over() {
+        let mut w = world7();
+        start_multiball(&mut w);
+        run_frozen(&mut w, 6.5);
+        w.game_time += 100.0; // no multiball saver
+        for i in (1..3).rev() {
+            let body = w.bodies.get_mut(w.balls[i].body).unwrap();
+            body.set_translation(Vector::new(5.0, -2.0), true);
+        }
+        run_frozen(&mut w, 0.6);
+        assert_eq!(w.ball_count(), 1);
+        run_frozen(&mut w, 0.5);
+        assert!(!w.group_ignores_ball("BallLockRollover1"), "the first lock is open again");
     }
 }

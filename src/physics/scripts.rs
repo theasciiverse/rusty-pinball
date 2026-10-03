@@ -1431,10 +1431,25 @@ const INACTIVE_STAR_INACTIVE_CONSTELLATION: Rgb = (240, 240, 240);
 /// The original's line colour is white at alpha 192.
 const CONSTELLATION_LINE: Rgb = (180, 180, 180);
 
+const JACKPOT_SCORE_7: u64 = 100_000;
+const JACKPOT_GUIDE_COLOR: Rgb = (0xAA, 0, 0);
+const BALL_LOCK_LAYER: u8 = 4;
+const MINI_TABLE_LAYER: u8 = 1;
+const TOKEN_ASTRA_RELEASE: u32 = 51;
+const TOKEN_ASTRA_BALL_2: u32 = 52;
+const TOKEN_ASTRA_BALL_3: u32 = 53;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AstraMultiball { Inactive, Starting, Active }
+
 pub(super) struct AdAstra {
     stars: StarState,
     seed: u32,
     ramp_score: u64,
+    multiball: AstraMultiball,
+    balls_locked: usize,
+    /// The ball held over the last lock while the multiball starts.
+    held_ball: usize,
     guide_seconds: f64,
     /// Centre and radius of the star circle (the `StarViewBoundary` rollover), read on the first tick.
     view: Option<(f32, f32, f32)>,
@@ -1442,7 +1457,65 @@ pub(super) struct AdAstra {
 
 impl AdAstra {
     pub(super) fn new(seed: u32) -> Self {
-        AdAstra { stars: StarState::new(), seed, ramp_score: BASE_RAMP_SCORE, guide_seconds: 0.0, view: None }
+        AdAstra {
+            stars: StarState::new(), seed, ramp_score: BASE_RAMP_SCORE, multiball: AstraMultiball::Inactive,
+            balls_locked: 0, held_ball: 0, guide_seconds: 0.0, view: None,
+        }
+    }
+
+    fn random(&mut self) -> f32 {
+        self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (self.seed >> 8) as f32 / (1u32 << 24) as f32
+    }
+
+    fn lock_group(i: usize) -> String { format!("BallLockRollover{}", i + 1) }
+
+    /// Lock `i` is lit once that many balls are locked, and takes a ball only
+    /// when it is the next one and no multiball is running.
+    fn update_ball_lock_rollovers(&self, w: &mut PhysicsWorld) {
+        for i in 0..3 {
+            let id = Self::lock_group(i);
+            w.set_all_rollovers(&id, self.balls_locked > i);
+            let enabled = self.multiball == AstraMultiball::Inactive && self.balls_locked == i;
+            w.set_group_ignore_ball(&id, !enabled);
+        }
+    }
+
+    /// The third lock: the ball is held over it for a second, then locked balls
+    /// are released one by one down the lock lane.
+    fn start_multiball(&mut self, w: &mut PhysicsWorld, ball: usize) {
+        if let Some((x, y)) = w.rollover_center(&Self::lock_group(2), 0) { w.hold_ball_at(ball, x, y); }
+        w.set_ball_gravity_scale(ball, 0.0);
+        self.held_ball = ball;
+        w.show_message("Multiball!", 3000);
+        self.multiball = AstraMultiball::Starting;
+        w.restore_ball_saver("BallSaver-left");
+        w.restore_ball_saver("BallSaver-right");
+        w.schedule(1000, TOKEN_ASTRA_RELEASE);
+        w.schedule(3500, TOKEN_ASTRA_BALL_2);
+        w.schedule(6000, TOKEN_ASTRA_BALL_3);
+    }
+
+    /// Sends a ball down the lock lane: the held one, or a new one over the
+    /// lock that is now freeing up.
+    fn release_ball(&mut self, w: &mut PhysicsWorld, existing: Option<usize>) {
+        let index = match existing {
+            Some(i) => i,
+            None => {
+                let (x, y) = w.rollover_center(&Self::lock_group(self.balls_locked.saturating_sub(1)), 0).unwrap_or((19.15, 28.0));
+                w.add_ball_at(x, y, BALL_LOCK_LAYER)
+            }
+        };
+        w.set_ball_layer(index, BALL_LOCK_LAYER);
+        let speed = 5.0 + self.random();
+        w.set_ball_velocity(index, 0.0, -speed);
+        self.balls_locked = self.balls_locked.saturating_sub(1);
+    }
+
+    fn do_jackpot(&mut self, w: &mut PhysicsWorld) {
+        w.show_message("Jackpot!", 3000);
+        w.add_score(JACKPOT_SCORE_7);
+        self.stars.reset_and_wander();
     }
 
     fn star_color(&self, star: usize) -> Rgb {
@@ -1509,8 +1582,18 @@ impl AdAstra {
         if new_stars > 0 {
             w.add_score(STAR_SCORE * new_stars as u64);
             if self.stars.all_stars_in_current_active() {
-                // A ball lock is ready (the locks themselves are round 2).
-                w.show_message("Ball Lock Ready", 2000);
+                if self.multiball == AstraMultiball::Inactive {
+                    w.show_message(if self.balls_locked == 2 { "Multiball Ready" } else { "Ball Lock Ready" }, 2000);
+                } else {
+                    // In a multiball a finished constellation is locked at once; all six make the jackpot ready.
+                    self.stars.lock_current();
+                    if self.stars.all_constellations_locked() {
+                        w.show_message("Shoot ramp for jackpot", 2000);
+                    } else if let Some(c) = self.stars.current_constellation() {
+                        w.show_message(&format!("{} complete", c.name), 2000);
+                    }
+                    self.stars.enter_wandering_mode();
+                }
             }
         }
     }
@@ -1521,7 +1604,11 @@ impl AdAstra {
         let pulse = (1.0 + (std::f64::consts::TAU * self.guide_seconds / GUIDE_PERIOD).sin()) / 2.0;
         let alpha = (75.0 + 180.0 * pulse) as u32;
         let (mut loop_alpha, mut lock_alpha) = (0, 0);
-        if self.stars.all_stars_in_current_active() {
+        let mut lock_color = LOCK_GUIDE_COLOR;
+        if self.multiball == AstraMultiball::Active && self.stars.all_constellations_locked() {
+            lock_color = JACKPOT_GUIDE_COLOR; // shoot the ramp for the jackpot
+            lock_alpha = alpha;
+        } else if self.multiball == AstraMultiball::Inactive && self.stars.all_stars_in_current_active() {
             lock_alpha = alpha; // lock ready
         } else if self.stars.mode == Mode::Wandering {
             loop_alpha = alpha; // shoot a loop to pick a constellation
@@ -1532,7 +1619,7 @@ impl AdAstra {
             w.set_decor_color(id, shade(LOOP_GUIDE_COLOR, loop_alpha));
         }
         w.set_decor_visible("LockAndJackpotGuide", lock_alpha > 0);
-        w.set_decor_color("LockAndJackpotGuide", shade(LOCK_GUIDE_COLOR, lock_alpha));
+        w.set_decor_color("LockAndJackpotGuide", shade(lock_color, lock_alpha));
     }
 
     fn handle_loop(&mut self, w: &mut PhysicsWorld) {
@@ -1567,14 +1654,42 @@ impl TableScript for AdAstra {
         }
         self.stars.tick(dt as f64);
         self.update_activated_stars(w);
+        self.update_ball_lock_rollovers(w);
         self.update_guides(w, dt);
         w.set_shapes(self.shapes());
+        if self.multiball == AstraMultiball::Active && w.ball_count() <= 1 {
+            self.multiball = AstraMultiball::Inactive;
+            self.stars.reset_and_wander();
+        }
+    }
+
+    fn scheduled(&mut self, w: &mut PhysicsWorld, token: u32) {
+        match token {
+            TOKEN_ASTRA_RELEASE => {
+                let held = self.held_ball;
+                w.set_ball_gravity_scale(held, 1.0);
+                self.release_ball(w, Some(held));
+            }
+            TOKEN_ASTRA_BALL_2 => self.release_ball(w, None),
+            TOKEN_ASTRA_BALL_3 => {
+                self.release_ball(w, None);
+                self.multiball = AstraMultiball::Active;
+            }
+            _ => {}
+        }
     }
 
     fn sensor(&mut self, w: &mut PhysicsWorld, ball: usize, id: &str, previous: Option<&str>) {
         match id {
             // Each loop counts once per pass, not once per step the ball is inside.
             "LeftLoopDetector" | "RightLoopDetector" if previous != Some(id) => self.handle_loop(w),
+            // The mini table, or the ball lock when a constellation is complete.
+            "MiniTableOrBallLockSensor" => {
+                let lock = self.multiball == AstraMultiball::Inactive && self.stars.all_stars_in_current_active();
+                w.set_ball_layer(ball, if lock { BALL_LOCK_LAYER } else { MINI_TABLE_LAYER });
+            }
+            // The mini table's exit pays the jackpot once all six constellations are locked.
+            "MiniFieldDetector" if self.stars.all_constellations_locked() => self.do_jackpot(w),
             // The ball dropping into an inlane is stopped dead at the top of it.
             "LeftFlipperDropSensor" | "RightFlipperDropSensor" => w.set_ball_velocity(ball, 0.0, 0.0),
             // Round the centre bumpers, either way.
@@ -1592,10 +1707,22 @@ impl TableScript for AdAstra {
         }
     }
 
-    fn rollover_group_completed(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
+    fn rollover_group_completed(&mut self, w: &mut PhysicsWorld, ball: usize, id: &str) {
         if id == "FlipperRollovers" || id == "TopRollovers" {
             w.set_all_rollovers(id, false);
             w.increment_multiplier();
+        } else if (0..3).any(|i| id == Self::lock_group(i)) {
+            self.balls_locked += 1;
+            if self.balls_locked == 3 {
+                self.start_multiball(w, ball);
+            } else {
+                w.remove_ball_without_loss(ball);
+                w.show_message(&format!("Ball {} Locked", self.balls_locked), 3000);
+            }
+            self.stars.lock_current();
+            self.stars.enter_wandering_mode();
+            // At once, not at the next tick: a ball held over the lock must not light it again.
+            self.update_ball_lock_rollovers(w);
         }
     }
 }

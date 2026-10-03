@@ -37,7 +37,7 @@ These are the building blocks. Most per-table gaps are "needs C1 + C3 + C4" and 
 | C5 | Element control | `setRetracted`, `setVisible`, `setNewColor`; rollover setters (set all, set by index, activate first, `setIgnoreBall`); movable rollover circles; drop target make-visible; spinner score |
 | C6 | Sensors by id | `ballInSensorRange` for every sensor, with each ball's most recent sensor id (ramp and orbit direction detection) |
 | C7 | Per-ball state | Ball primary and secondary colors (set at runtime), per-ball force hook (table 6 gravity wells) |
-| C8 | Full layer model | Layers as separate collision worlds, applied to bumpers, flippers, drop targets, rollovers, sensors; layer 0 is a layer, not "universal"; inactive-layer fade |
+| C8 | Full layer model | Layers as separate collision worlds, applied to bumpers, flippers, drop targets, rollovers, sensors; layer 0 is a layer, not "universal"; inactive-layer fade. **DONE except the inactive-layer fade** (an element with no layer is layer 0; a ball only touches and triggers elements of its own layer; layered pieces are drawn only while a ball is on that layer, where the original draws them faintly in `inactiveLayerColor`) |
 | C9 | Shape renderer | `setShapes`: arbitrary colored circles and lines each frame (table 7 star map) |
 | C10 | Multiplier and rollover rules | Fractional unbounded score multiplier; carry-over rules between balls; original rollover scoring (per rollover only, no completion bonus, no auto reset, `reset` timers, `toggleOff`) |
 | C11 | Score animations | Floating score text at the ball position, colored by value |
@@ -93,7 +93,7 @@ Round 1 leaves out only what needs more than one ball: ball locks, multiball lau
 | 4 | Status grid lit by bumpers, percent multiplier, ramp walls | DONE (locks, grid rows, multiball, jackpot too) |
 | 3 | Bumper bonus, heat meter, indicator rings | DONE (multiball and its flashing rings: round 2) |
 | 8 | Insert lights, rack bonus, gates, skill shot | DONE (whole table; decorative billiard-ball circles are still not drawn) |
-| 7 | Star-map field, constellations, loop shots, guide arrows | DONE (ball locks, multiball, jackpot and the layered mini-table: round 2) |
+| 7 | Star-map field, constellations, loop shots, guide arrows | DONE (ball locks, multiball, jackpot and the layered mini-table too) |
 
 ### Round 2: multiball for all tables
 
@@ -110,7 +110,7 @@ The multi-ball core and the script layer exist (tables 1 and 2 already have mult
 | 6 Orbiters | All planets on, jackpot | DONE |
 | 4 Compound Interest | Ball locks, status grid rows, multiball, jackpot | DONE |
 | 5 Eye of Horus | Pyramid, multiball (four colored balls), jackpot, extra-ball use | DONE |
-| 7 Ad Astra | Ball lock lane, layers, multiball, jackpot | TODO |
+| 7 Ad Astra | Ball lock lane, layers, multiball, jackpot | DONE |
 
 ### Later
 
