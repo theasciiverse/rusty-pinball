@@ -47,6 +47,7 @@ All notable changes to Rusty Pinball are documented here.
 - First unit tests: regression coverage for spinner activation/scoring/decay and the table 8 load fix below (`cargo test`)
 
 ### Fixed
+- Found by review against the original: a rollover now fires only when a ball enters it (a group a script clears under a resting ball no longer lights again at once, which re-awarded points after table 5's jackpot and doubled table 6's planet rollover); a relaunched ball (mercy ball) is a new ball with the table's colour and no last sensor, so it no longer keeps a planet or ramp colour; table 7's lock releases play the launch sound
 - Found by comparing the table 3 and 4 scripts with the original: a script's multiplier percent (table 4's bumpers) now applies before the hit's own score is paid, as the original's collision hook does (the hit paid at the old multiplier); and the multiball saver window is no longer reopened by each new multiball, it runs from the first extra ball of the game as in the original
 - Fixed: a ball lock, and a ball that fell back into the shooter lane, were handled as a lost ball, which ran the table's `ball_lost` rules: table 4's bumper multiplier increase was reset by every ball lock. Only a real drain is a lost ball now
 - Rollovers now trigger when the ball's centre is inside their radius, as in the original, instead of when its edge is (we added the ball's radius, which made every rollover about twice as easy to hit). The table editor uses the original rule, so lanes and rollovers placed there now behave the same here

@@ -368,6 +368,8 @@ struct RolloverInfo {
     radius: f32,
     score: u64,
     lit: bool,
+    // A ball was inside it on the previous step: a rollover only fires when a ball enters it.
+    inside: bool,
     // The colour from the table; `color` is what is drawn and scripts may
     // override it (`set_rollover_color(.., None)` restores this one).
     base_color: Option<(u8, u8, u8)>,
@@ -1270,6 +1272,7 @@ impl PhysicsWorld {
             radius: rv.radius.unwrap_or(group_radius),
             score:  rv.score.unwrap_or(group_score),
             lit:    false,
+            inside: false,
             base_color: parse_color(&rv.color).or(group_color),
             color:  parse_color(&rv.color).or(group_color),
             reset_seconds: r.reset.unwrap_or(0.0).max(0.0),
@@ -1378,6 +1381,14 @@ impl PhysicsWorld {
                 body.enable_ccd(true);
             }
             self.gate_ball = Some(h);
+            // A new ball in the original: the table's colour, no last sensor, the main layer.
+            let first = &mut self.balls[0];
+            first.color = None;
+            first.last_sensor = None;
+            first.trail.clear();
+            let collider = first.collider;
+            self.set_ball_layer(0, 0);
+            let _ = collider;
         } else {
             let ball = self.new_ball([lx, ly], v, 1.0);
             self.gate_ball = Some(ball.body);
@@ -1793,15 +1804,21 @@ impl PhysicsWorld {
                 // ── Ball activation (skip while flashing; group is mid-reset) ──
                 if !group.ignore_ball && group.flash_ticks == 0 {
                     let mut newly_lit: Option<usize> = None;
+                    let was_inside: Vec<bool> = group.rollovers.iter().map(|rv| rv.inside).collect();
+                    for rv in &mut group.rollovers { rv.inside = false; }
                     for &(bi, bp, _) in &balls_now {
                         if self.balls[bi].layer != group.layer { continue; }
-                        for rv in &mut group.rollovers {
-                            if rv.lit { continue; }
+                        for (ri, rv) in group.rollovers.iter_mut().enumerate() {
                             let dx = bp.x - rv.x;
                             let dy = bp.y - rv.y;
                             // The ball's centre must be within the rollover's radius, as in the original
                             // (and the editor); adding the ball's radius made them twice as easy to hit.
-                            if dx * dx + dy * dy <= rv.radius * rv.radius {
+                            if dx * dx + dy * dy > rv.radius * rv.radius { continue; }
+                            rv.inside = true;
+                            // Only a ball entering it counts (the original's `rolloversHitOnPreviousTick`):
+                            // a group a script clears under a resting ball does not light again.
+                            if rv.lit || was_inside[ri] { continue; }
+                            {
                                 rv.lit = true;
                                 rv.reset_timer = (rv.reset_seconds > 0.0).then_some(rv.reset_seconds);
                                 newly_lit = Some(bi);
@@ -2298,7 +2315,13 @@ impl PhysicsWorld {
         let index = self.balls.len() - 1;
         self.set_ball_layer(index, layer);
         if self.multiball_start_time.is_none() { self.multiball_start_time = Some(self.game_time); }
+        self.sound_events.borrow_mut().push(PhysicsSound::Launch);
         index
+    }
+
+    /// The launch bounce, for a ball a script sets going itself (table 7's lock release).
+    fn play_launch_sound(&self) {
+        self.sound_events.borrow_mut().push(PhysicsSound::Launch);
     }
 
     /// Moves a ball and stops it dead (a held ball).
@@ -5549,6 +5572,7 @@ mod table_8_tests {
             place(w, x, y);
             step(w);
             place(w, 1.0, 1.0);
+            step(w); // the ball leaves, so the next completion is a new entry
         };
         complete(&mut w);
         assert!(messages(&w).iter().any(|m| m == "Lanes Completed"));
@@ -6509,6 +6533,8 @@ mod table_4_lock_tests {
     fn jackpot_shot(w: &mut PhysicsWorld) {
         light_everything(w);
         w.set_rollover("Rollovers.Magenta", 2, false);
+        place(w, 1.0, 1.0);
+        step(w); // away from the light, so reaching it is an entry
         let (x, y) = w.rollover_center("Rollovers.Magenta", 2).unwrap();
         place(w, x, y);
         step(w);
@@ -6702,7 +6728,8 @@ mod table_5_multiball_tests {
             for c in 0..4 { for n in 0..3 { w.set_all_rollovers(&format!("CenterRollover_{}_{}", COLOR_NAMES[c], n + 1), true); } }
             w.set_all_rollovers("CenterRollover_Green_3", false);
             w.set_ball_color(0, Some(BALL_COLORS[3]));
-            step(&mut w);
+            place(&mut w, 1.0, 1.0);
+            step(&mut w); // away from the light, so reaching it is an entry
             let (x, y) = w.rollover_center("CenterRollover_Green_3", 0).unwrap();
             place(&mut w, x, y);
             step(&mut w);
@@ -7212,5 +7239,29 @@ mod engine_rule_tests {
         assert!(snap.bumpers.iter().any(|s| s.lit), "the bumper is lit");
         let frame = crate::renderer::FieldRenderer::new().render(&snap, 0.0, 100, 70, false);
         assert!(frame.colors.contains(&ratatui::style::Color::Rgb(255 - r, 255 - g, 255 - b)), "drawn inverted");
+    }
+
+    #[test]
+    fn a_rollover_fires_when_a_ball_enters_it_not_while_one_rests_in_it() {
+        let mut w = world(1);
+        let (x, y) = w.rollover_groups.iter().find(|g| !g.ignore_ball).map(|g| (g.rollovers[0].x, g.rollovers[0].y)).unwrap();
+        let gi = w.rollover_groups.iter().position(|g| !g.ignore_ball).unwrap();
+        touch(&mut w, x, y);
+        assert!(w.rollover_groups[gi].rollovers[0].lit);
+        w.rollover_groups[gi].rollovers[0].lit = false; // a script clears it under the ball
+        for _ in 0..4 { w.step(1.0 / 240.0, &InputState::default()); }
+        assert!(!w.rollover_groups[gi].rollovers[0].lit, "still not lit again");
+        touch(&mut w, x + 5.0, y + 5.0);
+        touch(&mut w, x, y);
+        assert!(w.rollover_groups[gi].rollovers[0].lit, "lit by a new entry");
+    }
+
+    #[test]
+    fn a_relaunched_ball_is_a_new_ball_without_the_old_colour() {
+        let mut w = world(1);
+        w.balls[0].color = Some((1, 2, 3));
+        w.balls[0].last_sensor = Some("X".into());
+        w.launch_ball();
+        assert_eq!((w.balls[0].color, w.balls[0].last_sensor.clone()), (None, None));
     }
 }

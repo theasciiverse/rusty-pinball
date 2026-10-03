@@ -1512,6 +1512,7 @@ impl AdAstra {
         w.set_ball_layer(index, BALL_LOCK_LAYER);
         let speed = 5.0 + self.random();
         w.set_ball_velocity(index, 0.0, -speed);
+        if existing.is_some() { w.play_launch_sound(); } // a new ball already sounded when it was added
         self.balls_locked = self.balls_locked.saturating_sub(1);
     }
 
