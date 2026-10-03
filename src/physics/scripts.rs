@@ -46,6 +46,7 @@ pub(super) fn script_for(table: &TableDef) -> Option<Box<dyn TableScript>> {
     match table.delegate.as_deref() {
         Some("Field1Delegate") => Some(Box::new(Classic)),
         Some("Field2Delegate") => Some(Box::new(RoundAndRound)),
+        Some("Field3Delegate") => Some(Box::new(Ringmaster::new())),
         Some("Field4Delegate") => Some(Box::new(CompoundInterest { bumper_multiplier_increase: 1 })),
         Some("Field5Delegate") => Some(Box::new(EyeOfHorus { ramp_bonus: [0; 4] })),
         Some("Field6Delegate") => Some(Box::new(Orbiters::new(clock_seed()))),
@@ -609,3 +610,165 @@ impl TableScript for EyeOfHorus {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Table 3: Ringmaster (Field3Delegate)
+//
+// Hitting a bumper scores 500 and charges a heat meter shown by the centre
+// ring. Two target banks upgrade the bumper bonus (a stronger multiplier, a
+// longer duration) and light their own rings. A ramp rollover starts the
+// bonus: for a while each bumper hit scores extra, and the bumpers glow from
+// red back down to blue as it runs out. A full meter and both banks done light
+// the multiball-ready ring; the multiball itself is round 2.
+// ---------------------------------------------------------------------------
+
+const BASE_BUMPER_SCORE: u64 = 500;
+const BASE_BONUS_SECONDS: f32 = 15.0;
+const BASE_BONUS_MULTIPLIER: f32 = 5.0;
+const MAX_BUMPER_ENERGY: f32 = 200.0;
+const MAX_UPPER_GROUPS: u32 = 2;
+const MAX_LOWER_GROUPS: u32 = 5;
+
+/// The 53-entry heat palette: blue, cyan, green, yellow, red.
+fn temperature_palette() -> Vec<Rgb> {
+    let mut p = Vec::with_capacity(53);
+    for i in 0..16u8 { p.push((0, 16 * i, 255)); }          // blue to cyan
+    for i in 0..8u8 { p.push((0, 255, 240 - 32 * i)); }     // cyan to green
+    for i in 0..8u8 { p.push((16 + 32 * i, 255, 0)); }      // green to yellow
+    for i in 0..21u8 { p.push((255, 240 - 12 * i, 0)); }    // yellow to red
+    p
+}
+
+struct Ringmaster {
+    palette: Vec<Rgb>,
+    bonus_active: bool,
+    bonus_elapsed: f32,
+    bonus_duration: f32,
+    bonus_multiplier: f32,
+    upper_groups: u32,
+    lower_groups: u32,
+    energy: f32,
+}
+
+impl Ringmaster {
+    fn new() -> Self {
+        Ringmaster {
+            palette: temperature_palette(),
+            bonus_active: false,
+            bonus_elapsed: 0.0,
+            bonus_duration: BASE_BONUS_SECONDS,
+            bonus_multiplier: BASE_BONUS_MULTIPLIER,
+            upper_groups: 0,
+            lower_groups: 0,
+            energy: 0.0,
+        }
+    }
+
+    /// Rounded like the original's `Math.round((len - 1) * ratio)`.
+    fn color_for_ratio(&self, ratio: f32) -> Rgb {
+        let last = self.palette.len() - 1;
+        if ratio <= 0.0 { return self.palette[0]; }
+        if ratio >= 1.0 { return self.palette[last]; }
+        self.palette[((last as f32) * ratio + 0.5).floor() as usize]
+    }
+
+    fn reset_bonuses(&mut self, w: &mut PhysicsWorld) {
+        self.bonus_duration = BASE_BONUS_SECONDS;
+        self.bonus_multiplier = BASE_BONUS_MULTIPLIER;
+        self.energy = 0.0;
+        self.upper_groups = 0;
+        self.lower_groups = 0;
+        for ring in ["UpperTargetIndicator", "LowerTargetIndicator", "BumperIndicator"] {
+            w.set_rollover_color(ring, 0, None);
+        }
+        w.set_all_rollovers("BumperIndicator", false);
+    }
+
+    fn end_bonus(&mut self, w: &mut PhysicsWorld) {
+        self.bonus_active = false;
+        w.set_bumper_colors(None);
+    }
+
+    /// Meter full and both banks upgraded all the way: the ready ring lights.
+    fn check_multiball_ready(&self, w: &mut PhysicsWorld) {
+        if self.energy >= MAX_BUMPER_ENERGY && self.upper_groups >= MAX_UPPER_GROUPS && self.lower_groups >= MAX_LOWER_GROUPS {
+            w.set_all_rollovers("BumperIndicator", true);
+        }
+    }
+}
+
+impl TableScript for Ringmaster {
+    fn handles_rollovers(&self) -> bool { true }
+
+    fn game_started(&mut self, w: &mut PhysicsWorld) {
+        self.reset_bonuses(w);
+    }
+
+    fn ball_lost(&mut self, w: &mut PhysicsWorld) {
+        self.end_bonus(w);
+    }
+
+    fn tick(&mut self, w: &mut PhysicsWorld, dt: f32) {
+        if !self.bonus_active { return; }
+        self.bonus_elapsed += dt;
+        if self.bonus_elapsed >= self.bonus_duration {
+            self.end_bonus(w);
+        } else {
+            let remaining = 1.0 - self.bonus_elapsed / self.bonus_duration;
+            w.set_bumper_colors(Some(self.color_for_ratio(remaining)));
+        }
+    }
+
+    fn bumper_hit(&mut self, w: &mut PhysicsWorld, _ball: usize, _id: &str) {
+        // The bumpers' JSON score is 0; each hit scores 500, plus a bonus that
+        // fades over the bonus's duration, rounded to the nearest 10.
+        let mut extra_energy = 0.0;
+        let mut score = BASE_BUMPER_SCORE;
+        if self.bonus_active {
+            let remaining = 1.0 - self.bonus_elapsed / self.bonus_duration;
+            extra_energy = remaining * self.bonus_multiplier;
+            score += ((BASE_BUMPER_SCORE as f32 * extra_energy / 10.0 + 0.5).floor() as u64) * 10;
+        }
+        w.add_score(score);
+        self.energy = (self.energy + 1.0 + extra_energy).min(MAX_BUMPER_ENERGY);
+        w.set_rollover_color("BumperIndicator", 0, Some(self.color_for_ratio(self.energy / MAX_BUMPER_ENERGY)));
+        self.check_multiball_ready(w);
+    }
+
+    fn drop_bank_cleared(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
+        announce_saver(w, "DropTargetLeftSave", "DropTargetRightSave", id);
+        match id {
+            // The lower bank lengthens the bonus by a second, up to five times.
+            "LowerMultiballTargets" if self.lower_groups < MAX_LOWER_GROUPS => {
+                self.bonus_duration += 1.0;
+                self.lower_groups += 1;
+                let ratio = self.lower_groups as f32 / MAX_LOWER_GROUPS as f32;
+                w.set_rollover_color("LowerTargetIndicator", 0, Some(self.color_for_ratio(ratio)));
+                self.check_multiball_ready(w);
+            }
+            // The upper bank raises the bonus multiplier, up to twice.
+            "UpperMultiballTargets" if self.upper_groups < MAX_UPPER_GROUPS => {
+                self.bonus_multiplier += 1.0;
+                self.upper_groups += 1;
+                let ratio = self.upper_groups as f32 / MAX_UPPER_GROUPS as f32;
+                w.set_rollover_color("UpperTargetIndicator", 0, Some(self.color_for_ratio(ratio)));
+                self.check_multiball_ready(w);
+            }
+            _ => {}
+        }
+    }
+
+    fn rollover_group_completed(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
+        if id == "LeftRampRollover" || id == "RightRampRollover" {
+            // A ramp starts (or restarts) the bumper bonus. (Multiball: round 2.)
+            self.bonus_active = true;
+            self.bonus_elapsed = 0.0;
+        } else {
+            w.set_all_rollovers(id, false);
+            w.increment_multiplier();
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) fn temperature_palette_for_test() -> Vec<(u8, u8, u8)> { temperature_palette() }

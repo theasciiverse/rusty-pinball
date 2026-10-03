@@ -149,6 +149,9 @@ struct FlipperInfo {
 }
 
 struct BumperInfo {
+    // Colours a script put on the bumper at runtime (table 3's heat).
+    color_override: Option<(u8, u8, u8)>,
+    outer_override: Option<(u8, u8, u8)>,
     body: RigidBodyHandle,
     position: [f32; 2],
     radius: f32,
@@ -283,7 +286,14 @@ struct RolloverInfo {
     radius: f32,
     score: u64,
     lit: bool,
+    // The colour from the table; `color` is what is drawn and scripts may
+    // override it (`set_rollover_color(.., None)` restores this one).
+    base_color: Option<(u8, u8, u8)>,
     color: Option<(u8, u8, u8)>,
+    // Sim seconds after a ball lights it until it turns itself off again (the
+    // group's `reset`; 0 = never), and the time left on that countdown.
+    reset_seconds: f32,
+    reset_timer: Option<f32>,
 }
 
 struct RolloverGroupInfo {
@@ -904,6 +914,8 @@ impl PhysicsWorld {
         colliders.insert_with_parent(col, h, bodies);
 
         bumpers.push(BumperInfo {
+            color_override: None,
+            outer_override: None,
             body: h,
             position: b.position,
             radius: b.radius,
@@ -1086,7 +1098,10 @@ impl PhysicsWorld {
             radius: rv.radius.unwrap_or(group_radius),
             score:  rv.score.unwrap_or(group_score),
             lit:    false,
+            base_color: parse_color(&rv.color).or(group_color),
             color:  parse_color(&rv.color).or(group_color),
+            reset_seconds: r.reset.unwrap_or(0.0).max(0.0),
+            reset_timer: None,
         }).collect();
         RolloverGroupInfo {
             rollovers,
@@ -1369,7 +1384,8 @@ impl PhysicsWorld {
                 self.bumpers[i].lit_ticks = BUMPER_LIT_TICKS;
                 let bump = &mut self.bumpers[i];
                 if bump.award_ladder.is_empty() {
-                    self.score_events.borrow_mut().push(bump.score);
+                    // A bumper with no score of its own (table 3: its script scores) reports nothing.
+                    if bump.score > 0 { self.score_events.borrow_mut().push(bump.score); }
                 } else {
                     let last_rung = bump.award_ladder.len() - 1;
                     self.score_events.borrow_mut().push(bump.award_ladder[bump.ladder_rung]);
@@ -1380,9 +1396,9 @@ impl PhysicsWorld {
                     }
                 }
                 self.sound_events.borrow_mut().push(PhysicsSound::BumperHit);
-                if let Some(id) = self.bumpers[i].shot_id.clone() {
-                    self.script_events.push(ScriptEvent::BumperHit { id, ball: bi });
-                }
+                // Every bumper reports a hit; one without an id reports an empty id.
+                let id = self.bumpers[i].shot_id.clone().unwrap_or_default();
+                self.script_events.push(ScriptEvent::BumperHit { id, ball: bi });
                 if let Some(pts) = Self::record_shot_opt(&mut self.letter_groups, &mut self.jackpot, &self.bumpers[i].shot_id) {
                     self.score_events.borrow_mut().push(pts);
                 }
@@ -1555,6 +1571,12 @@ impl PhysicsWorld {
             // no flash, no completion bonus, no automatic reset.
             let script_rollovers = self.script.as_ref().map_or(false, |sc| sc.handles_rollovers());
             for group in &mut self.rollover_groups {
+                // Rollovers with a reset delay turn themselves off after it.
+                for rv in &mut group.rollovers {
+                    if let Some(left) = rv.reset_timer {
+                        if left - dt <= 0.0 { rv.lit = false; rv.reset_timer = None; } else { rv.reset_timer = Some(left - dt); }
+                    }
+                }
                 // ── Ball activation (skip while flashing — group is mid-reset) ──
                 if !group.ignore_ball && group.flash_ticks == 0 {
                     let mut newly_lit: Option<usize> = None;
@@ -1565,6 +1587,7 @@ impl PhysicsWorld {
                             let dy = bp.y - rv.y;
                             if dx * dx + dy * dy <= (rv.radius + self.ball_radius).powi(2) {
                                 rv.lit = true;
+                                rv.reset_timer = (rv.reset_seconds > 0.0).then_some(rv.reset_seconds);
                                 newly_lit = Some(bi);
                                 let pts = if rv.score > 0 { rv.score } else { group.score };
                                 if pts > 0 {
@@ -1848,12 +1871,16 @@ impl PhysicsWorld {
     fn set_rollover(&mut self, id: &str, index: usize, lit: bool) {
         if let Some(r) = self.rollover_group_mut(id).and_then(|g| g.rollovers.get_mut(index)) {
             r.lit = lit;
+            if !lit { r.reset_timer = None; }
         }
     }
 
     fn set_all_rollovers(&mut self, id: &str, lit: bool) {
         if let Some(g) = self.rollover_group_mut(id) {
-            for r in &mut g.rollovers { r.lit = lit; }
+            for r in &mut g.rollovers {
+                r.lit = lit;
+                if !lit { r.reset_timer = None; }
+            }
         }
     }
 
@@ -1979,9 +2006,19 @@ impl PhysicsWorld {
         }
     }
 
+    /// Overrides a rollover's colour; None restores the table's colour.
     fn set_rollover_color(&mut self, id: &str, index: usize, color: Option<(u8, u8, u8)>) {
         if let Some(r) = self.rollover_group_mut(id).and_then(|g| g.rollovers.get_mut(index)) {
-            r.color = color;
+            r.color = color.or(r.base_color);
+        }
+    }
+
+    /// Overrides every bumper's colour (and its outer ring, dimmer, standing in for
+    /// the original's alpha 128); None restores the table's colours.
+    fn set_bumper_colors(&mut self, color: Option<(u8, u8, u8)>) {
+        for b in &mut self.bumpers {
+            b.color_override = color;
+            b.outer_override = color.map(|(r, g, bl)| (r / 2, g / 2, bl / 2));
         }
     }
 
@@ -2271,8 +2308,8 @@ impl PhysicsWorld {
             outer_radius: b.outer_radius,
             lit: b.lit_ticks > 0,
             label: b.label.clone(),
-            color: b.color,
-            outer_color: b.outer_color,
+            color: b.color_override.or(b.color),
+            outer_color: b.outer_override.or(b.outer_color),
             next_award: (!b.award_ladder.is_empty()).then(|| b.award_ladder[b.ladder_rung]),
         }).collect();
 
@@ -4769,5 +4806,177 @@ mod table_5_center_tests {
         place(&mut w, x, y);
         step(&mut w);
         assert_eq!(w.drain_multiplier_events(), vec![1]);
+    }
+}
+
+#[cfg(test)]
+mod table_3_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    fn world3() -> PhysicsWorld { PhysicsWorld::from_table(&load_table(3).unwrap()) }
+
+    fn place(w: &mut PhysicsWorld, x: f32, y: f32) {
+        let body = w.bodies.get_mut(w.balls[0].body).unwrap();
+        body.set_translation(Vector::new(x, y), true);
+        body.set_linvel(Vector::new(0.0, 0.0), true);
+        body.set_gravity_scale(0.0, true);
+    }
+
+    fn step(w: &mut PhysicsWorld) { w.step(1.0 / 240.0, &InputState::default()); }
+
+    fn run_sim_seconds(w: &mut PhysicsWorld, secs: f32) {
+        let frame = 0.033;
+        for _ in 0..(secs / (frame * w.time_ratio())).ceil() as usize { w.step_frame(frame, &InputState::default()); }
+    }
+
+    /// Touches bumper `i` once (and lets its debounce lapse so calls can repeat).
+    fn hit_bumper(w: &mut PhysicsWorld, i: usize) {
+        let (bx, by, br) = { let b = &w.bumpers[i]; (b.position[0], b.position[1], b.radius) };
+        let y = by + br + w.ball_radius + 0.01;
+        place(w, bx, y);
+        // 12 substeps is exactly the bumper debounce, so each call is one hit.
+        for _ in 0..12 { step(w); place(w, bx, y); }
+    }
+
+    fn bumper_scores(w: &PhysicsWorld) -> Vec<u64> { w.drain_score_events() }
+
+    fn clear_bank(w: &mut PhysicsWorld, id: &str) {
+        let gi = w.drop_target_groups.iter().position(|g| g.shot_id.as_deref() == Some(id)).unwrap();
+        for t in &mut w.drop_target_groups[gi].targets {
+            t.active = true;
+            w.colliders.get_mut(t.collider).unwrap().set_collision_groups(InteractionGroups::all());
+        }
+        w.drop_target_groups[gi].reset_timer = None;
+        let last = w.drop_target_groups[gi].targets.len() - 1;
+        for ti in 0..last {
+            w.drop_target_groups[gi].targets[ti].active = false;
+            let ch = w.drop_target_groups[gi].targets[ti].collider;
+            w.colliders.get_mut(ch).unwrap().set_collision_groups(InteractionGroups::none());
+        }
+        let t = &w.drop_target_groups[gi].targets[last];
+        let (mx, my) = ((t.x1 + t.x2) / 2.0, (t.y1 + t.y2) / 2.0);
+        place(w, mx, my);
+        step(w);
+    }
+
+    fn ring_color(w: &PhysicsWorld, id: &str) -> Option<(u8, u8, u8)> { w.rollover_group(id).unwrap().rollovers[0].color }
+
+    fn start_bonus(w: &mut PhysicsWorld) {
+        let (x, y) = w.rollover_center("LeftRampRollover", 0).unwrap();
+        place(w, x, y);
+        step(w);
+        place(w, 1.0, 1.0);
+    }
+
+    #[test]
+    fn the_heat_palette_matches_the_original() {
+        let p = scripts::temperature_palette_for_test();
+        assert_eq!(p.len(), 53);
+        assert_eq!((p[0], p[15], p[16], p[23]), ((0, 0, 255), (0, 240, 255), (0, 255, 240), (0, 255, 16)));
+        assert_eq!((p[24], p[31], p[32], p[52]), ((16, 255, 0), (240, 255, 0), (255, 240, 0), (255, 0, 0)));
+    }
+
+    #[test]
+    fn a_bumper_scores_500_and_charges_the_heat_meter() {
+        let mut w = world3();
+        w.drain_score_events();
+        hit_bumper(&mut w, 0);
+        assert!(bumper_scores(&w).iter().all(|&p| p == 500), "base score 500");
+        assert_eq!(ring_color(&w, "BumperIndicator"), Some((0, 0, 255)), "1 of 200 is still blue");
+        for _ in 0..39 { hit_bumper(&mut w, 0); }
+        assert_eq!(ring_color(&w, "BumperIndicator"), Some((0, 160, 255)), "40 of 200 (20%): palette index 10");
+    }
+
+    #[test]
+    fn the_ramp_rollover_starts_a_bonus_that_scores_extra_and_heats_the_bumpers() {
+        let mut w = world3();
+        let plain = w.snapshot().bumpers[0].color;
+        start_bonus(&mut w);
+        w.drain_score_events();
+        hit_bumper(&mut w, 0);
+        let first = bumper_scores(&w)[0];
+        // 500 plus about round(500 * 5 / 10) * 10 = 2500 at the very start of the bonus.
+        assert!((2900..=3000).contains(&first), "bonus at its start: {first}");
+        assert_eq!(w.snapshot().bumpers[0].color, Some((255, 0, 0)), "the bumpers start red-hot");
+
+        run_sim_seconds(&mut w, 7.0); // about half way
+        let mid = w.snapshot().bumpers[0].color.unwrap();
+        assert!(mid.0 < 255 || mid.1 > 0, "cooling: {mid:?}");
+        w.drain_score_events();
+        hit_bumper(&mut w, 0);
+        let later = bumper_scores(&w)[0];
+        assert!(later < first && later > 500, "the bonus fades: {later}");
+
+        run_sim_seconds(&mut w, 10.0);
+        assert_eq!(w.snapshot().bumpers[0].color, plain, "the bonus ends and the colours return");
+        w.drain_score_events();
+        hit_bumper(&mut w, 0);
+        assert!(bumper_scores(&w).iter().all(|&p| p == 500));
+    }
+
+    #[test]
+    fn the_ramp_rollover_turns_itself_off_after_its_reset_delay() {
+        let mut w = world3();
+        let (x, y) = w.rollover_center("LeftRampRollover", 0).unwrap();
+        place(&mut w, x, y);
+        step(&mut w);
+        assert!(w.rollover_lit("LeftRampRollover", 0));
+        place(&mut w, 1.0, 1.0);
+        run_sim_seconds(&mut w, 2.0);
+        assert!(w.rollover_lit("LeftRampRollover", 0), "still lit before the 3 s are up");
+        run_sim_seconds(&mut w, 2.0);
+        assert!(!w.rollover_lit("LeftRampRollover", 0), "off after 3 s, ready for the next pass");
+    }
+
+    #[test]
+    fn the_banks_upgrade_the_bonus_and_light_their_rings() {
+        let mut w = world3();
+        clear_bank(&mut w, "LowerMultiballTargets");
+        assert_eq!(ring_color(&w, "LowerTargetIndicator"), Some((0, 160, 255)), "1 of 5");
+        clear_bank(&mut w, "UpperMultiballTargets");
+        assert_eq!(ring_color(&w, "UpperTargetIndicator"), Some((80, 255, 0)), "1 of 2: palette index 26");
+
+        // The upper bank raised the multiplier to 6, so the bonus start pays more.
+        start_bonus(&mut w);
+        w.drain_score_events();
+        hit_bumper(&mut w, 0);
+        let first = bumper_scores(&w)[0];
+        assert!((3400..=3500).contains(&first), "500 + about 3000: {first}");
+    }
+
+    #[test]
+    fn a_full_meter_and_both_banks_light_the_multiball_ready_ring() {
+        let mut w = world3();
+        for _ in 0..2 { clear_bank(&mut w, "UpperMultiballTargets"); }
+        for _ in 0..5 { clear_bank(&mut w, "LowerMultiballTargets"); }
+        assert!(!w.rollover_lit("BumperIndicator", 0), "the meter is not full yet");
+        for i in 0..200 { hit_bumper(&mut w, i % 3); }
+        assert!(w.rollover_lit("BumperIndicator", 0), "ready");
+    }
+
+    #[test]
+    fn losing_the_ball_ends_the_bonus() {
+        let mut w = world3();
+        let plain = w.snapshot().bumpers[0].color;
+        start_bonus(&mut w);
+        step(&mut w);
+        assert_ne!(w.snapshot().bumpers[0].color, plain, "the bonus is heating the bumpers");
+        w.ball_lost();
+        w.park_ball();
+        assert_eq!(w.snapshot().bumpers[0].color, plain, "losing the ball ends it");
+    }
+
+    #[test]
+    fn the_flipper_lanes_raise_the_multiplier_and_the_savers_announce_themselves() {
+        let mut w = world3();
+        let n = w.rollover_count("FlipperRollovers");
+        for i in 0..n - 1 { w.set_rollover("FlipperRollovers", i, true); }
+        let (x, y) = w.rollover_center("FlipperRollovers", n - 1).unwrap();
+        place(&mut w, x, y);
+        step(&mut w);
+        assert_eq!(w.drain_multiplier_events(), vec![1]);
+        clear_bank(&mut w, "DropTargetLeftSave");
+        assert!(w.drain_message_events().iter().any(|m| m.0 == "Left Save Enabled"));
     }
 }

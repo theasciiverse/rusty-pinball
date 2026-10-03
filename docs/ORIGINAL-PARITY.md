@@ -91,7 +91,7 @@ Round 1 leaves out only what needs more than one ball: ball locks, multiball lau
 | 5 | Rotating triangle, colored-ball diagram and lines, ramp colors and bonuses, extra-ball area | DONE (pyramid, multiball, multiball triangle reversal: round 2) |
 | 6 | Orbiting planets, planet gravity, planet colors and activation, ramp detectors | DONE (all five planets on starts multiball, round 2) |
 | 4 | Status grid lit by bumpers, percent multiplier, ramp walls | DONE (locks, multiball, jackpot: round 2; the grid only lights row 1 until locks exist) |
-| 3 | Bumper bonus, indicator rings | TODO |
+| 3 | Bumper bonus, heat meter, indicator rings | DONE (multiball and its flashing rings: round 2) |
 | 8 | Insert lights, rack bonus, gates | TODO |
 | 7 | Star-map field, constellations | TODO |
 
