@@ -42,6 +42,8 @@ pub(super) trait TableScript {
     /// A ball is inside the sensor `id` (called every step while it is). `previous`
     /// is the sensor it was in before, so a script can tell which way it came.
     fn sensor(&mut self, _w: &mut PhysicsWorld, _ball: usize, _id: &str, _previous: Option<&str>) {}
+    /// A ball struck the kick wall `id`.
+    fn wall_hit(&mut self, _w: &mut PhysicsWorld, _ball: usize, _id: &str) {}
     /// A timer from `PhysicsWorld::schedule` fired.
     fn scheduled(&mut self, _w: &mut PhysicsWorld, _token: u32) {}
 }
@@ -52,7 +54,7 @@ pub(super) fn script_for(table: &TableDef) -> Option<Box<dyn TableScript>> {
         Some("Field2Delegate") => Some(Box::new(RoundAndRound)),
         Some("Field3Delegate") => Some(Box::new(Ringmaster::new())),
         Some("Field4Delegate") => Some(Box::new(CompoundInterest::new())),
-        Some("Field5Delegate") => Some(Box::new(EyeOfHorus { ramp_bonus: [0; 4] })),
+        Some("Field5Delegate") => Some(Box::new(EyeOfHorus::new())),
         Some("Field6Delegate") => Some(Box::new(Orbiters::new(clock_seed()))),
         Some("Field7Delegate") => Some(Box::new(AdAstra::new(clock_seed()))),
         Some("Field8Delegate") => Some(Box::new(PoolParty::new())),
@@ -689,12 +691,94 @@ const WALL_COLORS_5: [Rgb; 4] = [(0x00, 0x66, 0xFF), (0xCC, 0x00, 0x00), (0xCC, 
 const DISABLED_COLORS_5: [Rgb; 4] = [(0x00, 0x33, 0x66), (0x66, 0x00, 0x00), (0x66, 0x66, 0x00), (0x00, 0x66, 0x00)];
 const RAMP_BASE_SCORE_5: u64 = 5000;
 
+const TOKEN_EYE_LAUNCH: u32 = 41;
+const TOKEN_EYE_LAST_LAUNCH: u32 = 42;
+const JACKPOT_BASE_SCORE_5: u64 = 50_000;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PyramidStatus { NotReady, Ready, Starting, Active }
+
 struct EyeOfHorus {
     /// Percent added to each colour's ramp score (10 per cleared ramp bank).
     ramp_bonus: [u32; 4],
+    status: PyramidStatus,
+    jackpot_count: u64,
+    /// The multiball's first ball is the parked primary ball; later ones are extra.
+    first_launch_pending: bool,
 }
 
 impl EyeOfHorus {
+    fn new() -> Self {
+        EyeOfHorus { ramp_bonus: [0; 4], status: PyramidStatus::NotReady, jackpot_count: 0, first_launch_pending: false }
+    }
+
+    fn all_lines_lit(w: &PhysicsWorld) -> bool {
+        (0..4).all(|c| (0..3).all(|n| w.rollovers_all_lit(&Self::center_rollover(c, n))))
+    }
+
+    fn reset_center(w: &mut PhysicsWorld) {
+        for c in 0..4 { for n in 0..3 { w.set_all_rollovers(&Self::center_rollover(c, n), false); } }
+    }
+
+    /// Lit lines on every colour: ready for the pyramid, or in multiball a jackpot.
+    fn check_lines(&mut self, w: &mut PhysicsWorld) {
+        if !Self::all_lines_lit(w) { return; }
+        match self.status {
+            PyramidStatus::Active => {
+                self.jackpot_count += 1;
+                let msg = if self.jackpot_count > 1 { format!("{}x Jackpot!", self.jackpot_count) } else { "Jackpot!".to_string() };
+                w.show_message(&msg, 3000);
+                w.add_score(JACKPOT_BASE_SCORE_5 * self.jackpot_count);
+                Self::reset_center(w);
+            }
+            PyramidStatus::NotReady => {
+                w.show_message("Shoot the Pyramid!", 3000);
+                self.status = PyramidStatus::Ready;
+            }
+            _ => {}
+        }
+    }
+
+    /// The pyramid: the triangle comes back and runs backward at twice the
+    /// speed, the ball is taken off, the savers return and four balls (one in
+    /// each colour not yet in play) are launched at 1, 4, 7 and 10 seconds.
+    fn start_multiball(&mut self, w: &mut PhysicsWorld) {
+        for i in 1..=3 { w.set_wall_retracted(&format!("TriangleWall{i}"), false); }
+        w.set_triangle_speed_multiplier(-2.0);
+        Self::reset_center(w);
+        w.park_in_lane();
+        self.first_launch_pending = true;
+        w.restore_ball_saver("BallSaver-left");
+        w.restore_ball_saver("BallSaver-right");
+        self.status = PyramidStatus::Starting;
+        self.jackpot_count = 0;
+        w.schedule(1000, TOKEN_EYE_LAUNCH);
+        w.schedule(4000, TOKEN_EYE_LAUNCH);
+        w.schedule(7000, TOKEN_EYE_LAUNCH);
+        w.schedule(10000, TOKEN_EYE_LAST_LAUNCH);
+    }
+
+    fn launch_coloured_ball(&mut self, w: &mut PhysicsWorld) {
+        let index = if self.first_launch_pending {
+            self.first_launch_pending = false;
+            w.launch_ball();
+            0
+        } else {
+            w.launch_extra_ball();
+            w.ball_count() - 1
+        };
+        if let Some(color) = (0..4).find(|&c| !w.any_ball_has_color(BALL_COLORS_5[c])) {
+            w.set_ball_color(index, Some(BALL_COLORS_5[color]));
+        }
+    }
+
+    fn end_multiball(&mut self, w: &mut PhysicsWorld) {
+        w.set_triangle_speed_multiplier(1.0);
+        w.set_all_rollovers("TriangleCenter", false);
+        Self::reset_center(w);
+        self.status = PyramidStatus::NotReady;
+    }
+
     fn center_rollover(color: usize, n: usize) -> String { format!("CenterRollover_{}_{}", COLOR_NAMES[color], n + 1) }
 
     fn center_line(color: usize, n: usize) -> String {
@@ -758,6 +842,10 @@ impl TableScript for EyeOfHorus {
                 w.set_decor_visible(&Self::center_line(color, n), both);
             }
         }
+        // The multiball is over when one ball is left.
+        if self.status == PyramidStatus::Active && w.ball_count() <= 1 {
+            self.end_multiball(w);
+        }
     }
 
     fn game_started(&mut self, w: &mut PhysicsWorld) {
@@ -800,9 +888,31 @@ impl TableScript for EyeOfHorus {
                 w.set_all_rollovers(id, false);
                 w.increment_multiplier();
             }
+            "TriangleCenter" => {
+                if self.status == PyramidStatus::Ready { self.start_multiball(w); }
+            }
             "ExtraBallRollover" => {
                 w.add_extra_ball();
                 w.show_message("Extra Ball!", 3000);
+            }
+            _ => {}
+        }
+        self.check_lines(w);
+    }
+
+    /// With the pyramid ready, the triangle's walls give way when the ball hits them.
+    fn wall_hit(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
+        if self.status == PyramidStatus::Ready && id.starts_with("TriangleWall") {
+            w.set_wall_retracted(id, true);
+        }
+    }
+
+    fn scheduled(&mut self, w: &mut PhysicsWorld, token: u32) {
+        match token {
+            TOKEN_EYE_LAUNCH => self.launch_coloured_ball(w),
+            TOKEN_EYE_LAST_LAUNCH => {
+                self.launch_coloured_ball(w);
+                self.status = PyramidStatus::Active;
             }
             _ => {}
         }

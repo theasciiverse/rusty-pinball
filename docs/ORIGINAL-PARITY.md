@@ -88,7 +88,7 @@ Round 1 leaves out only what needs more than one ball: ball locks, multiball lau
 | Table | Centre pieces and moving parts | Status |
 |---|---|---|
 | 2 | Orbiting bumpers | DONE |
-| 5 | Rotating triangle, colored-ball diagram and lines, ramp colors and bonuses, extra-ball area | DONE (pyramid, multiball, multiball triangle reversal: round 2) |
+| 5 | Rotating triangle, colored-ball diagram and lines, ramp colors and bonuses, extra-ball area | DONE (pyramid, multiball, triangle reversal too) |
 | 6 | Orbiting planets, planet gravity, planet colors and activation, ramp detectors | DONE (multiball and jackpot too) |
 | 4 | Status grid lit by bumpers, percent multiplier, ramp walls | DONE (locks, grid rows, multiball, jackpot too) |
 | 3 | Bumper bonus, heat meter, indicator rings | DONE (multiball and its flashing rings: round 2) |
@@ -109,7 +109,7 @@ The multi-ball core and the script layer exist (tables 1 and 2 already have mult
 | 3 Ringmaster | Ready ring, ramp starts it, flashing rings, double ramps, reset | DONE |
 | 6 Orbiters | All planets on, jackpot | DONE |
 | 4 Compound Interest | Ball locks, status grid rows, multiball, jackpot | DONE |
-| 5 Eye of Horus | Pyramid, multiball (four colored balls), jackpot, extra-ball use | TODO |
+| 5 Eye of Horus | Pyramid, multiball (four colored balls), jackpot, extra-ball use | DONE |
 | 7 Ad Astra | Ball lock lane, layers, multiball, jackpot | TODO |
 
 ### Later
@@ -211,9 +211,9 @@ The centre 6x3 grid is the multiball status display, not something the ball ligh
 
 | Behavior | Status |
 |---|---|
-| Rotating triangle (3 walls, side 2, centre (10, 18.86), 1 rad/s; -2 in multiball) | DONE at normal speed (kick follows the walls); the multiball speed change is round 2 |
+| Rotating triangle (3 walls, side 2, centre (10, 18.86), 1 rad/s; -2 in multiball) | DONE (kick follows the walls; -2 in multiball) |
 | `TriangleCenter` rollover: when multiball is READY, hitting a triangle wall retracts it, and the centre rollover then starts multiball | MISSING |
-| Four ball colors (blue, red, yellow, green). Ramps assign the ball's color (sensor pairs `RampSensor_*` with direction check); a multiball launches balls in unused colors | DONE except the multiball launch colors (round 2) |
+| Four ball colors (blue, red, yellow, green). Ramps assign the ball's color (sensor pairs `RampSensor_*` with direction check); a multiball launches balls in unused colors | DONE (multiball launches balls in unused colors) |
 | 12 centre lights (4 colors x 3) that only a ball of that color can light; 12 connecting lines (`CenterLine_*`) drawn when both end lights are lit | DONE |
 | All 12 lines drawn: multiball becomes READY ("shoot the pyramid"); during multiball it pays a jackpot of 50 000 x count and resets the diagram | MISSING |
 | Ramp score 5000, +10% per color from its drop bank ("`DropTargets_<Color>Ramp`"), doubled when more than one ball is in play | DONE |

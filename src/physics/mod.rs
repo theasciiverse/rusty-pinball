@@ -249,6 +249,8 @@ enum ScriptEvent {
     RolloverGroupCompleted { id: String, ball: usize },
     /// A ball is inside a sensor; `previous` is the sensor it was in before.
     Sensor { id: String, ball: usize, previous: Option<String> },
+    /// A ball struck a kick wall that has an id (the original's `processCollision` for walls).
+    WallHit { id: String, ball: usize },
     Scheduled(u32),
 }
 
@@ -1300,6 +1302,13 @@ impl PhysicsWorld {
         }).collect()
     }
 
+    /// Takes every ball off the field but one, which waits in the shooter lane
+    /// for a script to launch it (table 5's pyramid: the original removes the
+    /// ball and launches four fresh ones).
+    fn park_in_lane(&mut self) {
+        self.place_parked_ball();
+    }
+
     /// Takes a ball off the field without it counting as lost (a ball lock).
     /// If it was the last ball, a fresh one waits in the lane and the game is
     /// told to wait for a relaunch (`take_relaunch_needed`).
@@ -1539,6 +1548,9 @@ impl PhysicsWorld {
                 }
                 if let Some(pts) = Self::record_shot_opt(&mut self.letter_groups, &mut self.jackpot, &self.kick_walls[i].shot_id) {
                     self.score_events.borrow_mut().push(pts);
+                }
+                if let Some(id) = self.kick_walls[i].shot_id.clone() {
+                    self.script_events.push(ScriptEvent::WallHit { id, ball: bi });
                 }
                 let kick = self.kick_walls[i].kick_force;
                 if let Some(ball_h) = self.balls.get(bi).map(|b| b.body) {
@@ -1930,6 +1942,7 @@ impl PhysicsWorld {
                     ScriptEvent::SpinnerActivated { id, ball } => script.spinner_activated(self, ball, &id),
                     ScriptEvent::RolloverGroupCompleted { id, ball } => script.rollover_group_completed(self, ball, &id),
                     ScriptEvent::Sensor { id, ball, previous } => script.sensor(self, ball, &id, previous.as_deref()),
+                    ScriptEvent::WallHit { id, ball } => script.wall_hit(self, ball, &id),
                     ScriptEvent::Scheduled(token) => script.scheduled(self, token),
                 }
             }
@@ -2096,6 +2109,11 @@ impl PhysicsWorld {
     }
 
     /// Whether balls light the group's rollovers (original: `setIgnoreBall`).
+    /// Table 5's triangle turns at `m` times its base speed (-2 in multiball).
+    fn set_triangle_speed_multiplier(&mut self, m: f32) {
+        for t in &mut self.rotating_triangles { t.speed_multiplier = m; }
+    }
+
     fn group_ignores_ball(&self, id: &str) -> bool {
         self.rollover_group(id).map_or(false, |g| g.ignore_ball)
     }
@@ -6269,5 +6287,169 @@ mod table_4_lock_tests {
         assert_eq!(g.multiplier_percent(), 300, "2.40 x 1.25 = 3.00");
         g.scale_multiplier(130);
         assert_eq!(g.multiplier_percent(), 390);
+    }
+}
+
+#[cfg(test)]
+mod table_5_multiball_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    const COLOR_NAMES: [&str; 4] = ["Blue", "Red", "Yellow", "Green"];
+    const BALL_COLORS: [(u8, u8, u8); 4] = [(0x66, 0x88, 0xEE), (0xEE, 0x88, 0x88), (0xCC, 0xCC, 0x77), (0x77, 0xDD, 0x77)];
+
+    fn world5() -> PhysicsWorld {
+        let mut w = PhysicsWorld::from_table(&load_table(5).unwrap());
+        w.step(1.0 / 240.0, &InputState::default());
+        w
+    }
+
+    fn place(w: &mut PhysicsWorld, x: f32, y: f32) {
+        let body = w.bodies.get_mut(w.balls[0].body).unwrap();
+        body.set_translation(Vector::new(x, y), true);
+        body.set_linvel(Vector::new(0.0, 0.0), true);
+        body.set_gravity_scale(0.0, true);
+    }
+
+    fn step(w: &mut PhysicsWorld) { w.step(1.0 / 240.0, &InputState::default()); }
+
+    fn run_sim_seconds(w: &mut PhysicsWorld, secs: f32) {
+        let frame = 0.033;
+        for _ in 0..(secs / (frame * w.time_ratio())).ceil() as usize { w.step_frame(frame, &InputState::default()); }
+    }
+
+    /// Like `run_sim_seconds`, but every ball is held still, so a random launch
+    /// cannot drain it before the test looks.
+    fn run_frozen(w: &mut PhysicsWorld, secs: f32) {
+        let frame = 0.033;
+        for _ in 0..(secs / (frame * w.time_ratio())).ceil() as usize {
+            w.step_frame(frame, &InputState::default());
+            for b in &w.balls {
+                if let Some(body) = w.bodies.get_mut(b.body) {
+                    body.set_linvel(Vector::new(0.0, 0.0), true);
+                    body.set_gravity_scale(0.0, true);
+                }
+            }
+        }
+    }
+
+    fn messages(w: &PhysicsWorld) -> Vec<String> { w.drain_message_events().into_iter().map(|m| m.0).collect() }
+
+    /// Ball 0 in each colour in turn lights that colour's three centre lights.
+    fn light_center(w: &mut PhysicsWorld) {
+        for c in 0..4 {
+            w.set_ball_color(0, Some(BALL_COLORS[c]));
+            step(w); // the script opens the lights to this colour
+            for n in 0..3 {
+                let (x, y) = w.rollover_center(&format!("CenterRollover_{}_{}", COLOR_NAMES[c], n + 1), 0).unwrap();
+                place(w, x, y);
+                step(w);
+            }
+        }
+        w.set_ball_color(0, None);
+        place(w, 1.0, 1.0);
+        step(w);
+    }
+
+    fn make_ready(w: &mut PhysicsWorld) {
+        light_center(w);
+        assert!(messages(w).iter().any(|m| m == "Shoot the Pyramid!"));
+    }
+
+    fn start(w: &mut PhysicsWorld) {
+        make_ready(w);
+        let (x, y) = w.rollover_center("TriangleCenter", 0).unwrap();
+        place(w, x, y);
+        step(w);
+    }
+
+    #[test]
+    fn lighting_all_twelve_makes_the_pyramid_ready() {
+        let mut w = world5();
+        light_center(&mut w);
+        assert!(messages(&w).iter().any(|m| m == "Shoot the Pyramid!"));
+    }
+
+    #[test]
+    fn a_ready_pyramid_lets_the_ball_through_the_triangle() {
+        let mut w = world5();
+        // Not ready: the walls stay.
+        let (mx, my) = {
+            let kw = w.kick_walls.iter().find(|k| k.shot_id.as_deref() == Some("TriangleWall2")).unwrap();
+            ((kw.x1 + kw.x2) / 2.0, (kw.y1 + kw.y2) / 2.0)
+        };
+        place(&mut w, mx, my + 0.4);
+        for _ in 0..4 { step(&mut w); }
+        assert_eq!(w.wall_retracted("TriangleWall2"), Some(false));
+
+        make_ready(&mut w);
+        let kw = w.kick_walls.iter().find(|k| k.shot_id.as_deref() == Some("TriangleWall2")).unwrap();
+        let (mx, my) = ((kw.x1 + kw.x2) / 2.0, (kw.y1 + kw.y2) / 2.0);
+        place(&mut w, mx, my + 0.4);
+        for _ in 0..4 { step(&mut w); }
+        assert_eq!(w.wall_retracted("TriangleWall2"), Some(true), "the wall the ball hits gives way");
+    }
+
+    #[test]
+    fn the_pyramid_starts_a_multiball_of_four_colours() {
+        let mut w = world5();
+        start(&mut w);
+        assert_eq!(w.rotating_triangles[0].speed_multiplier, -2.0);
+        assert_eq!(w.ball_count(), 1, "the ball waits in the lane");
+        run_frozen(&mut w, 1.2);
+        assert_eq!(w.ball_count(), 1, "the lane ball is the first launch");
+        assert_eq!(w.ball_color(0), Some(BALL_COLORS[0]));
+        run_frozen(&mut w, 3.0);
+        assert_eq!(w.ball_count(), 2);
+        assert_eq!(w.ball_color(1), Some(BALL_COLORS[1]));
+        run_frozen(&mut w, 3.0);
+        run_frozen(&mut w, 3.0);
+        assert_eq!(w.ball_count(), 4);
+        assert_eq!(w.ball_color(2), Some(BALL_COLORS[2]));
+        assert_eq!(w.ball_color(3), Some(BALL_COLORS[3]));
+        assert_eq!(w.wall_retracted("TriangleWall1"), Some(false), "the triangle is back");
+    }
+
+    #[test]
+    fn lighting_the_whole_diagram_in_multiball_pays_a_growing_jackpot() {
+        let mut w = world5();
+        start(&mut w);
+        run_frozen(&mut w, 10.5);
+        assert_eq!(w.ball_count(), 4);
+        messages(&w);
+        w.drain_score_events();
+
+        for expected in [("Jackpot!", 50_000u64), ("2x Jackpot!", 100_000)] {
+            // Light eleven directly and the last by ball 0, in its colour.
+            for c in 0..4 { for n in 0..3 { w.set_all_rollovers(&format!("CenterRollover_{}_{}", COLOR_NAMES[c], n + 1), true); } }
+            w.set_all_rollovers("CenterRollover_Green_3", false);
+            w.set_ball_color(0, Some(BALL_COLORS[3]));
+            step(&mut w);
+            let (x, y) = w.rollover_center("CenterRollover_Green_3", 0).unwrap();
+            place(&mut w, x, y);
+            step(&mut w);
+            assert!(messages(&w).iter().any(|m| m == expected.0), "{}", expected.0);
+            assert!(w.drain_score_events().contains(&expected.1));
+            assert!(!w.rollovers_all_lit("CenterRollover_Blue_1"), "the diagram resets");
+        }
+    }
+
+    #[test]
+    fn the_multiball_ends_at_one_ball() {
+        let mut w = world5();
+        start(&mut w);
+        run_frozen(&mut w, 10.5);
+        w.game_time += 100.0; // no multiball saver
+        for i in (1..4).rev() {
+            let body = w.bodies.get_mut(w.balls[i].body).unwrap();
+            body.set_translation(Vector::new(5.0, -2.0), true);
+        }
+        run_sim_seconds(&mut w, 0.6);
+        assert_eq!(w.ball_count(), 1);
+        run_sim_seconds(&mut w, 0.5);
+        assert_eq!(w.rotating_triangles[0].speed_multiplier, 1.0);
+        messages(&w);
+        light_center(&mut w);
+        assert!(messages(&w).iter().any(|m| m == "Shoot the Pyramid!"), "ready again, not a jackpot");
     }
 }
