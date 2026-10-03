@@ -180,6 +180,11 @@ impl GameState {
 
         // Accumulate score from contact events emitted by physics
         let at = physics.ball_position().map(|p| (p.x, p.y));
+        // A script's percent change comes first: the original runs the delegate's collision
+        // hook (table 4's bumper multiplier) before paying the element's own score.
+        for pct in physics.drain_multiplier_percent_events() {
+            self.bonus_percent = self.bonus_percent.saturating_add_signed(pct);
+        }
         for pts in physics.drain_score_events() {
             let added = self.add_score(pts);
             if let Some((x, y)) = at { self.add_popup(added, x, y); }
@@ -192,9 +197,6 @@ impl GameState {
         for _ in 0..physics.drain_extra_ball_events() {
             self.balls_remaining = self.balls_remaining.saturating_add(1);
             self.extra_balls = self.extra_balls.saturating_add(1);
-        }
-        for pct in physics.drain_multiplier_percent_events() {
-            self.bonus_percent = self.bonus_percent.saturating_add_signed(pct);
         }
         for factor in physics.drain_multiplier_scale_events() {
             self.scale_multiplier(factor);

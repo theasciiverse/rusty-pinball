@@ -2021,7 +2021,8 @@ impl PhysicsWorld {
                 i += 1;
             }
         }
-        if self.balls.len() == 1 { self.multiball_start_time = None; }
+        // The multiball saver window is not cleared when a multiball ends: as in the original it
+        // runs from the first extra ball of the game, so a later multiball gets no saver.
 
         // Mercy ball: the only ball lost soon after its launch comes straight back, once.
         if self.balls.len() == 1 && !self.used_mercy_ball && self.drained_at(0) {
@@ -6031,17 +6032,21 @@ mod ball_saver_rule_tests {
     }
 
     #[test]
-    fn going_back_to_one_ball_ends_the_multiball_saver() {
+    fn the_multiball_saver_window_runs_from_the_first_extra_ball_of_the_game() {
         let mut w = world1();
         w.launch_ball();
         w.game_time += 25.0;
         w.launch_extra_ball();
+        let start = w.multiball_start_time;
+        assert!(start.is_some());
         w.game_time += 40.0;
         sink(&mut w, 1);
         step(&mut w);
-        assert!(w.multiball_start_time.is_none(), "single ball again");
         w.launch_extra_ball();
-        assert!(w.multiball_start_time.is_some(), "a new multiball starts a new window");
+        assert_eq!(w.multiball_start_time, start, "a later multiball does not open a new window");
+        sink(&mut w, 1);
+        step(&mut w);
+        assert_eq!(w.ball_count(), 1, "and a ball lost in it is not replaced");
     }
 }
 
