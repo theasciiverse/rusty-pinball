@@ -152,7 +152,7 @@ The three detail reports were written by research agents. Spot-checked against t
 
 Full list in [`parity/engine-and-app.md`](parity/engine-and-app.md) (older, partly out of date: this section wins).
 
-**Done since the audit:** game messages (timed, one at a time, on the DMD); extra balls ("Shoot Again"); "Ball N" and "Game Over"
+**Done since the audit:** the sounds (a ding on every scoring contact, the three note rollover chord, message, launch and startup sounds, no drain sound, music that comes in after 10 and 20 scoring hits; assets are the original's); game messages (timed, one at a time, on the DMD); extra balls ("Shoot Again"); "Ball N" and "Game Over"
 messages; mercy ball and multiball saver; the score multiplier is fractional and unbounded, halves (rounds down, never below 1)
 when a ball is lost, and keeps an increase made in the last 7.5 s of game time, as in the original; the stuck-ball "Bump!"
 (10 s of game time, no flipper held); bumper defaults (score 0, kick 0, as the original); additive launch jitter (independent per
@@ -162,7 +162,7 @@ shrinking towards the tail); table 8's billiard ball decoration (drawn dimmed, n
 
 **Still open, roughly in order of how much a player would notice:**
 
-- Sounds: no rollover, message or startup sounds; bumper dings only for bumpers; music is not score-driven.
+- Sounds: music on/off and sound effects are one toggle (the original has two).
 - One high score per table (original keeps the top 5 plus last score); one sound toggle (original also has music, speed, trails, zoom).
 - No unlimited-balls mode.
 - Tables without a script (only table 9, our own) still get the invented drop-bank clear bonus (2000) and rollover completion bonus.

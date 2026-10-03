@@ -194,9 +194,6 @@ impl App {
                     physics.launch_ball();
                     game.phase = Phase::Playing;
                 }
-                if self.sound_enabled {
-                    if let Some(a) = &mut self.audio { a.play(SoundTrigger::BallLaunch); }
-                }
                 return;
             }
         }
@@ -208,11 +205,9 @@ impl App {
         if k.kind == KeyEventKind::Press && k.code == KeyCode::Char(' ') {
             match game.phase {
                 Phase::WaitingToLaunch | Phase::BallLost => {
+                    // The launch sound comes with the world's launch event.
                     physics.launch_ball();
                     game.phase = Phase::Playing;
-                    if self.sound_enabled {
-                        if let Some(a) = &mut self.audio { a.play(SoundTrigger::BallLaunch); }
-                    }
                 }
                 _ => {}
             }
@@ -249,7 +244,7 @@ impl App {
     fn tick(&mut self) {
         // Run physics and collect sound triggers in one borrow block, then
         // release the borrow before accessing self.audio.
-        let (sound_events, ball_drained) =
+        let (sound_events, ball_drained): (Vec<SoundTrigger>, bool) =
             if let Screen::Playing { game, physics, input, camera_y, .. } = &mut self.screen
         {
             if self.paused { return; }
@@ -277,9 +272,20 @@ impl App {
                 physics.park_ball();
             }
 
-            let events: Vec<_> = physics.drain_sound_events().into_iter().collect();
+            use crate::physics::PhysicsSound;
+            let mut events: Vec<SoundTrigger> = physics.drain_sound_events().into_iter().map(|e| match e {
+                PhysicsSound::Score => SoundTrigger::Score,
+                PhysicsSound::Rollover => SoundTrigger::Rollover,
+                PhysicsSound::Launch => SoundTrigger::BallLaunch,
+            }).collect();
+            if game.take_message_sound() { events.push(SoundTrigger::Message); }
             let drained = prev_phase == Phase::Playing && game.phase != Phase::Playing;
-            if drained { physics.ball_lost(); physics.park_ball(); }
+            if drained {
+                physics.ball_lost();
+                physics.park_ball();
+                // The original plays its startup sound when the game ends.
+                if game.phase == Phase::GameOver { events.push(SoundTrigger::Start); }
+            }
             (events, drained)
         } else {
             return;
@@ -287,14 +293,8 @@ impl App {
 
         if self.sound_enabled {
             if let Some(audio) = &mut self.audio {
-                use crate::physics::PhysicsSound;
                 for ev in sound_events {
-                    match ev {
-                        PhysicsSound::BumperHit => audio.play(SoundTrigger::BumperHit),
-                    }
-                }
-                if ball_drained {
-                    audio.play(SoundTrigger::BallDrain);
+                    audio.play(ev);
                 }
             }
         }

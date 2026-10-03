@@ -801,6 +801,7 @@ impl EyeOfHorus {
         let mut percent = 100 + self.ramp_bonus[color] as u64;
         if w.ball_count() > 1 { percent *= 2; }
         w.add_score(RAMP_BASE_SCORE_5 / 100 * percent);
+        w.play_rollover_sound();
     }
 
     /// Back at the extra-ball exit: if the extra ball was won, light it out and
@@ -1115,6 +1116,8 @@ impl TableScript for Ringmaster {
             score += ((BASE_BUMPER_SCORE as f32 * extra_energy / 10.0 + 0.5).floor() as u64) * 10;
         }
         w.add_score(score);
+        // The bumper's own score is 0, so the ding does not play by itself.
+        w.play_score_sound();
         self.energy = (self.energy + 1.0 + extra_energy).min(MAX_BUMPER_ENERGY);
         w.set_rollover_color("BumperIndicator", 0, Some(self.color_for_ratio(self.energy / MAX_BUMPER_ENERGY)));
         self.check_multiball_ready(w);

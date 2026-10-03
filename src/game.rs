@@ -51,6 +51,8 @@ pub struct GameState {
     pub message: Option<(String, u32)>,
     /// A message waiting to be shown: ticks until it appears, the text and its ms.
     pub pending_message: Option<(u32, String, u32)>,
+    /// A message with its sound was just shown (the app plays the sound and clears this).
+    message_sound_due: bool,
 }
 
 impl GameState {
@@ -68,13 +70,26 @@ impl GameState {
             super_mode_ticks: 0,
             message: None,
             pending_message: None,
+            message_sound_due: false,
         }
     }
 
-    /// Shows `text` for `ms` of real time, replacing any current message.
+    /// Shows `text` for `ms` of real time, replacing any current message, with the
+    /// message sound (the original's default).
     pub fn show_message(&mut self, text: impl Into<String>, ms: u32) {
+        self.show_message_quietly(text, ms);
+        self.message_sound_due = true;
+    }
+
+    /// Like `show_message`, without the sound (the "Ball 2" and "Shoot Again" messages).
+    pub fn show_message_quietly(&mut self, text: impl Into<String>, ms: u32) {
         let ticks = (ms * SYNC_HZ / 1000).max(1);
         self.message = Some((text.into(), ticks));
+    }
+
+    /// True once after a message with a sound was shown.
+    pub fn take_message_sound(&mut self) -> bool {
+        std::mem::take(&mut self.message_sound_due)
     }
 
     /// Shows `text` for `ms` after `delay_ms` (the original schedules its next-ball
@@ -88,7 +103,7 @@ impl GameState {
         if let Some((delay, _, _)) = &mut self.pending_message {
             *delay = delay.saturating_sub(1);
             if *delay == 0 {
-                if let Some((_, text, ms)) = self.pending_message.take() { self.show_message(text, ms); }
+                if let Some((_, text, ms)) = self.pending_message.take() { self.show_message_quietly(text, ms); }
             }
         }
         if let Some((_, ticks)) = &mut self.message {
@@ -453,5 +468,19 @@ mod tests {
         let snap = game.popup_snapshots();
         assert_eq!(snap.len(), MAX_POPUPS);
         assert_eq!(snap.last().unwrap().text, "3000");
+    }
+
+    #[test]
+    fn a_message_has_its_sound_but_the_next_ball_message_does_not() {
+        let mut game = GameState::new(3);
+        assert!(!game.take_message_sound());
+        game.show_message("Multiball!", 2000);
+        assert!(game.take_message_sound(), "a message plays its sound once");
+        assert!(!game.take_message_sound());
+
+        game.ball_drained(false);
+        for _ in 0..(1500 * SYNC_HZ / 1000) { game.tick_message(); }
+        assert_eq!(game.message.as_ref().map(|m| m.0.as_str()), Some("Ball 2"));
+        assert!(!game.take_message_sound(), "'Ball 2' is silent, as in the original");
     }
 }

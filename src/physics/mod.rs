@@ -534,7 +534,12 @@ fn ball_groups_for(layer: u8) -> InteractionGroups {
 
 #[derive(Clone)]
 pub enum PhysicsSound {
-    BumperHit,
+    /// A contact that scored (bumper, slingshot, drop target): the ding.
+    Score,
+    /// A rollover was lit.
+    Rollover,
+    /// A ball was launched.
+    Launch,
 }
 
 // ---------------------------------------------------------------------------
@@ -1377,6 +1382,7 @@ impl PhysicsWorld {
             self.balls.push(ball);
         }
         if self.balls.len() <= 1 { self.ball_start_time = Some(self.game_time); }
+        self.sound_events.borrow_mut().push(PhysicsSound::Launch);
     }
 
     /// Adds another ball to the field, launched up the shooter lane like the
@@ -1391,6 +1397,7 @@ impl PhysicsWorld {
         self.gate_ball = Some(ball.body);
         self.balls.push(ball);
         if self.multiball_start_time.is_none() { self.multiball_start_time = Some(self.game_time); }
+        self.sound_events.borrow_mut().push(PhysicsSound::Launch);
     }
 
     /// Number of balls on the field (including one parked in the lane).
@@ -1580,7 +1587,11 @@ impl PhysicsWorld {
                         *self.super_mode_events.borrow_mut() += 1;
                     }
                 }
-                self.sound_events.borrow_mut().push(PhysicsSound::BumperHit);
+                // The ding, like the original, only for a contact that scores; a script that
+                // scores the hit itself (table 3) asks for it.
+                if self.bumpers[i].score > 0 || !self.bumpers[i].award_ladder.is_empty() {
+                    self.sound_events.borrow_mut().push(PhysicsSound::Score);
+                }
                 // Every bumper reports a hit; one without an id reports an empty id.
                 let id = self.bumpers[i].shot_id.clone().unwrap_or_default();
                 self.script_events.push(ScriptEvent::BumperHit { id, ball: bi });
@@ -1652,6 +1663,7 @@ impl PhysicsWorld {
                 }
                 if self.kick_walls[i].score > 0 {
                     self.score_events.borrow_mut().push(self.kick_walls[i].score);
+                    self.sound_events.borrow_mut().push(PhysicsSound::Score);
                 }
                 if let Some(pts) = Self::record_shot_opt(&mut self.letter_groups, &mut self.jackpot, &self.kick_walls[i].shot_id) {
                     self.score_events.borrow_mut().push(pts);
@@ -1708,7 +1720,10 @@ impl PhysicsWorld {
             let mut savers_to_restore: Vec<&'static str> = Vec::new();
             for (gi, ti, bi) in hits {
                 let score = self.drop_target_groups[gi].score;
-                if score > 0 { self.score_events.borrow_mut().push(score); }
+                if score > 0 {
+                    self.score_events.borrow_mut().push(score);
+                    self.sound_events.borrow_mut().push(PhysicsSound::Score);
+                }
 
                 self.drop_target_groups[gi].targets[ti].active = false;
                 let ch = self.drop_target_groups[gi].targets[ti].collider;
@@ -1788,6 +1803,7 @@ impl PhysicsWorld {
                                 rv.lit = true;
                                 rv.reset_timer = (rv.reset_seconds > 0.0).then_some(rv.reset_seconds);
                                 newly_lit = Some(bi);
+                                self.sound_events.borrow_mut().push(PhysicsSound::Rollover);
                                 let pts = if rv.score > 0 { rv.score } else { group.score };
                                 if pts > 0 {
                                     self.score_events.borrow_mut().push(pts);
@@ -2315,6 +2331,16 @@ impl PhysicsWorld {
     /// Adds `percent` points to the score multiplier (1 = +0.01x).
     fn add_multiplier_percent(&self, percent: i32) {
         self.multiplier_percent_events.borrow_mut().push(percent);
+    }
+
+    /// The score ding, for a script that scores a contact itself (the original's `playScore`).
+    fn play_score_sound(&self) {
+        self.sound_events.borrow_mut().push(PhysicsSound::Score);
+    }
+
+    /// The rollover notes (the original's `playRollover`).
+    fn play_rollover_sound(&self) {
+        self.sound_events.borrow_mut().push(PhysicsSound::Rollover);
     }
 
     /// Adds points (the game state applies the score multiplier).
@@ -7100,5 +7126,59 @@ mod engine_rule_tests {
         w.set_ball_layer(0, 2);
         let active = faint(&renderer.render(&w.snapshot(), 0.0, 100, 70, false));
         assert!(active < idle, "the left orbit is no longer faint: {active} against {idle}");
+    }
+
+    fn sounds(w: &PhysicsWorld) -> (usize, usize, usize) {
+        let ev = w.drain_sound_events();
+        (
+            ev.iter().filter(|e| matches!(e, PhysicsSound::Score)).count(),
+            ev.iter().filter(|e| matches!(e, PhysicsSound::Rollover)).count(),
+            ev.iter().filter(|e| matches!(e, PhysicsSound::Launch)).count(),
+        )
+    }
+
+    fn touch(w: &mut PhysicsWorld, x: f32, y: f32) {
+        let b = w.bodies.get_mut(w.balls[0].body).unwrap();
+        b.set_translation(Vector::new(x, y), true);
+        b.set_linvel(Vector::new(0.0, 0.0), true);
+        b.set_gravity_scale(0.0, true);
+        for _ in 0..16 { w.step(1.0 / 240.0, &InputState::default()); }
+    }
+
+    #[test]
+    fn a_scoring_contact_dings_a_rollover_has_its_own_notes_and_a_launch_bounces() {
+        let mut w = world(1);
+        w.drain_sound_events();
+        w.launch_ball();
+        assert_eq!(sounds(&w), (0, 0, 1), "the launch");
+
+        let i = w.bumpers.iter().position(|b| b.score > 0).unwrap();
+        let (x, y) = (w.bumpers[i].position[0], w.bumpers[i].position[1] + w.bumpers[i].radius + w.ball_radius + 0.01);
+        touch(&mut w, x, y);
+        let (score, rollover, _) = sounds(&w);
+        assert!(score >= 1 && rollover == 0, "a bumper dings: {score}");
+
+        let (rx, ry) = w.rollover_center("FlipperRollovers", 0).or_else(|| w.rollover_groups.iter().find(|g| !g.ignore_ball).map(|g| (g.rollovers[0].x, g.rollovers[0].y))).unwrap();
+        touch(&mut w, rx, ry);
+        let (_, rollover, _) = sounds(&w);
+        assert_eq!(rollover, 1, "a rollover lit");
+    }
+
+    #[test]
+    fn a_bumper_with_no_score_is_silent_unless_its_script_asks_for_the_ding() {
+        let mut w = world(8);
+        let i = w.bumpers.iter().position(|b| b.score == 0 && b.award_ladder.is_empty()).unwrap();
+        let (x, y) = (w.bumpers[i].position[0], w.bumpers[i].position[1] + w.bumpers[i].radius + w.ball_radius + 0.01);
+        w.drain_sound_events();
+        touch(&mut w, x, y);
+        assert_eq!(sounds(&w).0, 0, "no score, no ding");
+
+        // Table 3's bumpers score 0 in the table; its script scores and dings.
+        let mut w = world(3);
+        let i = w.bumpers.iter().position(|b| b.score == 0).expect("table 3's bumpers score 0");
+        let (x, y) = (w.bumpers[i].position[0], w.bumpers[i].position[1] + w.bumpers[i].radius + w.ball_radius + 0.01);
+        w.drain_sound_events();
+        touch(&mut w, x, y);
+        assert!(sounds(&w).0 >= 1, "the script dings");
     }
 }

@@ -12,7 +12,7 @@ Rusty Pinball is inspired by [Vector Pinball](https://github.com/dozingcat/Vecto
 - Real-time 2D physics via [Rapier](https://rapier.rs/)
 - Braille vector graphics rendered with [drawille](https://github.com/asciimoo/drawille)
 - Dot-matrix display (DMD) showing score, hi-score, and ball count
-- Optional sound effects
+- The original's sound design: score dings, rollover notes, message and launch sounds, and music that comes in as you score
 - Runs entirely in the terminal — no GPU required
 
 ## Requirements
@@ -68,9 +68,11 @@ Running inside **tmux** is recommended for the best display experience.
 
 ## Status against the original
 
-Tables 1 to 8 reproduce Vector Pinball's layouts and generic behavior, but not each table's own rules (multiball, ball locks,
-jackpots, lights): those live in per-table scripts we have not ported yet. [docs/ORIGINAL-PARITY.md](docs/ORIGINAL-PARITY.md) is
-the checklist of what is done and what is missing, table by table.
+Tables 1 to 8 carry Vector Pinball's layouts and each table's own rules, ported from its delegate class: multiball and ball locks
+(every table that has them), jackpots, the moving parts (orbiting bumpers, the spinning triangle, planets, the star map), the
+mini table and lock lane on table 7, lights and bonuses. The engine rules follow the original too (multiplier halving, mercy ball
+and multiball saver, stuck-ball bump, floating scores, ball trails, the original's sounds). What is still different, and why, is
+listed in [docs/ORIGINAL-PARITY.md](docs/ORIGINAL-PARITY.md); every change is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Tables
 
