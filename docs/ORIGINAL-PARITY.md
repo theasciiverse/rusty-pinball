@@ -168,6 +168,9 @@ shrinking towards the tail); table 8's billiard ball decoration (drawn dimmed, n
 - Tables without a script (only table 9, our own) still get the invented drop-bank clear bonus (2000) and rollover completion bonus.
 - Inactive layers are hidden, not faded in `inactiveLayerColor`; layer colours are a fixed table.
 - No 750 ms input lockout after a ball loss; no variable plunger (`plunger_ticks` exists but is unused).
+- **Documented exception:** tables 6 and 7 use `ballradius` 0.46 (original 0.5 and 0.49), set in commit `5b628f1` so the ball does not stick at the
+  launch ramps. Checked on 2026-10-03 by 40 random launches per table with the original radii: only 5 of 40 balls (table 6) and 0 of 40
+  (table 7) entered a ramp or loop, against 17 and 3 with 0.46, so the exception stays. Every other table JSON is identical to the original.
 - Ball drawn at a fixed size ignoring `ballradius`; no secondary ball colour spin dot; ball density not rescaled for radius.
 
 ## 7. Per-table notes
