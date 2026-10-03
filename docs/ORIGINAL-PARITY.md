@@ -150,15 +150,24 @@ The three detail reports were written by research agents. Spot-checked against t
 
 ## 6. Other engine and app gaps worth remembering
 
-Full list in [`parity/engine-and-app.md`](parity/engine-and-app.md). The ones most likely to matter to a player:
+Full list in [`parity/engine-and-app.md`](parity/engine-and-app.md) (older, partly out of date: this section wins).
 
-- No score animations, no ball trails, no messages: the original's feedback channel for rules is missing.
-- Multiplier is an integer capped at 5; the original is fractional and unbounded, with carry-over rules (halve, preserve window).
-- No mercy ball (an early drain in the first 20 s relaunches the ball), no stuck-ball "Bump!", no unlimited-balls mode, no extra ball.
-- Bumper default score is 100 and default kick 8.0 when absent (original 0 and 0); drop banks pay an invented 2000 clear bonus.
+**Done since the audit:** game messages (timed, one at a time, on the DMD); extra balls ("Shoot Again"); "Ball N" and "Game Over"
+messages; mercy ball and multiball saver; the score multiplier is fractional and unbounded, halves (rounds down, never below 1)
+when a ball is lost, and keeps an increase made in the last 7.5 s of game time, as in the original; the stuck-ball "Bump!"
+(10 s of game time, no flipper held); bumper defaults (score 0, kick 0, as the original); additive launch jitter (independent per
+component, none for a zero delta); layers as separate worlds; table scripts for every table.
+
+**Still open, roughly in order of how much a player would notice:**
+
+- No score animations (floating digits at the ball) and no ball trails.
 - Sounds: no rollover, message or startup sounds; bumper dings only for bumpers; music is not score-driven.
 - One high score per table (original keeps the top 5 plus last score); one sound toggle (original also has music, speed, trails, zoom).
-- Launch jitter: our x jitter is centered and has a 0.1 minimum; the original adds `[0, delta]` to each component.
+- No unlimited-balls mode.
+- Tables without a script (only table 9, our own) still get the invented drop-bank clear bonus (2000) and rollover completion bonus.
+- Inactive layers are hidden, not faded in `inactiveLayerColor`; layer colours are a fixed table.
+- No 750 ms input lockout after a ball loss; no variable plunger (`plunger_ticks` exists but is unused).
+- Ball drawn at a fixed size ignoring `ballradius`; no secondary ball colour spin dot; ball density not rescaled for radius.
 
 ## 7. Per-table notes
 

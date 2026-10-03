@@ -233,6 +233,12 @@ const MERCY_BALL_SECONDS: f32 = 20.0;
 /// starting; the original's `multiballSaverDuration`, 30000 ms.
 const MULTIBALL_SAVER_SECONDS: f32 = 30.0;
 
+/// A ball lost this soon (game time) after a script raised the multiplier keeps the
+/// increase for the next ball; the original's `preserveMultiplierIncreaseDuration` default.
+const PRESERVE_MULTIPLIER_SECONDS: f32 = 7.5;
+/// Balls that sit still this long (game time) get bumped; the original's `STUCK_BALL_NANOS`.
+const STUCK_BALL_SECONDS: f32 = 10.0;
+
 /// A wall a table script moves or retracts while playing (table 5's rotating
 /// triangle). Drawn from its live position; not part of the static wall list.
 struct MovingWallInfo {
@@ -581,6 +587,13 @@ pub struct PhysicsWorld {
     used_mercy_ball: bool,
     // When the current multiball began (None with a single ball).
     multiball_start_time: Option<f32>,
+    // Game time of the last multiplier increase a script made (the original's
+    // `lastMultiplerIncrementGameTimeNanos`); a ball lost soon after keeps the increase.
+    last_multiplier_increase: std::cell::Cell<Option<f32>>,
+    // Stuck-ball check: sim seconds the balls have sat still, and where they were last frame.
+    stuck_seconds: f32,
+    last_ball_positions: Vec<(f32, f32)>,
+    stuck_seed: u32,
 }
 
 impl PhysicsWorld {
@@ -886,6 +899,10 @@ impl PhysicsWorld {
             ball_start_time: None,
             used_mercy_ball: false,
             multiball_start_time: None,
+            last_multiplier_increase: std::cell::Cell::new(None),
+            stuck_seconds: 0.0,
+            last_ball_positions: Vec::new(),
+            stuck_seed: 1,
             script,
             scheduled: Vec::new(),
             script_events: Vec::new(),
@@ -998,8 +1015,9 @@ impl PhysicsWorld {
             position: b.position,
             radius: b.radius,
             outer_radius: b.outer_radius,
-            score: b.score.unwrap_or(100),
-            kick_force: b.kick.unwrap_or(8.0),
+            // The original's defaults: a bumper with no score scores nothing, with no kick kicks nothing.
+            score: b.score.unwrap_or(0),
+            kick_force: b.kick.unwrap_or(0.0),
             lit_ticks: 0,
             award_ladder: b.award_ladder.clone().unwrap_or_default(),
             ladder_rung: 0,
@@ -1223,15 +1241,20 @@ impl PhysicsWorld {
     /// The launch velocity with the table's random top-up: base is always
     /// enough to clear the lane; the delta is `launchVelocityRandomDelta`.
     fn jittered_launch_velocity(&self) -> [f32; 2] {
+        // The original adds `rand() * delta` to each component, independently, and only
+        // when that delta is positive.
         let [vx, vy] = self.launch_vel;
         let [dx, dy] = self.launch_vel_delta;
-        let seed = std::time::SystemTime::now()
+        let mut seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos())
             .unwrap_or(0);
-        let lcg  = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        let frac = (lcg >> 8) as f32 / (1u32 << 24) as f32; // 0..1
-        [vx + (frac - 0.5) * dx.max(0.1), vy + frac * dy] // tiny centred lateral nudge
+        let mut rand = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32 // 0..1
+        };
+        let (rx, ry) = (rand(), rand());
+        [if dx > 0.0 { vx + dx * rx } else { vx }, if dy > 0.0 { vy + dy * ry } else { vy }]
     }
 
     /// Creates a ball body and collider (on the main layer) and returns it.
@@ -1724,6 +1747,7 @@ impl PhysicsWorld {
                         self.score_events.borrow_mut().push(group.score);
                     }
                     if group.multiplier_step > 0 {
+                        self.last_multiplier_increase.set(Some(self.game_time));
                         self.multiplier_events.borrow_mut().push(group.multiplier_step as i32);
                     }
                     for rv in &mut group.rollovers {
@@ -1985,6 +2009,7 @@ impl PhysicsWorld {
 
     /// Raises the score multiplier by one (the game state shows the message).
     fn increment_multiplier(&self) {
+        self.last_multiplier_increase.set(Some(self.game_time));
         self.multiplier_events.borrow_mut().push(1);
     }
 
@@ -2463,6 +2488,9 @@ impl PhysicsWorld {
     /// for the new ball.
     pub fn park_ball(&mut self) {
         self.place_parked_ball();
+        self.last_multiplier_increase.set(None);
+        self.stuck_seconds = 0.0;
+        self.last_ball_positions.clear();
         // Scheduled actions are NOT cleared: as in the original, they fire whatever
         // happens to the ball (table 8 schedules its rack light show at ball loss).
         // New ball: the launch barrier opens again (original ballLost/gameStarted).
@@ -2550,6 +2578,47 @@ impl PhysicsWorld {
         self.step(dt, input);
         for _ in 1..PHYSICS_SUBSTEPS {
             self.step(dt, &later);
+        }
+        self.check_for_stuck_ball(dt * PHYSICS_SUBSTEPS as f32, input.left_flipper || input.right_flipper);
+    }
+
+    /// True when a ball lost shortly after a script raised the multiplier should
+    /// keep that increase for the next ball (the original's
+    /// `preserveMultiplierIncreaseDuration`, 7500 ms of game time).
+    pub fn multiplier_increase_preserved(&self) -> bool {
+        self.last_multiplier_increase.get().map_or(false, |t| self.game_time - t <= PRESERVE_MULTIPLIER_SECONDS)
+    }
+
+    /// The original's stuck ball rule: when every ball in play has sat still for
+    /// 10 seconds of game time, with no flipper held (it could be trapping the
+    /// ball), show "Bump!" and give every ball a shove.
+    fn check_for_stuck_ball(&mut self, sim_secs: f32, flipper_held: bool) {
+        let positions: Vec<(f32, f32)> = self.live_balls().iter().map(|(_, p, _)| (p.x, p.y)).collect();
+        // A ball waiting in the shooter lane has no gravity and is not stuck.
+        let in_play = !self.balls.is_empty() && self.balls.iter().all(|b| {
+            self.bodies.get(b.body).map_or(false, |body| body.gravity_scale() > 0.0)
+        });
+        let still = in_play && positions.len() == self.last_ball_positions.len()
+            && self.live_balls().iter().zip(&self.last_ball_positions).all(|((_, p, v), last)| {
+                v.length_squared() <= 0.01 && (p.x - last.0).powi(2) + (p.y - last.1).powi(2) <= 0.01
+            });
+        self.last_ball_positions = positions;
+        if !still {
+            self.stuck_seconds = 0.0;
+            return;
+        }
+        if flipper_held { return; }
+        self.stuck_seconds += sim_secs;
+        if self.stuck_seconds > STUCK_BALL_SECONDS {
+            self.show_message("Bump!", 1000);
+            self.stuck_seed = self.stuck_seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            for i in 0..self.balls.len() {
+                let x = if (self.stuck_seed >> (8 + i)) & 1 == 0 { 1.0 } else { -1.0 };
+                if let Some(body) = self.bodies.get_mut(self.balls[i].body) {
+                    body.apply_impulse(Vector::new(x, 1.5), true);
+                }
+            }
+            self.stuck_seconds = 0.0;
         }
     }
     /// Sim seconds advanced per real second (the table's `targetTimeRatio`).
@@ -6748,5 +6817,107 @@ mod table_7_lock_tests {
         assert_eq!(w.ball_count(), 1);
         run_frozen(&mut w, 0.5);
         assert!(!w.group_ignores_ball("BallLockRollover1"), "the first lock is open again");
+    }
+}
+
+#[cfg(test)]
+mod engine_rule_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    fn world(table: u8) -> PhysicsWorld {
+        let mut w = PhysicsWorld::from_table(&load_table(table).unwrap());
+        w.step_frame(0.033, &InputState::default());
+        w
+    }
+
+    /// A ball floating in open air with almost no gravity: effectively motionless but in play.
+    fn float_ball(w: &mut PhysicsWorld) {
+        let b = w.bodies.get_mut(w.balls[0].body).unwrap();
+        b.set_translation(Vector::new(10.0, 15.0), true);
+        b.set_linvel(Vector::new(0.0, 0.0), true);
+        b.set_gravity_scale(0.0005, true);
+    }
+
+    fn run(w: &mut PhysicsWorld, sim_secs: f32, input: &InputState) {
+        let frame = 0.033;
+        for _ in 0..(sim_secs / (frame * w.time_ratio())).ceil() as usize { w.step_frame(frame, input); }
+    }
+
+    fn messages(w: &PhysicsWorld) -> Vec<String> { w.drain_message_events().into_iter().map(|m| m.0).collect() }
+
+    #[test]
+    fn a_ball_that_sits_still_for_ten_seconds_is_bumped() {
+        let mut w = world(1);
+        float_ball(&mut w);
+        messages(&w);
+        run(&mut w, 9.0, &InputState::default());
+        assert!(!messages(&w).iter().any(|m| m == "Bump!"), "not yet");
+        let mut bumped = false;
+        for _ in 0..200 {
+            w.step_frame(0.033, &InputState::default());
+            if messages(&w).iter().any(|m| m == "Bump!") { bumped = true; break; }
+        }
+        assert!(bumped, "bumped after about ten seconds");
+        let v = w.bodies.get(w.balls[0].body).unwrap().linvel();
+        assert!(v.y > 0.5 && v.x.abs() > 0.5, "shoved up and sideways: {v:?}");
+    }
+
+    #[test]
+    fn a_held_flipper_or_a_waiting_ball_is_never_bumped() {
+        let mut w = world(1);
+        float_ball(&mut w);
+        messages(&w);
+        let mut held = InputState::default();
+        held.left_flipper = true;
+        run(&mut w, 15.0, &held);
+        assert!(!messages(&w).iter().any(|m| m == "Bump!"), "the flipper could be trapping the ball");
+
+        let mut w = world(1); // the ball waits in the shooter lane
+        run(&mut w, 15.0, &InputState::default());
+        assert!(!messages(&w).iter().any(|m| m == "Bump!"), "a parked ball is not stuck");
+    }
+
+    #[test]
+    fn a_multiplier_raised_shortly_before_the_ball_is_lost_is_kept() {
+        let mut w = world(1);
+        assert!(!w.multiplier_increase_preserved(), "nothing raised yet");
+        w.increment_multiplier();
+        assert!(w.multiplier_increase_preserved());
+        w.game_time += 7.0;
+        assert!(w.multiplier_increase_preserved(), "7 s of game time is inside the 7.5 s window");
+        w.game_time += 1.0;
+        assert!(!w.multiplier_increase_preserved(), "8 s is outside it");
+        w.increment_multiplier();
+        w.park_ball();
+        assert!(!w.multiplier_increase_preserved(), "the next ball starts clean");
+    }
+
+    #[test]
+    fn a_bumper_with_no_score_scores_nothing() {
+        let mut w = world(8);
+        let i = w.bumpers.iter().position(|b| b.score == 0 && b.award_ladder.is_empty()).expect("table 8 has bumpers with no score");
+        let (x, y) = (w.bumpers[i].position[0], w.bumpers[i].position[1] + w.bumpers[i].radius + w.ball_radius + 0.01);
+        w.drain_score_events();
+        let b = w.bodies.get_mut(w.balls[0].body).unwrap();
+        b.set_translation(Vector::new(x, y), true);
+        b.set_linvel(Vector::new(0.0, 0.0), true);
+        b.set_gravity_scale(0.0, true);
+        for _ in 0..16 { w.step(1.0 / 240.0, &InputState::default()); }
+        assert!(w.drain_score_events().iter().all(|&p| p != 100), "no invented 100");
+    }
+
+    #[test]
+    fn the_launch_jitter_is_additive_and_leaves_a_zero_delta_alone() {
+        let w = world(1); // launch (0, 15.4) plus up to (0, 0.6)
+        let mut ys = Vec::new();
+        for _ in 0..50 {
+            let [vx, vy] = w.jittered_launch_velocity();
+            assert_eq!(vx, 0.0, "no x delta, no x change");
+            assert!((15.4..=16.0).contains(&vy), "vy {vy}");
+            ys.push(vy);
+            std::thread::sleep(std::time::Duration::from_micros(50));
+        }
+        assert!(ys.iter().any(|&y| (y - ys[0]).abs() > 1e-4), "it does vary");
     }
 }

@@ -1,7 +1,5 @@
 use crate::physics::PhysicsWorld;
 
-const MAX_MULTIPLIER: u32 = 5;
-
 // `sync()` runs once per rendered frame (app.rs's FRAME_MILLIS = 33ms), not
 // once per physics substep — so "ticks" here means "sync calls", at ~30 Hz.
 const SYNC_HZ: u32 = 30;
@@ -22,6 +20,10 @@ pub struct GameState {
     pub score: u64,
     pub high_score: u64,
     pub balls_remaining: u8,
+    /// The ball being played (1-based); an extra ball does not advance it.
+    pub ball_number: u8,
+    /// Extra balls won and not yet used (they are also counted in `balls_remaining`).
+    pub extra_balls: u8,
     pub phase: Phase,
     pub multiplier: u32,
     /// Percent added on top of the whole-number multiplier by table scripts (table 4
@@ -33,6 +35,8 @@ pub struct GameState {
     /// so real time like the original) it has left. One at a time; a new one
     /// replaces it.
     pub message: Option<(String, u32)>,
+    /// A message waiting to be shown: ticks until it appears, the text and its ms.
+    pub pending_message: Option<(u32, String, u32)>,
 }
 
 impl GameState {
@@ -41,11 +45,14 @@ impl GameState {
             score: 0,
             high_score: 0,
             balls_remaining: ball_count,
+            ball_number: 1,
+            extra_balls: 0,
             phase: Phase::WaitingToLaunch,
             multiplier: 1,
             bonus_percent: 0,
             super_mode_ticks: 0,
             message: None,
+            pending_message: None,
         }
     }
 
@@ -55,8 +62,20 @@ impl GameState {
         self.message = Some((text.into(), ticks));
     }
 
+    /// Shows `text` for `ms` after `delay_ms` (the original schedules its next-ball
+    /// messages 1500 ms after the ball is lost).
+    pub fn show_message_after(&mut self, delay_ms: u32, text: impl Into<String>, ms: u32) {
+        self.pending_message = Some(((delay_ms * SYNC_HZ / 1000).max(1), text.into(), ms));
+    }
+
     /// Counts the current message down by one tick, clearing it when it runs out.
     pub fn tick_message(&mut self) {
+        if let Some((delay, _, _)) = &mut self.pending_message {
+            *delay = delay.saturating_sub(1);
+            if *delay == 0 {
+                if let Some((_, text, ms)) = self.pending_message.take() { self.show_message(text, ms); }
+            }
+        }
         if let Some((_, ticks)) = &mut self.message {
             *ticks = ticks.saturating_sub(1);
             if *ticks == 0 { self.message = None; }
@@ -94,7 +113,7 @@ impl GameState {
 
     pub fn sync(&mut self, physics: &PhysicsWorld) {
         if self.phase == Phase::Playing && physics.is_ball_drained() {
-            self.ball_drained();
+            self.ball_drained(physics.multiplier_increase_preserved());
         }
 
         // Accumulate score from contact events emitted by physics
@@ -106,6 +125,7 @@ impl GameState {
         // An extra ball is one more ball to play, in place of the one in play.
         for _ in 0..physics.drain_extra_ball_events() {
             self.balls_remaining = self.balls_remaining.saturating_add(1);
+            self.extra_balls = self.extra_balls.saturating_add(1);
         }
         for pct in physics.drain_multiplier_percent_events() {
             self.bonus_percent = self.bonus_percent.saturating_add_signed(pct);
@@ -134,14 +154,36 @@ impl GameState {
     /// The ball in play drained. `balls_remaining` counts the ball in play
     /// (it starts at the table's `numballs`), so the game ends when the last
     /// one is gone: a 3-ball game gives exactly 3 balls.
-    pub fn ball_drained(&mut self) {
+    ///
+    /// The multiplier follows the original's default: halved and rounded down,
+    /// never below 1. If a script raised it within the last 7.5 seconds of game
+    /// time (`preserve_increase`), that increase is taken off first and put
+    /// back after, so it counts for the next ball. Super mode is per ball.
+    pub fn ball_drained(&mut self, preserve_increase: bool) {
+        let had_extra_ball = self.extra_balls > 0;
         self.balls_remaining = self.balls_remaining.saturating_sub(1);
         self.phase = if self.balls_remaining == 0 { Phase::GameOver } else { Phase::BallLost };
-        // Multiplier and super mode are per-ball: a fresh ball always
-        // starts back at ×1, mode off.
-        self.multiplier = 1;
+
+        let mut whole = (self.multiplier * 100 + self.bonus_percent) as f64 / 100.0;
+        if preserve_increase { whole -= 1.0; }
+        let mut next = (whole / 2.0).floor().max(1.0) as u32;
+        if preserve_increase { next += 1; }
+        self.multiplier = next;
         self.bonus_percent = 0;
         self.super_mode_ticks = 0;
+
+        if had_extra_ball {
+            self.extra_balls -= 1;
+        } else {
+            self.ball_number = self.ball_number.saturating_add(1);
+        }
+        if self.phase == Phase::GameOver {
+            self.show_message("Game Over", 2500);
+        } else if had_extra_ball {
+            self.show_message_after(1500, "Shoot Again", 1500);
+        } else {
+            self.show_message_after(1500, format!("Ball {}", self.ball_number), 1500);
+        }
     }
 
     /// Multiplies the whole multiplier by `percent / 100`, rounding down like the
@@ -153,10 +195,10 @@ impl GameState {
         self.bonus_percent = scaled.saturating_sub(self.multiplier * 100);
     }
 
-    /// Adjusts the multiplier by `delta`, clamped to [1, MAX_MULTIPLIER] —
-    /// it can never run away or drop below ×1.
+    /// Adjusts the multiplier by `delta`. As in the original there is no upper
+    /// limit; it never drops below x1.
     pub fn apply_multiplier_delta(&mut self, delta: i32) {
-        self.multiplier = (self.multiplier as i32 + delta).clamp(1, MAX_MULTIPLIER as i32) as u32;
+        self.multiplier = (self.multiplier as i64 + delta as i64).clamp(1, u32::MAX as i64 / 2000) as u32;
     }
 }
 
@@ -183,11 +225,11 @@ mod tests {
         let mut game = GameState::new(3);
         game.balls_remaining = game.balls_remaining.saturating_add(1);
         game.phase = Phase::Playing;
-        game.ball_drained();
+        game.ball_drained(false);
         game.phase = Phase::Playing;
-        game.ball_drained();
+        game.ball_drained(false);
         game.phase = Phase::Playing;
-        game.ball_drained();
+        game.ball_drained(false);
         assert_eq!((game.phase, game.balls_remaining), (Phase::BallLost, 1), "four balls in all, so three drains leave one");
     }
 
@@ -207,7 +249,7 @@ mod tests {
         game.super_mode_ticks = 1;
         assert_eq!(game.multiplier_percent(), 674, "super mode doubles the whole thing");
 
-        game.ball_drained();
+        game.ball_drained(false);
         assert_eq!((game.multiplier, game.bonus_percent), (1, 0));
         assert_eq!(game.multiplier_text(), "x1");
     }
@@ -216,37 +258,79 @@ mod tests {
     fn a_three_ball_game_gives_exactly_three_balls() {
         let mut game = GameState::new(3);
         game.phase = Phase::Playing;
-        game.ball_drained();
+        game.ball_drained(false);
         assert_eq!((game.phase, game.balls_remaining), (Phase::BallLost, 2), "after ball 1");
         game.phase = Phase::Playing;
-        game.ball_drained();
+        game.ball_drained(false);
         assert_eq!((game.phase, game.balls_remaining), (Phase::BallLost, 1), "after ball 2");
         game.phase = Phase::Playing;
-        game.ball_drained();
+        game.ball_drained(false);
         assert_eq!((game.phase, game.balls_remaining), (Phase::GameOver, 0), "the third drain ends the game");
     }
 
     #[test]
-    fn a_ball_drain_resets_the_per_ball_multiplier_and_super_mode() {
+    fn a_ball_drain_halves_the_multiplier_rounding_down_and_ends_super_mode() {
         let mut game = GameState::new(3);
-        game.multiplier = 4;
+        game.multiplier = 5;
         game.super_mode_ticks = 100;
-        game.ball_drained();
-        assert_eq!((game.multiplier, game.super_mode_ticks), (1, 0));
+        game.ball_drained(false);
+        assert_eq!((game.multiplier, game.super_mode_ticks), (2, 0), "5 halves to 2");
+        game.ball_drained(false);
+        assert_eq!(game.multiplier, 1, "2 halves to 1");
+        game.ball_drained(false);
+        assert_eq!(game.multiplier, 1, "never below 1");
     }
 
     #[test]
-    fn multiplier_clamps_between_one_and_max() {
+    fn a_ball_lost_just_after_a_multiplier_increase_keeps_the_increase() {
+        let mut game = GameState::new(3);
+        game.multiplier = 4; // just raised from 3
+        game.ball_drained(true);
+        assert_eq!(game.multiplier, 2, "(4 - 1) halved is 1, plus the increase back is 2");
+        game.multiplier = 2; // 1 raised to 2
+        game.ball_drained(true);
+        assert_eq!(game.multiplier, 2, "kept");
+        game.multiplier = 9;
+        game.bonus_percent = 50;
+        game.ball_drained(false);
+        assert_eq!((game.multiplier, game.bonus_percent), (4, 0), "9.5 halves to 4.75, rounded down");
+    }
+
+    #[test]
+    fn the_next_ball_is_announced_after_a_delay_and_an_extra_ball_says_shoot_again() {
+        let mut game = GameState::new(3);
+        game.ball_drained(false);
+        assert_eq!(game.ball_number, 2);
+        assert!(game.message.is_none(), "not at once");
+        for _ in 0..(1500 * SYNC_HZ / 1000) { game.tick_message(); }
+        assert_eq!(game.message.as_ref().map(|m| m.0.as_str()), Some("Ball 2"));
+
+        game.extra_balls = 1;
+        game.balls_remaining += 1;
+        game.ball_drained(false);
+        assert_eq!((game.ball_number, game.extra_balls), (2, 0), "an extra ball does not advance the ball number");
+        for _ in 0..(1500 * SYNC_HZ / 1000) { game.tick_message(); }
+        assert_eq!(game.message.as_ref().map(|m| m.0.as_str()), Some("Shoot Again"));
+
+        game.ball_drained(false);
+        assert_eq!(game.ball_number, 3);
+        game.ball_drained(false);
+        assert_eq!(game.phase, Phase::GameOver);
+        assert_eq!(game.message.as_ref().map(|m| m.0.as_str()), Some("Game Over"));
+    }
+
+    #[test]
+    fn the_multiplier_has_no_upper_limit_and_never_drops_below_one() {
         let mut game = GameState::new(3);
         assert_eq!(game.multiplier, 1);
 
         for _ in 0..10 {
             game.apply_multiplier_delta(1);
         }
-        assert_eq!(game.multiplier, MAX_MULTIPLIER, "multiplier should cap, not run away");
+        assert_eq!(game.multiplier, 11, "as in the original it keeps growing");
 
         game.apply_multiplier_delta(-100);
-        assert_eq!(game.multiplier, 1, "multiplier should never drop below ×1");
+        assert_eq!(game.multiplier, 1, "multiplier should never drop below x1");
     }
 
     #[test]
