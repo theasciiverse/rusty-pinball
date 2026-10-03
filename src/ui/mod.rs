@@ -37,7 +37,8 @@ pub fn draw(
         ])
         .split(area);
 
-    let snap = physics.snapshot();
+    let mut snap = physics.snapshot();
+    snap.popups = game.popup_snapshots();
     draw_play_area(frame, chunks[0], &snap, renderer, camera_y, debug_ids);
     dmd::draw_dmd(frame, chunks[1], game, &snap);
 

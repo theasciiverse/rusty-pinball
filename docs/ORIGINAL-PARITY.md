@@ -156,11 +156,12 @@ Full list in [`parity/engine-and-app.md`](parity/engine-and-app.md) (older, part
 messages; mercy ball and multiball saver; the score multiplier is fractional and unbounded, halves (rounds down, never below 1)
 when a ball is lost, and keeps an increase made in the last 7.5 s of game time, as in the original; the stuck-ball "Bump!"
 (10 s of game time, no flipper held); bumper defaults (score 0, kick 0, as the original); additive launch jitter (independent per
-component, none for a zero delta); layers as separate worlds; table scripts for every table.
+component, none for a zero delta); layers as separate worlds; table scripts for every table; floating score animations
+(the multiplied points rise 3 units over 2 s, coloured by value, fading in the second half); ball trails (20 frames, dimmed and
+shrinking towards the tail); table 8's billiard ball decoration (drawn dimmed, not solid).
 
 **Still open, roughly in order of how much a player would notice:**
 
-- No score animations (floating digits at the ball) and no ball trails.
 - Sounds: no rollover, message or startup sounds; bumper dings only for bumpers; music is not score-driven.
 - One high score per table (original keeps the top 5 plus last score); one sound toggle (original also has music, speed, trails, zoom).
 - No unlimited-balls mode.

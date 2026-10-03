@@ -1,4 +1,4 @@
-use crate::physics::PhysicsWorld;
+use crate::physics::{PhysicsWorld, ScorePopup};
 
 // `sync()` runs once per rendered frame (app.rs's FRAME_MILLIS = 33ms), not
 // once per physics substep — so "ticks" here means "sync calls", at ~30 Hz.
@@ -16,7 +16,21 @@ pub enum Phase {
     GameOver,
 }
 
+/// How long a score floats (the original's `ScoreAnimation`: 2 s), in sync ticks.
+const POPUP_TICKS: u32 = 2 * SYNC_HZ;
+/// How far it rises over that time, in table units.
+const POPUP_RISE: f32 = 3.0;
+const MAX_POPUPS: usize = 12;
+
+struct Popup {
+    points: u64,
+    x: f32,
+    y: f32,
+    age: u32,
+}
+
 pub struct GameState {
+    popups: Vec<Popup>,
     pub score: u64,
     pub high_score: u64,
     pub balls_remaining: u8,
@@ -42,6 +56,7 @@ pub struct GameState {
 impl GameState {
     pub fn new(ball_count: u8) -> Self {
         Self {
+            popups: Vec::new(),
             score: 0,
             high_score: 0,
             balls_remaining: ball_count,
@@ -103,12 +118,40 @@ impl GameState {
         if pct % 100 == 0 { format!("x{}", pct / 100) } else { format!("x{}.{:02}", pct / 100, pct % 100) }
     }
 
-    pub fn add_score(&mut self, points: u64) {
+    /// Adds `points` times the multiplier and returns what was added.
+    pub fn add_score(&mut self, points: u64) -> u64 {
         // Rounded like the original's Math.round(points * multiplier).
-        self.score += (points * self.multiplier_percent() as u64 + 50) / 100;
+        let added = (points * self.multiplier_percent() as u64 + 50) / 100;
+        self.score += added;
         if self.score > self.high_score {
             self.high_score = self.score;
         }
+        added
+    }
+
+    /// Floats `points` up from `(x, y)`; the newest `MAX_POPUPS` are kept.
+    pub fn add_popup(&mut self, points: u64, x: f32, y: f32) {
+        if points == 0 { return; }
+        self.popups.push(Popup { points, x, y, age: 0 });
+        if self.popups.len() > MAX_POPUPS { self.popups.remove(0); }
+    }
+
+    /// The scores floating now, as the renderer draws them. The colour follows the
+    /// value like the original's: pink from 10,000, orange above 2,000, yellow
+    /// above 500, else light green.
+    pub fn popup_snapshots(&self) -> Vec<ScorePopup> {
+        self.popups.iter().map(|p| ScorePopup {
+            text: p.points.to_string(),
+            x: p.x,
+            y: p.y + POPUP_RISE * p.age as f32 / POPUP_TICKS as f32,
+            progress: p.age as f32 / POPUP_TICKS as f32,
+            color: match p.points {
+                10_000.. => (0xFF, 0x00, 0x80),
+                2_001..=9_999 => (0xFF, 0x40, 0x00),
+                501..=2_000 => (0xFF, 0xFF, 0x00),
+                _ => (0x80, 0xFF, 0x80),
+            },
+        }).collect()
     }
 
     pub fn sync(&mut self, physics: &PhysicsWorld) {
@@ -117,9 +160,13 @@ impl GameState {
         }
 
         // Accumulate score from contact events emitted by physics
+        let at = physics.ball_position().map(|p| (p.x, p.y));
         for pts in physics.drain_score_events() {
-            self.add_score(pts);
+            let added = self.add_score(pts);
+            if let Some((x, y)) = at { self.add_popup(added, x, y); }
         }
+        for p in &mut self.popups { p.age += 1; }
+        self.popups.retain(|p| p.age < POPUP_TICKS);
 
         self.tick_message();
         // An extra ball is one more ball to play, in place of the one in play.
@@ -367,5 +414,44 @@ mod tests {
 
         game.super_mode_ticks = 0;
         assert_eq!(game.super_mode_seconds_remaining(), 0);
+    }
+
+    #[test]
+    fn a_score_floats_up_for_two_seconds_in_its_value_colour_and_shows_the_multiplied_points() {
+        let mut game = GameState::new(3);
+        game.multiplier = 2;
+        let added = game.add_score(600);
+        game.add_popup(added, 10.0, 5.0);
+        let snap = game.popup_snapshots();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].text, "1200", "the multiplied score");
+        assert_eq!(snap[0].color, (0xFF, 0xFF, 0x00), "yellow above 500");
+        assert_eq!((snap[0].x, snap[0].y), (10.0, 5.0));
+
+        for (points, color) in [(100, (0x80, 0xFF, 0x80)), (3_000, (0xFF, 0x40, 0x00)), (50_000, (0xFF, 0x00, 0x80))] {
+            let mut g = GameState::new(3);
+            g.add_popup(points, 1.0, 1.0);
+            assert_eq!(g.popup_snapshots()[0].color, color, "{points}");
+        }
+
+        // After a second it has risen half way, and after two it is gone.
+        game.popups[0].age = POPUP_TICKS / 2;
+        let half = game.popup_snapshots();
+        assert!((half[0].y - 6.5).abs() < 0.01 && (half[0].progress - 0.5).abs() < 0.01);
+        game.popups[0].age = POPUP_TICKS - 1;
+        game.popups.iter_mut().for_each(|p| p.age += 1);
+        game.popups.retain(|p| p.age < POPUP_TICKS);
+        assert!(game.popup_snapshots().is_empty());
+    }
+
+    #[test]
+    fn only_the_newest_scores_are_kept_and_a_zero_score_shows_nothing() {
+        let mut game = GameState::new(3);
+        game.add_popup(0, 1.0, 1.0);
+        assert!(game.popup_snapshots().is_empty());
+        for i in 1..=30 { game.add_popup(i * 100, 1.0, 1.0); }
+        let snap = game.popup_snapshots();
+        assert_eq!(snap.len(), MAX_POPUPS);
+        assert_eq!(snap.last().unwrap().text, "3000");
     }
 }

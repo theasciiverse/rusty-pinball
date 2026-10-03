@@ -118,6 +118,22 @@ impl FieldRenderer {
             }
         }
 
+        // Ball trails go under the elements: dots that shrink and fade towards the tail,
+        // at most 30% of the ball's brightness (the original's alpha 0.3 * size fraction).
+        for b in &snap.balls {
+            let base = b.color.or(snap.ball_color).map(rgb).unwrap_or(COL_BALL);
+            let (br, bg, bb) = match base { Color::Rgb(r, g, b) => (r, g, b), Color::White => (255, 255, 255), _ => (200, 200, 200) };
+            let n = b.trail.len();
+            for (i, &(tx, ty)) in b.trail.iter().enumerate() {
+                let fraction = (i + 1) as f32 / (n + 1) as f32;
+                let shade = |v: u8| (v as f32 * 0.3 * fraction) as u8;
+                let rx = ((snap.field_width * 0.025 * fraction / field_w)    * dot_w as f32) as u32;
+                let ry = ((snap.field_width * 0.025 * fraction / viewport_h) * dot_h as f32) as u32;
+                fill_ellipse(&mut pixels, &mut grid, to_cx(tx), to_cy(ty), rx.max(1), ry.max(1),
+                    Color::Rgb(shade(br), shade(bg), shade(bb)));
+            }
+        }
+
         for w in &snap.walls {
             let color = match w.layer {
                 None    => w.color.map(rgb).unwrap_or(COL_WALL),
@@ -215,6 +231,26 @@ impl FieldRenderer {
             for cx in 0..char_cols {
                 chars.push(pixels.braille_char(cx, cy));
                 colors.push(grid.get(cx, cy));
+            }
+        }
+
+        // Scores floating up from where they were won, over everything but the debug labels.
+        for popup in &snap.popups {
+            // The original fades them out over the second half of their life.
+            let fade = if popup.progress > 0.5 { 1.0 - (popup.progress - 0.5) * 2.0 } else { 1.0 };
+            let shade = |v: u8| (v as f32 * fade) as u8;
+            let color = Color::Rgb(shade(popup.color.0), shade(popup.color.1), shade(popup.color.2));
+            let (dot_x, dot_y) = (to_cx(popup.x), to_cy(popup.y));
+            let row = dot_y.div_euclid(4);
+            if row < 0 || row as u32 >= char_rows { continue; }
+            let width = popup.text.chars().count() as i32;
+            let start = (dot_x.div_euclid(2) - width / 2).clamp(0, (char_cols as i32 - width).max(0));
+            for (i, ch) in popup.text.chars().enumerate() {
+                let col = start + i as i32;
+                if col < 0 || col as u32 >= char_cols { continue; }
+                let idx = (row as u32 * char_cols + col as u32) as usize;
+                chars[idx] = ch;
+                colors[idx] = color;
             }
         }
 

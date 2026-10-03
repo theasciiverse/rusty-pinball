@@ -40,6 +40,17 @@ pub enum Shape {
     Line { x1: f32, y1: f32, x2: f32, y2: f32, color: (u8, u8, u8) },
 }
 
+/// A score floating up from where it was won (the original's `ScoreAnimation`).
+#[derive(Debug, Clone)]
+pub struct ScorePopup {
+    pub text: String,
+    pub x: f32,
+    pub y: f32,
+    /// 0 when it appears, 1 when it is gone.
+    pub progress: f32,
+    pub color: (u8, u8, u8),
+}
+
 #[derive(Debug, Clone)]
 pub struct BallSnapshot {
     pub x: f32,
@@ -48,6 +59,8 @@ pub struct BallSnapshot {
     pub vy: f32,
     /// A colour a table script gave this ball; None means the table's ball colour.
     pub color: Option<(u8, u8, u8)>,
+    /// Where it has been over the last frames, oldest first.
+    pub trail: Vec<(f32, f32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +141,8 @@ pub struct FieldSnapshot {
     pub jackpot_lit: Option<bool>,
     pub field_width: f32,
     pub field_height: f32,
+    /// Scores to show floating up from where they were won (filled in by the game).
+    pub popups: Vec<ScorePopup>,
     pub ball_layer: u8,
     /// Bit n set when a ball is on layer n; layered walls are drawn only then.
     pub occupied_layers: u32,
@@ -233,6 +248,10 @@ const MERCY_BALL_SECONDS: f32 = 20.0;
 /// starting; the original's `multiballSaverDuration`, 30000 ms.
 const MULTIBALL_SAVER_SECONDS: f32 = 30.0;
 
+/// Frames of ball trail kept (the original keeps 20 positions), and how far a ball
+/// can move in one frame before it counts as having jumped.
+const TRAIL_LENGTH: usize = 20;
+const TRAIL_JUMP: f32 = 4.0;
 /// A ball lost this soon (game time) after a script raised the multiplier keeps the
 /// increase for the next ball; the original's `preserveMultiplierIncreaseDuration` default.
 const PRESERVE_MULTIPLIER_SECONDS: f32 = 7.5;
@@ -295,6 +314,8 @@ struct BallState {
     // Id of the last sensor this ball was inside; scripts read it to tell which
     // way a ball went through a ramp (original: Ball.mostRecentSensorId).
     last_sensor: Option<String>,
+    // Where the ball was over the last frames, oldest first (drawn as a fading trail).
+    trail: Vec<(f32, f32)>,
 }
 
 struct DropTargetInfo {
@@ -721,6 +742,21 @@ impl PhysicsWorld {
                         }
                     }
                 }
+                ElementDef::WallArcElement(a) if a.ignore_ball == Some(true) => {
+                    // Drawn only, like the guide paths (table 8's billiard balls).
+                    let visible = !matches!(a.color.as_ref().and_then(|c| c.as_array()).and_then(|v| v.get(3)).and_then(|v| v.as_u64()), Some(0));
+                    let id = a.id.clone().unwrap_or_else(|| label_for(elem_idx, &a.id));
+                    // Background art: dimmed so it is not mistaken for a wall.
+                    let dim = |(r, g, b): (u8, u8, u8)| ((r as u32 * 45 / 100) as u8, (g as u32 * 45 / 100) as u8, (b as u32 * 45 / 100) as u8);
+                    let color = Some(dim(parse_color(&a.color).unwrap_or((170, 170, 170))));
+                    for (p0, p1) in a.to_segments() {
+                        decor_lines.push(DecorLineInfo {
+                            id: id.clone(),
+                            x1: p0[0], y1: p0[1], x2: p1[0], y2: p1[1],
+                            color, visible,
+                        });
+                    }
+                }
                 ElementDef::WallArcElement(a)   => Self::add_arc(a, &mut bodies, &mut colliders, &mut wall_segs, label_for(elem_idx, &a.id)),
                 ElementDef::WallPathElement(p) if p.ignore_ball == Some(true) => {
                     // Drawn only: one decor line per segment, sharing the path's id.
@@ -823,7 +859,7 @@ impl PhysicsWorld {
             .collision_groups(ball_groups_for(0))
             .build();
         let ball_col_h = colliders.insert_with_parent(idle_col, idle_h, &mut bodies);
-        let balls = vec![BallState { body: idle_h, collider: ball_col_h, layer: 0, color: None, last_sensor: None }];
+        let balls = vec![BallState { body: idle_h, collider: ball_col_h, layer: 0, color: None, last_sensor: None, trail: Vec::new() }];
         let gate_ball = Some(idle_h);
 
         let letter_groups = table.letter_awards.iter().map(|la| LetterGroupInfo {
@@ -1275,7 +1311,7 @@ impl PhysicsWorld {
             .collision_groups(ball_groups_for(0))
             .build();
         let collider = self.colliders.insert_with_parent(col, body, &mut self.bodies);
-        BallState { body, collider, layer: 0, color: None, last_sensor: None }
+        BallState { body, collider, layer: 0, color: None, last_sensor: None, trail: Vec::new() }
     }
 
     fn remove_body(&mut self, h: RigidBodyHandle) {
@@ -2580,6 +2616,22 @@ impl PhysicsWorld {
             self.step(dt, &later);
         }
         self.check_for_stuck_ball(dt * PHYSICS_SUBSTEPS as f32, input.left_flipper || input.right_flipper);
+        self.record_trails();
+    }
+
+    /// Remembers where each ball is, for the trail drawn behind it. A ball that
+    /// jumped (launched, relocated by a script) starts a new trail.
+    fn record_trails(&mut self) {
+        for i in 0..self.balls.len() {
+            let Some(pos) = self.bodies.get(self.balls[i].body).map(|b| b.translation()) else { continue };
+            let trail = &mut self.balls[i].trail;
+            if let Some(&(lx, ly)) = trail.last() {
+                let moved = ((pos.x - lx).powi(2) + (pos.y - ly).powi(2)).sqrt();
+                if moved > TRAIL_JUMP { trail.clear(); } else if moved < 0.02 { continue; }
+            }
+            trail.push((pos.x, pos.y));
+            if trail.len() > TRAIL_LENGTH { trail.remove(0); }
+        }
     }
 
     /// True when a ball lost shortly after a script raised the multiplier should
@@ -2627,7 +2679,7 @@ impl PhysicsWorld {
 
     pub fn snapshot(&self) -> FieldSnapshot {
         let balls: Vec<BallSnapshot> = self.live_balls().into_iter()
-            .map(|(i, t, v)| BallSnapshot { x: t.x, y: t.y, vx: v.x, vy: v.y, color: self.balls[i].color })
+            .map(|(i, t, v)| BallSnapshot { x: t.x, y: t.y, vx: v.x, vy: v.y, color: self.balls[i].color, trail: self.balls[i].trail.clone() })
             .collect();
         // Elements on another layer (table 7's mini table) show only while a ball is on it.
         let occupied_layers = self.balls.iter().fold(0u32, |m, b| m | (1u32 << b.layer.min(31)));
@@ -2719,6 +2771,7 @@ impl PhysicsWorld {
             jackpot_lit: self.jackpot.as_ref().map(|j| j.lit),
             field_width:  self.field_width,
             field_height: self.field_height,
+            popups: Vec::new(),
             ball_layer: self.balls.first().map_or(0, |b| b.layer),
             occupied_layers,
             ball_color: self.ball_color,
@@ -5677,6 +5730,25 @@ mod table_7_tests {
     }
 
     #[test]
+    fn the_renderer_draws_a_floating_score_as_digits_and_fades_it() {
+        let mut w = world7();
+        w.step_frame(0.033, &InputState::default());
+        let mut snap = w.snapshot();
+        snap.popups.push(ScorePopup { text: "5000".into(), x: 10.0, y: 12.0, progress: 0.0, color: (0xFF, 0xFF, 0x00) });
+        let renderer = crate::renderer::FieldRenderer::new();
+        let frame = renderer.render(&snap, 0.0, 100, 70, false);
+        let text: String = frame.chars.chunks(100).map(|row| row.iter().collect::<String>()).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("5000"), "the digits are on the screen");
+        let idx = frame.chars.iter().position(|&c| c == '5').unwrap();
+        assert_eq!(frame.colors[idx], ratatui::style::Color::Rgb(0xFF, 0xFF, 0x00), "in the full colour at first");
+
+        snap.popups[0].progress = 0.75;
+        let frame = renderer.render(&snap, 0.0, 100, 70, false);
+        let idx = frame.chars.iter().position(|&c| c == '5').unwrap();
+        assert_eq!(frame.colors[idx], ratatui::style::Color::Rgb(0x7F, 0x7F, 0x00), "half faded three quarters through");
+    }
+
+    #[test]
     fn the_loop_arrows_pulse_while_wandering_and_the_lock_arrow_is_off() {
         let mut w = world7();
         w.step_frame(0.033, &InputState::default());
@@ -6919,5 +6991,56 @@ mod engine_rule_tests {
             std::thread::sleep(std::time::Duration::from_micros(50));
         }
         assert!(ys.iter().any(|&y| (y - ys[0]).abs() > 1e-4), "it does vary");
+    }
+
+    #[test]
+    fn table_8s_billiard_balls_are_drawn_dimmed_and_are_not_solid() {
+        let mut w = world(8);
+        let snap = w.snapshot();
+        let rings = snap.walls.iter().filter(|s| s.color == Some((102, 69, 26))).count();
+        assert_eq!(rings, 24, "the first ball is a 24 segment ring in its own colour, dimmed");
+        // Not solid: a ball resting on the ring's edge stays where it is.
+        let b = w.bodies.get_mut(w.balls[0].body).unwrap();
+        b.set_translation(Vector::new(8.06 + 0.8, 5.52), true);
+        b.set_linvel(Vector::new(0.0, 0.0), true);
+        b.set_gravity_scale(0.0, true);
+        for _ in 0..20 { w.step(1.0 / 240.0, &InputState::default()); }
+        let p = w.bodies.get(w.balls[0].body).unwrap().translation();
+        assert!((p.x - 8.86).abs() < 0.05 && (p.y - 5.52).abs() < 0.05, "not pushed: {p:?}");
+    }
+
+    #[test]
+    fn a_moving_ball_leaves_a_trail_of_its_last_twenty_frames_and_a_jump_starts_a_new_one() {
+        let mut w = world(1);
+        w.launch_ball();
+        for _ in 0..40 { w.step_frame(0.033, &InputState::default()); }
+        let trail = w.snapshot().balls[0].trail.clone();
+        assert_eq!(trail.len(), 20, "twenty frames of trail");
+        let pos = w.ball_position().unwrap();
+        let last = trail.last().unwrap();
+        assert!((last.0 - pos.x).abs() < 3.0 && (last.1 - pos.y).abs() < 3.0, "ends at the ball");
+
+        // Teleported: the old trail is not joined to the new position.
+        let b = w.bodies.get_mut(w.balls[0].body).unwrap();
+        b.set_translation(Vector::new(3.0, 3.0), true);
+        b.set_linvel(Vector::new(0.0, 0.0), true);
+        b.set_gravity_scale(0.0, true);
+        w.step_frame(0.033, &InputState::default());
+        assert_eq!(w.snapshot().balls[0].trail.len(), 1, "a fresh trail");
+    }
+
+    #[test]
+    fn the_renderer_draws_the_trail_behind_the_ball() {
+        let mut w = world(1);
+        w.launch_ball();
+        for _ in 0..30 { w.step_frame(0.033, &InputState::default()); }
+        let snap = w.snapshot();
+        let mut bare = snap.clone();
+        for b in &mut bare.balls { b.trail.clear(); }
+        let renderer = crate::renderer::FieldRenderer::new();
+        let with = renderer.render(&snap, 0.0, 100, 70, false);
+        let without = renderer.render(&bare, 0.0, 100, 70, false);
+        let changed = with.chars.iter().zip(&without.chars).filter(|(a, b)| a != b).count();
+        assert!(changed >= 3, "the trail adds dots: {changed}");
     }
 }
