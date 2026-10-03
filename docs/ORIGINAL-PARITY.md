@@ -93,7 +93,7 @@ Round 1 leaves out only what needs more than one ball: ball locks, multiball lau
 | 4 | Status grid lit by bumpers, percent multiplier, ramp walls | DONE (locks, multiball, jackpot: round 2; the grid only lights row 1 until locks exist) |
 | 3 | Bumper bonus, heat meter, indicator rings | DONE (multiball and its flashing rings: round 2) |
 | 8 | Insert lights, rack bonus, gates, skill shot | DONE (whole table; decorative billiard-ball circles are still not drawn) |
-| 7 | Star-map field, constellations | TODO |
+| 7 | Star-map field, constellations, loop shots, guide arrows | DONE (ball locks, multiball, jackpot and the layered mini-table: round 2) |
 
 ### Round 2: multiball for all tables
 

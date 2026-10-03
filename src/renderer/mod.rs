@@ -11,7 +11,7 @@
 /// this prevents off-screen elements from being clamped to the screen edge.
 
 use ratatui::style::Color;
-use crate::physics::{FieldSnapshot, RolloverSnapshot};
+use crate::physics::{FieldSnapshot, RolloverSnapshot, Shape};
 
 // ── Palette ───────────────────────────────────────────────────────────────────
 
@@ -102,6 +102,20 @@ impl FieldRenderer {
         };
 
         // Draw in priority order (later = higher priority overwrites color).
+
+        // Script shapes (table 7's star map) go underneath everything else.
+        for shape in &snap.shapes {
+            match *shape {
+                Shape::Line { x1, y1, x2, y2, color } => {
+                    draw_line(&mut pixels, &mut grid, to_cx(x1), to_cy(y1), to_cx(x2), to_cy(y2), rgb(color));
+                }
+                Shape::Circle { x, y, radius, color } => {
+                    let rx = ((radius / field_w)    * dot_w as f32) as u32;
+                    let ry = ((radius / viewport_h) * dot_h as f32) as u32;
+                    fill_ellipse(&mut pixels, &mut grid, to_cx(x), to_cy(y), rx.max(1), ry.max(1), rgb(color));
+                }
+            }
+        }
 
         for w in &snap.walls {
             let color = match w.layer {

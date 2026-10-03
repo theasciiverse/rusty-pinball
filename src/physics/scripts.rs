@@ -12,7 +12,8 @@ use std::f32::consts::TAU;
 
 use rapier2d::prelude::Vector;
 
-use super::PhysicsWorld;
+use super::stars::{self, Mode, StarState};
+use super::{PhysicsWorld, Shape};
 use crate::table::TableDef;
 
 pub(super) trait TableScript {
@@ -53,6 +54,7 @@ pub(super) fn script_for(table: &TableDef) -> Option<Box<dyn TableScript>> {
         Some("Field4Delegate") => Some(Box::new(CompoundInterest { bumper_multiplier_increase: 1 })),
         Some("Field5Delegate") => Some(Box::new(EyeOfHorus { ramp_bonus: [0; 4] })),
         Some("Field6Delegate") => Some(Box::new(Orbiters::new(clock_seed()))),
+        Some("Field7Delegate") => Some(Box::new(AdAstra::new(clock_seed()))),
         Some("Field8Delegate") => Some(Box::new(PoolParty::new())),
         _ => None,
     }
@@ -1017,6 +1019,201 @@ impl TableScript for PoolParty {
                 w.set_rollover("RightBankInserts", (t - TOKEN_LIGHT_SHOW) as usize, true);
             }
             _ => {}
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Table 7: Ad Astra (Field7Delegate)
+//
+// The circle in the middle of the table is a map of the real sky. It drifts
+// slowly across the stars until a ball shoots one of the loops, which flies the
+// view to a random constellation. Rolling the ball over that constellation's
+// stars lights them (500 each, drawing the lines between lit neighbours) and
+// finishing it makes a ball lock ready. The locks, the multiball, the jackpot
+// and the layered mini-table are round 2.
+// ---------------------------------------------------------------------------
+
+const STAR_SCORE: u64 = 500;
+const BASE_RAMP_SCORE: u64 = 5000;
+const RAMP_SCORE_INCREMENT: u64 = 1000;
+/// Seconds for one pulse of the guide arrows.
+const GUIDE_PERIOD: f64 = 5.0;
+const LOOP_GUIDE_COLOR: Rgb = (0x00, 0xAA, 0x66);
+const LOCK_GUIDE_COLOR: Rgb = (0xCC, 0xCC, 0x00);
+
+const ACTIVE_STAR_ACTIVE_CONSTELLATION: Rgb = (240, 240, 0);
+const INACTIVE_STAR_ACTIVE_CONSTELLATION: Rgb = (0, 240, 0);
+const ACTIVE_STAR_INACTIVE_CONSTELLATION: Rgb = (192, 192, 0);
+const INACTIVE_STAR_INACTIVE_CONSTELLATION: Rgb = (240, 240, 240);
+/// The original's line colour is white at alpha 192.
+const CONSTELLATION_LINE: Rgb = (180, 180, 180);
+
+pub(super) struct AdAstra {
+    stars: StarState,
+    seed: u32,
+    ramp_score: u64,
+    guide_seconds: f64,
+    /// Centre and radius of the star circle (the `StarViewBoundary` rollover), read on the first tick.
+    view: Option<(f32, f32, f32)>,
+}
+
+impl AdAstra {
+    pub(super) fn new(seed: u32) -> Self {
+        AdAstra { stars: StarState::new(), seed, ramp_score: BASE_RAMP_SCORE, guide_seconds: 0.0, view: None }
+    }
+
+    fn star_color(&self, star: usize) -> Rgb {
+        let active = self.stars.activated.contains(&star);
+        let in_current = self.stars.current_constellation().map_or(false, |c| c.star_indices.contains(&star));
+        match (in_current, active) {
+            (true, true) => ACTIVE_STAR_ACTIVE_CONSTELLATION,
+            (true, false) => INACTIVE_STAR_ACTIVE_CONSTELLATION,
+            (false, true) => ACTIVE_STAR_INACTIVE_CONSTELLATION,
+            (false, false) => INACTIVE_STAR_INACTIVE_CONSTELLATION,
+        }
+    }
+
+    /// The dots and lines of the current view: brighter stars are bigger and
+    /// more opaque, and drawn last so they sit on top.
+    fn shapes(&self) -> Vec<Shape> {
+        let Some((cx, cy, view_radius)) = self.view else { return Vec::new() };
+        let target_radius = self.stars.target.angular_radius as f32;
+        if target_radius <= 0.0 { return Vec::new(); }
+        let scale = view_radius / target_radius;
+        let base_radius = view_radius * 0.015;
+        let mut shapes = Vec::with_capacity(self.stars.projection.len() + 16);
+        for p in &self.stars.projection {
+            let alpha = if p.magnitude <= 0.0 { 255 } else { ((255.0 - 30.0 * p.magnitude) as i32).max(0) };
+            let (r, g, b) = self.star_color(p.index);
+            let dim = |v: u8| (v as i32 * alpha / 255) as u8;
+            let rmul = if p.magnitude <= 0.0 { 1.5 } else if p.magnitude >= 4.0 { 0.75 } else { 1.0 };
+            shapes.push(Shape::Circle {
+                x: cx + p.x as f32 * scale,
+                y: cy + p.y as f32 * scale,
+                radius: rmul * base_radius,
+                color: (dim(r), dim(g), dim(b)),
+            });
+        }
+        shapes.reverse(); // brightest (lowest magnitude, first in the catalog) last
+        for c in stars::constellations() {
+            for &star in &c.star_indices {
+                if !self.stars.activated.contains(&star) { continue; }
+                let Some(ends) = c.segments_by_index.get(&star) else { continue };
+                for &end in ends {
+                    if !self.stars.activated.contains(&end) { continue; }
+                    let (Some(a), Some(b)) = (self.stars.projected(star), self.stars.projected(end)) else { continue };
+                    shapes.push(Shape::Line {
+                        x1: cx + a.x as f32 * scale, y1: cy + a.y as f32 * scale,
+                        x2: cx + b.x as f32 * scale, y2: cy + b.y as f32 * scale,
+                        color: CONSTELLATION_LINE,
+                    });
+                }
+            }
+        }
+        shapes
+    }
+
+    /// Lights stars of the current constellation near any ball on the main layer.
+    fn update_activated_stars(&mut self, w: &mut PhysicsWorld) {
+        let Some((cx, cy, view_radius)) = self.view else { return };
+        let mut new_stars = 0;
+        for ball in 0..w.ball_count() {
+            if w.ball_layer_of(ball) != 0 { continue; }
+            let Some(pos) = w.ball_position_of(ball) else { continue };
+            let (bx, by) = (((pos.x - cx) / view_radius) as f64, ((pos.y - cy) / view_radius) as f64);
+            new_stars += self.stars.activate_near(bx, by);
+        }
+        if new_stars > 0 {
+            w.add_score(STAR_SCORE * new_stars as u64);
+            if self.stars.all_stars_in_current_active() {
+                // A ball lock is ready (the locks themselves are round 2).
+                w.show_message("Ball Lock Ready", 2000);
+            }
+        }
+    }
+
+    /// The loop and lock guide arrows pulse while they are useful.
+    fn update_guides(&mut self, w: &mut PhysicsWorld, dt: f32) {
+        self.guide_seconds = (self.guide_seconds + dt as f64) % GUIDE_PERIOD;
+        let pulse = (1.0 + (std::f64::consts::TAU * self.guide_seconds / GUIDE_PERIOD).sin()) / 2.0;
+        let alpha = (75.0 + 180.0 * pulse) as u32;
+        let (mut loop_alpha, mut lock_alpha) = (0, 0);
+        if self.stars.all_stars_in_current_active() {
+            lock_alpha = alpha; // lock ready
+        } else if self.stars.mode == Mode::Wandering {
+            loop_alpha = alpha; // shoot a loop to pick a constellation
+        }
+        let shade = |c: Rgb, a: u32| ((c.0 as u32 * a / 255) as u8, (c.1 as u32 * a / 255) as u8, (c.2 as u32 * a / 255) as u8);
+        for id in ["LeftLoopGuide", "RightLoopGuide"] {
+            w.set_decor_visible(id, loop_alpha > 0);
+            w.set_decor_color(id, shade(LOOP_GUIDE_COLOR, loop_alpha));
+        }
+        w.set_decor_visible("LockAndJackpotGuide", lock_alpha > 0);
+        w.set_decor_color("LockAndJackpotGuide", shade(LOCK_GUIDE_COLOR, lock_alpha));
+    }
+
+    fn handle_loop(&mut self, w: &mut PhysicsWorld) {
+        w.add_score(self.ramp_score);
+        if !self.stars.all_stars_in_current_active() {
+            let mut seed = self.seed;
+            let picked = {
+                let mut rng = || {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (seed >> 8) as f64 / (1u32 << 24) as f64
+                };
+                self.stars.switch_to_random_unlocked(&mut rng)
+            };
+            self.seed = seed;
+            if picked {
+                if let Some(c) = self.stars.current_constellation() {
+                    w.show_message(c.name, 3000);
+                }
+            }
+        }
+    }
+}
+
+impl TableScript for AdAstra {
+    fn handles_rollovers(&self) -> bool { true }
+
+    fn tick(&mut self, w: &mut PhysicsWorld, dt: f32) {
+        if self.view.is_none() {
+            if let (Some((x, y)), Some(r)) = (w.rollover_center("StarViewBoundary", 0), w.rollover_radius("StarViewBoundary", 0)) {
+                self.view = Some((x, y, r));
+            }
+        }
+        self.stars.tick(dt as f64);
+        self.update_activated_stars(w);
+        self.update_guides(w, dt);
+        w.set_shapes(self.shapes());
+    }
+
+    fn sensor(&mut self, w: &mut PhysicsWorld, ball: usize, id: &str, previous: Option<&str>) {
+        match id {
+            // Each loop counts once per pass, not once per step the ball is inside.
+            "LeftLoopDetector" | "RightLoopDetector" if previous != Some(id) => self.handle_loop(w),
+            // The ball dropping into an inlane is stopped dead at the top of it.
+            "LeftFlipperDropSensor" | "RightFlipperDropSensor" => w.set_ball_velocity(ball, 0.0, 0.0),
+            // Round the centre bumpers, either way.
+            "InnerOrbitLeftTrigger" if previous == Some("InnerOrbitRightTrigger") => w.add_score(self.ramp_score),
+            "InnerOrbitRightTrigger" if previous == Some("InnerOrbitLeftTrigger") => w.add_score(self.ramp_score),
+            _ => {}
+        }
+    }
+
+    fn drop_bank_cleared(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
+        announce_saver(w, "DropTargetLeftSave", "DropTargetRightSave", id);
+        if id == "MiniFieldTopTargets" || id == "MiniFieldLeftTargets" {
+            self.ramp_score += RAMP_SCORE_INCREMENT;
+            w.show_message("Ramp bonus increased", 1500);
+        }
+    }
+
+    fn rollover_group_completed(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
+        if id == "FlipperRollovers" || id == "TopRollovers" {
+            w.set_all_rollovers(id, false);
+            w.increment_multiplier();
         }
     }
 }

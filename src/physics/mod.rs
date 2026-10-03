@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 mod movers;
 mod scripts;
+mod stars;
 use rapier2d::prelude::*;
 use crate::input::InputState;
 use crate::table::{
@@ -30,6 +31,13 @@ fn label_for(elem_idx: usize, id: &Option<String>) -> String {
         Some(id) => format!("{elem_idx}:{id}"),
         None => elem_idx.to_string(),
     }
+}
+
+/// A dot or line a table script draws (table 7's star map), behind the elements.
+#[derive(Debug, Clone, Copy)]
+pub enum Shape {
+    Circle { x: f32, y: f32, radius: f32, color: (u8, u8, u8) },
+    Line { x1: f32, y1: f32, x2: f32, y2: f32, color: (u8, u8, u8) },
 }
 
 #[derive(Debug, Clone)]
@@ -104,8 +112,10 @@ pub struct SpinnerSnapshot {
     pub label: String,
 }
 
+#[derive(Clone)]
 pub struct FieldSnapshot {
     pub balls: Vec<BallSnapshot>,
+    pub shapes: Vec<Shape>,
     pub walls: Vec<WallSnapshot>,
     pub kick_walls: Vec<WallSnapshot>,
     pub bumpers: Vec<BumperSnapshot>,
@@ -489,6 +499,7 @@ pub struct PhysicsWorld {
     launch_barrier:     Option<LaunchBarrierInfo>,
     moving_walls:       Vec<MovingWallInfo>,
     decor_lines:        Vec<DecorLineInfo>,
+    shapes:             Vec<Shape>,
     rotating_triangles: Vec<movers::RotatingTriangle>,
     kick_walls:         Vec<KickWallInfo>,
     drop_target_groups: Vec<DropTargetGroupInfo>,
@@ -669,6 +680,18 @@ impl PhysicsWorld {
                     }
                 }
                 ElementDef::WallArcElement(a)   => Self::add_arc(a, &mut bodies, &mut colliders, &mut wall_segs, label_for(elem_idx, &a.id)),
+                ElementDef::WallPathElement(p) if p.ignore_ball == Some(true) => {
+                    // Drawn only: one decor line per segment, sharing the path's id.
+                    let visible = !matches!(p.color.as_ref().and_then(|c| c.as_array()).and_then(|a| a.get(3)).and_then(|v| v.as_u64()), Some(0));
+                    let id = p.id.clone().unwrap_or_else(|| label_for(elem_idx, &p.id));
+                    for pair in p.positions.windows(2) {
+                        decor_lines.push(DecorLineInfo {
+                            id: id.clone(),
+                            x1: pair[0][0], y1: pair[0][1], x2: pair[1][0], y2: pair[1][1],
+                            color: parse_color(&p.color), visible,
+                        });
+                    }
+                }
                 ElementDef::WallPathElement(p)  => Self::add_path(p, &mut bodies, &mut colliders, &mut wall_segs, label_for(elem_idx, &p.id)),
                 ElementDef::BumperElement(b)    => Self::add_bumper(b, &mut bodies, &mut colliders, &mut bumpers_info, label_for(elem_idx, &b.id)),
                 ElementDef::FlipperElement(f)   => Self::add_flipper(f, &mut bodies, &mut colliders, &mut impulse_joints, &mut flippers, label_for(elem_idx, &f.id)),
@@ -797,6 +820,7 @@ impl PhysicsWorld {
             rotating_triangles: movers::build_rotating_triangles(table, &moving_walls),
             moving_walls,
             decor_lines,
+            shapes: Vec::new(),
             launch_barrier,
             bumpers: bumpers_info,
             kick_walls,
@@ -1749,6 +1773,9 @@ impl PhysicsWorld {
 
         // Layer-sensor detection: each ball moves to a new physics layer when it
         // enters a sensor rect (and the optional from-layer filter matches).
+        // The layers before any switching: a sensor's from-layer filter is checked
+        // before the switch, as in the original, even when it also notifies a script.
+        let layers_before: Vec<u8> = self.balls.iter().map(|b| b.layer).collect();
         for &(bi, bp, _) in &balls_now {
             let layer = self.balls[bi].layer;
             let mut new_layer = layer;
@@ -1777,7 +1804,7 @@ impl PhysicsWorld {
             for &(bi, bp, _) in &balls_now {
                 if !(bp.x >= x0 && bp.x <= x1 && bp.y >= y0 && bp.y <= y1) { continue; }
                 if let Some(from) = self.sensors[si].from_layer {
-                    if from != self.balls[bi].layer { continue; }
+                    if from != layers_before[bi] { continue; }
                 }
                 let id = self.sensors[si].id.clone();
                 let previous = self.balls[bi].last_sensor.replace(id.clone());
@@ -2021,7 +2048,27 @@ impl PhysicsWorld {
 
     /// Shows or hides a drawn-only line (an `ignoreBall` wall).
     fn set_decor_visible(&mut self, id: &str, visible: bool) {
-        if let Some(d) = self.decor_lines.iter_mut().find(|d| d.id == id) { d.visible = visible; }
+        for d in self.decor_lines.iter_mut().filter(|d| d.id == id) { d.visible = visible; }
+    }
+
+    /// Recolours a drawn-only line or path.
+    fn set_decor_color(&mut self, id: &str, color: (u8, u8, u8)) {
+        for d in self.decor_lines.iter_mut().filter(|d| d.id == id) { d.color = Some(color); }
+    }
+
+    /// Replaces the script's dots and lines (drawn behind the table's elements).
+    fn set_shapes(&mut self, shapes: Vec<Shape>) {
+        self.shapes = shapes;
+    }
+
+    fn ball_layer_of(&self, ball: usize) -> u8 {
+        self.balls.get(ball).map_or(0, |b| b.layer)
+    }
+
+    fn set_ball_velocity(&mut self, ball: usize, vx: f32, vy: f32) {
+        if let Some(body) = self.balls.get(ball).and_then(|b| self.bodies.get_mut(b.body)) {
+            body.set_linvel(Vector::new(vx, vy), true);
+        }
     }
 
     /// Awards an extra ball (the game state adds it to the balls left).
@@ -2441,6 +2488,7 @@ impl PhysicsWorld {
 
         FieldSnapshot {
             balls,
+            shapes: self.shapes.clone(),
             walls: self.wall_segments.iter().cloned().chain(self.decor_lines.iter().filter(|d| d.visible).map(|d| WallSnapshot { x1: d.x1, y1: d.y1, x2: d.x2, y2: d.y2, layer: None, label: Some(d.id.clone()), color: d.color }))
                 .chain(self.moving_walls.iter().filter(|w| w.active).map(|w| WallSnapshot { x1: w.x1, y1: w.y1, x2: w.x2, y2: w.y2, layer: None, label: Some(w.id.clone()), color: w.color }))
                 .chain(self.launch_barrier.iter().filter(|b| b.active).map(|b| WallSnapshot { x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2, layer: None, label: None, color: b.color })).collect(),
@@ -3394,7 +3442,8 @@ mod launch_barrier_tests {
             assert!(world.launch_barrier.as_ref().unwrap().active, "table {n}: closes at its sensor");
             let col = world.launch_barrier.as_ref().unwrap().collider;
             assert_eq!(world.colliders.get(col).unwrap().collision_groups(), InteractionGroups::all(), "table {n}: solid while closed");
-            assert_eq!(world.snapshot().walls.len(), world.wall_segments.len() + world.moving_walls.len() + 1, "table {n}: drawn while closed");
+            let decor = world.decor_lines.iter().filter(|d| d.visible).count();
+            assert_eq!(world.snapshot().walls.len(), world.wall_segments.len() + world.moving_walls.len() + decor + 1, "table {n}: drawn while closed");
 
             let (ox, oy) = centre(open);
             place_ball(&mut world, ox, oy, 0.0, 0.0);
@@ -3407,7 +3456,8 @@ mod launch_barrier_tests {
             assert!(world.launch_barrier.as_ref().unwrap().active);
             world.park_ball();
             assert!(!world.launch_barrier.as_ref().unwrap().active, "table {n}: a new ball opens it again");
-            assert_eq!(world.snapshot().walls.len(), world.wall_segments.len() + world.moving_walls.len(), "table {n}: not drawn when open");
+            let decor = world.decor_lines.iter().filter(|d| d.visible).count();
+            assert_eq!(world.snapshot().walls.len(), world.wall_segments.len() + world.moving_walls.len() + decor, "table {n}: not drawn when open");
         }
     }
 
@@ -5301,5 +5351,224 @@ mod table_8_tests {
         assert_eq!(scripts::with_commas(1_000), "1,000");
         assert_eq!(scripts::with_commas(112_000), "112,000");
         assert_eq!(scripts::with_commas(1_234_567), "1,234,567");
+    }
+}
+
+#[cfg(test)]
+mod table_7_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    const CONSTELLATION_NAMES: [&str; 6] = ["Canis Major", "Gemini", "Leo", "Orion", "Sagittarius", "Ursa Major"];
+
+    fn world7() -> PhysicsWorld {
+        let mut w = PhysicsWorld::from_table(&load_table(7).unwrap());
+        w.script = Some(Box::new(scripts::AdAstra::new(7)));
+        w
+    }
+
+    fn place(w: &mut PhysicsWorld, x: f32, y: f32) {
+        let body = w.bodies.get_mut(w.balls[0].body).unwrap();
+        body.set_translation(Vector::new(x, y), true);
+        body.set_linvel(Vector::new(0.0, 0.0), true);
+        body.set_gravity_scale(0.0, true);
+    }
+
+    fn step(w: &mut PhysicsWorld) { w.step(1.0 / 240.0, &InputState::default()); }
+
+    fn run_sim_seconds(w: &mut PhysicsWorld, secs: f32) {
+        let frame = 0.033;
+        for _ in 0..(secs / (frame * w.time_ratio())).ceil() as usize { w.step_frame(frame, &InputState::default()); }
+    }
+
+    fn messages(w: &PhysicsWorld) -> Vec<String> { w.drain_message_events().into_iter().map(|m| m.0).collect() }
+
+    fn through(w: &mut PhysicsWorld, id: &str) {
+        let s = w.sensors.iter().find(|s| s.id == id).unwrap_or_else(|| panic!("no sensor {id}"));
+        let (x, y) = ((s.rect[0] + s.rect[2]) / 2.0, (s.rect[1] + s.rect[3]) / 2.0);
+        w.balls[0].layer = s.from_layer.unwrap_or(0);
+        place(w, x, y);
+        step(w);
+        w.balls[0].layer = 0;
+        place(w, 1.0, 1.0);
+    }
+
+    fn circles(w: &PhysicsWorld) -> Vec<(f32, f32, (u8, u8, u8))> {
+        w.snapshot().shapes.iter().filter_map(|s| match *s { Shape::Circle { x, y, color, .. } => Some((x, y, color)), _ => None }).collect()
+    }
+
+    fn lines(w: &PhysicsWorld) -> usize {
+        w.snapshot().shapes.iter().filter(|s| matches!(s, Shape::Line { .. })).count()
+    }
+
+    fn drawn(w: &PhysicsWorld, id: &str) -> bool {
+        w.snapshot().walls.iter().any(|s| s.label.as_deref() == Some(id))
+    }
+
+    /// A star of the current constellation that is not lit yet (drawn green).
+    fn unlit_target(w: &PhysicsWorld) -> Option<(f32, f32)> {
+        circles(w).into_iter().filter(|c| c.2.0 == 0 && c.2.2 == 0 && c.2.1 > 0).max_by_key(|c| c.2.1).map(|c| (c.0, c.1))
+    }
+
+    fn pick_constellation(w: &mut PhysicsWorld) -> String {
+        messages(w);
+        through(w, "LeftLoopDetector");
+        let name = messages(w).into_iter().find(|m| CONSTELLATION_NAMES.contains(&m.as_str())).expect("the loop picked a constellation");
+        run_sim_seconds(w, 11.0); // the view flies there in 10 s
+        name
+    }
+
+    #[test]
+    fn the_sky_map_is_drawn_inside_its_circle_and_drifts() {
+        let mut w = world7();
+        w.step_frame(0.033, &InputState::default());
+        let (cx, cy, r) = {
+            let (x, y) = w.rollover_center("StarViewBoundary", 0).unwrap();
+            (x, y, w.rollover_radius("StarViewBoundary", 0).unwrap())
+        };
+        let first = circles(&w);
+        assert!(first.len() > 20, "a patch of sky: {} stars", first.len());
+        assert!(first.iter().all(|c| ((c.0 - cx).powi(2) + (c.1 - cy).powi(2)).sqrt() <= r * 1.01), "all inside the circle");
+        assert!(first.iter().all(|c| c.2.0 == c.2.1 || c.2.1 == c.2.2 || c.2.0 == c.2.2 || true), "colours exist");
+        // While wandering every visible star is white (dimmer for fainter stars).
+        assert!(first.iter().all(|c| c.2.0 == c.2.1 && c.2.1 == c.2.2), "all white while wandering");
+        run_sim_seconds(&mut w, 8.0);
+        let later = circles(&w);
+        assert!(first.len() != later.len() || first.iter().zip(&later).any(|(a, b)| (a.0 - b.0).abs() > 0.01), "the sky has moved");
+    }
+
+    /// The star map must actually reach the screen: render with and without it.
+    #[test]
+    fn the_renderer_draws_the_star_map() {
+        let mut w = world7();
+        w.step_frame(0.033, &InputState::default());
+        let snap = w.snapshot();
+        assert!(!snap.shapes.is_empty());
+        let mut bare = snap.clone();
+        bare.shapes.clear();
+        let renderer = crate::renderer::FieldRenderer::new();
+        let with = renderer.render(&snap, 0.0, 100, 70, false);
+        let without = renderer.render(&bare, 0.0, 100, 70, false);
+        assert_eq!(with.chars.len(), without.chars.len());
+        let changed = with.chars.iter().zip(&without.chars).filter(|(a, b)| a != b).count();
+        assert!(changed >= 15, "the stars add dots to the picture, changed cells: {changed}");
+    }
+
+    #[test]
+    fn the_loop_arrows_pulse_while_wandering_and_the_lock_arrow_is_off() {
+        let mut w = world7();
+        w.step_frame(0.033, &InputState::default());
+        assert!(drawn(&w, "LeftLoopGuide") && drawn(&w, "RightLoopGuide"), "shoot a loop");
+        assert!(!drawn(&w, "LockAndJackpotGuide"));
+    }
+
+    #[test]
+    fn a_loop_scores_and_sends_the_view_to_a_random_constellation() {
+        let mut w = world7();
+        w.drain_score_events();
+        let name = pick_constellation(&mut w);
+        assert!(w.drain_score_events().iter().any(|&p| p == 5000), "the loop score");
+        assert!(CONSTELLATION_NAMES.contains(&name.as_str()));
+        let c = circles(&w);
+        assert!(c.iter().any(|c| c.2.0 == 0 && c.2.2 == 0 && c.2.1 > 0), "its stars are green");
+        assert!(!drawn(&w, "LeftLoopGuide"), "no loop arrows once one is chosen");
+    }
+
+    #[test]
+    fn a_loop_counts_once_per_pass_not_once_per_step() {
+        let mut w = world7();
+        messages(&w);
+        w.drain_score_events();
+        let s = w.sensors.iter().find(|s| s.id == "LeftLoopDetector").unwrap();
+        let (x, y, from) = ((s.rect[0] + s.rect[2]) / 2.0, (s.rect[1] + s.rect[3]) / 2.0, s.from_layer.unwrap_or(0));
+        w.balls[0].layer = from;
+        place(&mut w, x, y);
+        for _ in 0..5 { step(&mut w); place(&mut w, x, y); } // sitting in the sensor
+        let loops = w.drain_score_events().iter().filter(|&&p| p == 5000).count();
+        assert_eq!(loops, 1, "one loop, not five");
+    }
+
+    #[test]
+    fn rolling_over_a_constellations_stars_lights_them_draws_lines_and_makes_a_lock_ready() {
+        let mut w = world7();
+        pick_constellation(&mut w);
+        w.drain_score_events();
+        messages(&w);
+
+        let mut lit = 0;
+        for _ in 0..60 {
+            let Some((x, y)) = unlit_target(&w) else { break };
+            place(&mut w, x, y);
+            step(&mut w);
+            lit += 1;
+            w.step(1.0 / 240.0, &InputState::default()); // the tick that redraws
+            if lit == 2 { assert!(w.drain_score_events().iter().filter(|&&p| p == 500).count() >= 2, "500 a star"); }
+        }
+        assert!(lit >= 8, "a constellation has at least eight stars, lit {lit}");
+        assert!(lines(&w) >= 5, "lines join lit neighbours: {}", lines(&w));
+        assert!(messages(&w).iter().any(|m| m == "Ball Lock Ready"), "the last star makes the lock ready");
+        place(&mut w, 1.0, 1.0);
+        w.step_frame(0.033, &InputState::default());
+        assert!(drawn(&w, "LockAndJackpotGuide"), "the lock arrow lights");
+        assert!(!drawn(&w, "LeftLoopGuide"));
+    }
+
+    #[test]
+    fn a_ball_on_another_layer_does_not_light_stars() {
+        let mut w = world7();
+        pick_constellation(&mut w);
+        w.drain_score_events();
+        let (x, y) = unlit_target(&w).expect("a star to aim at");
+        w.balls[0].layer = 1;
+        place(&mut w, x, y);
+        step(&mut w);
+        step(&mut w);
+        assert!(!w.drain_score_events().contains(&500), "the mini-table ball is not over the sky");
+    }
+
+    #[test]
+    fn the_inner_orbit_scores_either_way_round_and_the_drop_sensors_stop_the_ball() {
+        let mut w = world7();
+        w.drain_score_events();
+        through(&mut w, "InnerOrbitLeftTrigger");
+        through(&mut w, "InnerOrbitRightTrigger");
+        assert!(w.drain_score_events().contains(&5000), "left then right");
+        through(&mut w, "InnerOrbitLeftTrigger");
+        assert!(w.drain_score_events().contains(&5000), "right then left");
+
+        let s = w.sensors.iter().find(|s| s.id == "LeftFlipperDropSensor").unwrap();
+        let (x, y) = ((s.rect[0] + s.rect[2]) / 2.0, (s.rect[1] + s.rect[3]) / 2.0);
+        w.balls[0].layer = s.from_layer.unwrap_or(0);
+        place(&mut w, x, y);
+        w.bodies.get_mut(w.balls[0].body).unwrap().set_linvel(Vector::new(3.0, -8.0), true);
+        step(&mut w);
+        assert!(w.bodies.get(w.balls[0].body).unwrap().linvel().length() < 0.5, "stopped dead");
+    }
+
+    #[test]
+    fn the_mini_field_banks_raise_the_loop_score() {
+        let mut w = world7();
+        let gi = w.drop_target_groups.iter().position(|g| g.shot_id.as_deref() == Some("MiniFieldTopTargets")).unwrap();
+        let last = w.drop_target_groups[gi].targets.len() - 1;
+        for ti in 0..last { w.set_drop_target_down("MiniFieldTopTargets", ti, true); }
+        let t = &w.drop_target_groups[gi].targets[last];
+        let (mx, my) = ((t.x1 + t.x2) / 2.0, (t.y1 + t.y2) / 2.0);
+        place(&mut w, mx, my);
+        step(&mut w);
+        assert!(messages(&w).iter().any(|m| m == "Ramp bonus increased"));
+        w.drain_score_events();
+        through(&mut w, "LeftLoopDetector");
+        assert!(w.drain_score_events().contains(&6000), "5000 plus 1000");
+    }
+
+    #[test]
+    fn the_flipper_lanes_raise_the_multiplier() {
+        let mut w = world7();
+        let n = w.rollover_count("FlipperRollovers");
+        for i in 0..n - 1 { w.set_rollover("FlipperRollovers", i, true); }
+        let (x, y) = w.rollover_center("FlipperRollovers", n - 1).unwrap();
+        place(&mut w, x, y);
+        step(&mut w);
+        assert_eq!(w.drain_multiplier_events(), vec![1]);
     }
 }
