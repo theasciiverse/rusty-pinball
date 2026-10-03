@@ -625,7 +625,8 @@ impl TableScript for EyeOfHorus {
 // longer duration) and light their own rings. A ramp rollover starts the
 // bonus: for a while each bumper hit scores extra, and the bumpers glow from
 // red back down to blue as it runs out. A full meter and both banks done light
-// the multiball-ready ring; the multiball itself is round 2.
+// the multiball-ready ring; a ramp then starts multiball, during which the three
+// rings flash and ramps pay double, and the bonuses reset when it ends.
 // ---------------------------------------------------------------------------
 
 const BASE_BUMPER_SCORE: u64 = 500;
@@ -645,6 +646,9 @@ fn temperature_palette() -> Vec<Rgb> {
     p
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Multiball { Inactive, Pending, Active }
+
 struct Ringmaster {
     palette: Vec<Rgb>,
     bonus_active: bool,
@@ -654,6 +658,11 @@ struct Ringmaster {
     upper_groups: u32,
     lower_groups: u32,
     energy: f32,
+    multiball: Multiball,
+    /// The three indicator rings flash independently during multiball.
+    flash_values: [f32; 3],
+    flash_increments: [f32; 3],
+    seed: u32,
 }
 
 impl Ringmaster {
@@ -667,6 +676,41 @@ impl Ringmaster {
             upper_groups: 0,
             lower_groups: 0,
             energy: 0.0,
+            multiball: Multiball::Inactive,
+            flash_values: [0.0; 3],
+            flash_increments: [0.0; 3],
+            seed: clock_seed(),
+        }
+    }
+
+    fn random(&mut self) -> f32 {
+        self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (self.seed >> 8) as f32 / (1u32 << 24) as f32
+    }
+
+    /// Ready ring lit and no multiball running.
+    fn multiball_ready(&self, w: &PhysicsWorld) -> bool {
+        self.multiball == Multiball::Inactive && w.rollover_lit("BumperIndicator", 0)
+    }
+
+    /// Message, both savers back, balls launched at 1000 ms and 3500 ms while fewer
+    /// than three are in play, and the bonus upgraded one step beyond its usual maximum.
+    fn start_multiball(&mut self, w: &mut PhysicsWorld) {
+        w.show_message("Multiball!", 2000);
+        self.multiball = Multiball::Pending;
+        w.restore_ball_saver("BallSaver-left");
+        w.restore_ball_saver("BallSaver-right");
+        w.schedule(1000, LAUNCH_MULTIBALL_BALL);
+        w.schedule(3500, LAUNCH_MULTIBALL_BALL);
+        self.bonus_multiplier += 1.0;
+        self.bonus_duration += 1.0;
+    }
+
+    fn initialize_flashers(&mut self) {
+        // A cycle of between 2 and 5 seconds each.
+        for i in 0..3 {
+            self.flash_values[i] = 0.0;
+            self.flash_increments[i] = 0.2 + 0.3 * self.random();
         }
     }
 
@@ -712,16 +756,49 @@ impl TableScript for Ringmaster {
 
     fn ball_lost(&mut self, w: &mut PhysicsWorld) {
         self.end_bonus(w);
+        // This should normally be handled by tick.
+        if self.multiball == Multiball::Active {
+            self.reset_bonuses(w);
+            self.multiball = Multiball::Inactive;
+        }
     }
 
     fn tick(&mut self, w: &mut PhysicsWorld, dt: f32) {
-        if !self.bonus_active { return; }
-        self.bonus_elapsed += dt;
-        if self.bonus_elapsed >= self.bonus_duration {
-            self.end_bonus(w);
-        } else {
-            let remaining = 1.0 - self.bonus_elapsed / self.bonus_duration;
-            w.set_bumper_colors(Some(self.color_for_ratio(remaining)));
+        if self.bonus_active {
+            self.bonus_elapsed += dt;
+            if self.bonus_elapsed >= self.bonus_duration {
+                self.end_bonus(w);
+            } else {
+                let remaining = 1.0 - self.bonus_elapsed / self.bonus_duration;
+                w.set_bumper_colors(Some(self.color_for_ratio(remaining)));
+            }
+        }
+        if self.multiball == Multiball::Active {
+            if w.ball_count() <= 1 {
+                // Multiball over: everything starts again.
+                self.reset_bonuses(w);
+                self.multiball = Multiball::Inactive;
+            } else {
+                for i in 0..3 {
+                    let mut next = self.flash_values[i] + dt * self.flash_increments[i];
+                    if next > 2.0 { next -= 2.0; }
+                    self.flash_values[i] = next;
+                }
+                for (i, ring) in ["UpperTargetIndicator", "LowerTargetIndicator", "BumperIndicator"].into_iter().enumerate() {
+                    let color = self.color_for_ratio((self.flash_values[i] - 1.0).abs());
+                    w.set_rollover_color(ring, 0, Some(color));
+                }
+            }
+        }
+    }
+
+    fn scheduled(&mut self, w: &mut PhysicsWorld, token: u32) {
+        if token == LAUNCH_MULTIBALL_BALL {
+            if w.ball_count() < 3 { w.launch_extra_ball(); }
+            if self.multiball != Multiball::Active {
+                self.multiball = Multiball::Active;
+                self.initialize_flashers();
+            }
         }
     }
 
@@ -766,9 +843,12 @@ impl TableScript for Ringmaster {
 
     fn rollover_group_completed(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
         if id == "LeftRampRollover" || id == "RightRampRollover" {
-            // A ramp starts (or restarts) the bumper bonus. (Multiball: round 2.)
+            // A ramp starts (or restarts) the bumper bonus, and with the ready ring lit it
+            // starts multiball; a ramp during multiball pays the group's score again.
             self.bonus_active = true;
             self.bonus_elapsed = 0.0;
+            if self.multiball_ready(w) { self.start_multiball(w); }
+            if self.multiball == Multiball::Active { w.add_score(w.rollover_group_score(id)); }
         } else {
             w.set_all_rollovers(id, false);
             w.increment_multiplier();

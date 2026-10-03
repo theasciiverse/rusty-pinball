@@ -1958,6 +1958,11 @@ impl PhysicsWorld {
         self.rollover_groups.iter_mut().find(|g| g.shot_id.as_deref() == Some(id))
     }
 
+    /// The group's own `score` (table 3 pays it again for a ramp during multiball).
+    fn rollover_group_score(&self, id: &str) -> u64 {
+        self.rollover_group(id).map_or(0, |g| g.score)
+    }
+
     fn rollover_count(&self, id: &str) -> usize {
         self.rollover_group(id).map_or(0, |g| g.rollovers.len())
     }
@@ -5756,5 +5761,177 @@ mod rollover_radius_tests {
         place(&mut w, x + r - 0.05, y);
         w.step(1.0 / 240.0, &InputState::default());
         assert!(w.rollover_lit(&id, 0), "centre inside the radius: lit");
+    }
+}
+
+#[cfg(test)]
+mod table_3_multiball_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    fn world3() -> PhysicsWorld { PhysicsWorld::from_table(&load_table(3).unwrap()) }
+
+    fn place(w: &mut PhysicsWorld, x: f32, y: f32) {
+        let body = w.bodies.get_mut(w.balls[0].body).unwrap();
+        body.set_translation(Vector::new(x, y), true);
+        body.set_linvel(Vector::new(0.0, 0.0), true);
+        body.set_gravity_scale(0.0, true);
+    }
+
+    fn step(w: &mut PhysicsWorld) { w.step(1.0 / 240.0, &InputState::default()); }
+
+    fn run_sim_seconds(w: &mut PhysicsWorld, secs: f32) {
+        let frame = 0.033;
+        for _ in 0..(secs / (frame * w.time_ratio())).ceil() as usize { w.step_frame(frame, &InputState::default()); }
+    }
+
+    fn hit_bumper(w: &mut PhysicsWorld, i: usize) {
+        let (bx, by, br) = { let b = &w.bumpers[i]; (b.position[0], b.position[1], b.radius) };
+        let y = by + br + w.ball_radius + 0.01;
+        place(w, bx, y);
+        for _ in 0..12 { step(w); place(w, bx, y); }
+    }
+
+    fn clear_bank(w: &mut PhysicsWorld, id: &str) {
+        let gi = w.drop_target_groups.iter().position(|g| g.shot_id.as_deref() == Some(id)).unwrap();
+        for ti in 0..w.drop_target_groups[gi].targets.len() { w.set_drop_target_down(id, ti, false); }
+        w.drop_target_groups[gi].reset_timer = None;
+        let last = w.drop_target_groups[gi].targets.len() - 1;
+        for ti in 0..last { w.set_drop_target_down(id, ti, true); }
+        let t = &w.drop_target_groups[gi].targets[last];
+        let (mx, my) = ((t.x1 + t.x2) / 2.0, (t.y1 + t.y2) / 2.0);
+        place(w, mx, my);
+        step(w);
+    }
+
+    fn messages(w: &PhysicsWorld) -> Vec<String> { w.drain_message_events().into_iter().map(|m| m.0).collect() }
+
+    /// Meter full and both banks done: the ready ring is lit.
+    fn make_ready(w: &mut PhysicsWorld) {
+        for _ in 0..2 { clear_bank(w, "UpperMultiballTargets"); }
+        for _ in 0..5 { clear_bank(w, "LowerMultiballTargets"); }
+        for i in 0..200 { hit_bumper(w, i % 3); }
+        place(w, 1.0, 1.0);
+        assert!(w.rollover_lit("BumperIndicator", 0), "ready");
+    }
+
+    fn shoot_ramp(w: &mut PhysicsWorld) {
+        let (x, y) = w.rollover_center("LeftRampRollover", 0).unwrap();
+        place(w, x, y);
+        step(w);
+        place(w, 1.0, 1.0);
+    }
+
+    fn savers_active(w: &PhysicsWorld) -> bool {
+        w.kick_walls.iter().filter(|k| k.retract_when_hit).all(|k| k.active)
+    }
+
+    #[test]
+    fn a_ramp_with_the_ready_ring_lit_starts_a_multiball() {
+        let mut w = world3();
+        make_ready(&mut w);
+        for kw in &mut w.kick_walls { if kw.retract_when_hit { kw.active = false; } }
+        messages(&w);
+        shoot_ramp(&mut w);
+        assert!(messages(&w).iter().any(|m| m == "Multiball!"));
+        assert!(savers_active(&w), "both ball savers come back");
+        assert_eq!(w.ball_count(), 1, "the extra balls are not out yet");
+
+        run_sim_seconds(&mut w, 1.2);
+        assert_eq!(w.ball_count(), 2, "first extra ball at 1 s");
+        run_sim_seconds(&mut w, 2.6);
+        assert_eq!(w.ball_count(), 3, "second extra ball at 3.5 s");
+    }
+
+    #[test]
+    fn multiball_upgrades_the_bonus_one_step_past_its_usual_maximum() {
+        let mut w = world3();
+        make_ready(&mut w);
+        shoot_ramp(&mut w); // starts the bonus and the multiball
+        w.drain_score_events();
+        hit_bumper(&mut w, 0);
+        // The multiplier is 5 + 2 (banks) + 1 (multiball) = 8: 500 + about 4000.
+        let first = w.drain_score_events().into_iter().find(|&p| p >= 500).unwrap();
+        assert!((4400..=4500).contains(&first), "got {first}");
+    }
+
+    #[test]
+    fn without_the_ready_ring_a_ramp_is_only_a_bonus() {
+        let mut w = world3();
+        messages(&w);
+        shoot_ramp(&mut w);
+        run_sim_seconds(&mut w, 4.0);
+        assert_eq!(w.ball_count(), 1);
+        assert!(!messages(&w).iter().any(|m| m == "Multiball!"));
+    }
+
+    #[test]
+    fn the_three_rings_flash_independently_during_multiball() {
+        let mut w = world3();
+        make_ready(&mut w);
+        shoot_ramp(&mut w);
+        run_sim_seconds(&mut w, 4.0);
+        let ring = |w: &PhysicsWorld, id: &str| w.rollover_group(id).unwrap().rollovers[0].color;
+        let before = [ring(&w, "UpperTargetIndicator"), ring(&w, "LowerTargetIndicator"), ring(&w, "BumperIndicator")];
+        run_sim_seconds(&mut w, 2.0);
+        let after = [ring(&w, "UpperTargetIndicator"), ring(&w, "LowerTargetIndicator"), ring(&w, "BumperIndicator")];
+        assert_ne!(before, after, "the rings are animating");
+        assert!(before.iter().all(|c| c.is_some()));
+    }
+
+    #[test]
+    fn a_ramp_during_multiball_pays_the_groups_score_again() {
+        let mut w = world3();
+        make_ready(&mut w);
+        shoot_ramp(&mut w);
+        run_sim_seconds(&mut w, 4.0);
+        place(&mut w, 1.0, 1.0);
+        w.set_all_rollovers("LeftRampRollover", false);
+        let group_score = w.rollover_group_score("LeftRampRollover");
+        assert!(group_score > 0);
+        w.drain_score_events();
+        shoot_ramp(&mut w);
+        let paid = w.drain_score_events().iter().filter(|&&p| p == group_score).count();
+        assert_eq!(paid, 2, "once as the rollover's score, once as the multiball bonus");
+    }
+
+    #[test]
+    fn when_the_multiball_ends_everything_resets() {
+        let mut w = world3();
+        make_ready(&mut w);
+        shoot_ramp(&mut w);
+        run_sim_seconds(&mut w, 4.0);
+        assert_eq!(w.ball_count(), 3);
+        w.game_time += 100.0; // no multiball saver
+        for i in (1..3).rev() {
+            let body = w.bodies.get_mut(w.balls[i].body).unwrap();
+            body.set_translation(Vector::new(5.0, -2.0), true);
+        }
+        run_sim_seconds(&mut w, 0.5);
+        assert_eq!(w.ball_count(), 1);
+        run_sim_seconds(&mut w, 0.5);
+
+        assert!(!w.rollover_lit("BumperIndicator", 0), "the ready ring goes out");
+        assert_eq!(w.rollover_group("UpperTargetIndicator").unwrap().rollovers[0].color, w.rollover_group("UpperTargetIndicator").unwrap().rollovers[0].base_color, "ring colours restored");
+        // A fresh bonus is back to the base 5x: 500 + about 2500.
+        shoot_ramp(&mut w);
+        w.drain_score_events();
+        hit_bumper(&mut w, 0);
+        let first = w.drain_score_events().into_iter().find(|&p| p >= 500).unwrap();
+        assert!((2900..=3000).contains(&first), "back to the base bonus: {first}");
+        assert!(messages(&w).iter().filter(|m| *m == "Multiball!").count() <= 1, "no second multiball");
+    }
+
+    #[test]
+    fn losing_the_ball_during_multiball_resets_it_too() {
+        let mut w = world3();
+        make_ready(&mut w);
+        shoot_ramp(&mut w);
+        run_sim_seconds(&mut w, 4.0);
+        w.ball_lost();
+        assert!(!w.rollover_lit("BumperIndicator", 0));
+        w.park_ball();
+        shoot_ramp(&mut w);
+        assert_eq!(w.ball_count(), 1, "no multiball: the ring is not lit again");
     }
 }

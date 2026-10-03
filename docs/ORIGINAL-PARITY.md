@@ -100,6 +100,18 @@ Round 1 leaves out only what needs more than one ball: ball locks, multiball lau
 The multi-ball core and the script layer exist (tables 1 and 2 already have multiball). Round 2 adds, per table: tables 3, 4,
 5, 6, 7 multiball and locks, extra ball (table 5), the multiball saver, mercy ball, and the jackpots.
 
+### Round 2 status
+
+| Table | Multiball and what hangs off it | Status |
+|---|---|---|
+| 1 Classic | Extra-ball lights, ramp multiball | DONE |
+| 2 Round and Round | Extra-ball lights, centre bumper multiball | DONE |
+| 3 Ringmaster | Ready ring, ramp starts it, flashing rings, double ramps, reset | DONE |
+| 6 Orbiters | All planets on, jackpot | TODO |
+| 4 Compound Interest | Ball locks, status grid rows, multiball, jackpot | TODO |
+| 5 Eye of Horus | Pyramid, multiball (four colored balls), jackpot, extra-ball use | TODO |
+| 7 Ad Astra | Ball lock lane, layers, multiball, jackpot | TODO |
+
 ### Later
 
 C11 score animations, C12 game flow extras (mercy ball, stuck-ball bump, unlimited balls), C13 audio parity, C14 app features.
