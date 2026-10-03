@@ -16,6 +16,24 @@ use crate::table::{
 /// Reads a table JSON `color`/`outerColor` value (`[r,g,b]` or `[r,g,b,a]`,
 /// alpha ignored) into an RGB triple for the renderer. `None` means "no
 /// color was specified" — callers fall back to their element-type default.
+/// An `inactiveLayerColor` (RGBA) blended onto the black background, so the
+/// terminal gets an ordinary dim colour. None when it is fully transparent.
+fn parse_inactive_color(v: &Option<serde_json::Value>) -> Option<(u8, u8, u8)> {
+    let arr = v.as_ref()?.as_array()?;
+    let at = |i: usize| -> Option<u32> { arr.get(i)?.as_u64().map(|n| n as u32) };
+    let alpha = at(3).unwrap_or(255);
+    if alpha == 0 { return None; }
+    let (r, g, b) = (at(0)? * alpha / 255, at(1)? * alpha / 255, at(2)? * alpha / 255);
+    // At the original's alpha of 34 the result is nearly black, which a terminal
+    // shows as nothing at all: lift it to a minimum brightness, keeping the hue.
+    let brightest = r.max(g).max(b);
+    let lift = |c: u32| if brightest > 0 && brightest < MIN_FAINT_BRIGHTNESS { c * MIN_FAINT_BRIGHTNESS / brightest } else { c };
+    Some((lift(r) as u8, lift(g) as u8, lift(b) as u8))
+}
+
+/// The dimmest an inactive layer is drawn (its brightest channel), so it shows in a terminal.
+const MIN_FAINT_BRIGHTNESS: u32 = 60;
+
 fn parse_color(v: &Option<serde_json::Value>) -> Option<(u8, u8, u8)> {
     let arr = v.as_ref()?.as_array()?;
     let at = |i: usize| -> Option<u8> { arr.get(i)?.as_u64().map(|n| n as u8) };
@@ -74,6 +92,8 @@ pub struct WallSnapshot {
     /// Explicit color from the table JSON, if any. `None` = fall back to the
     /// renderer's layer-based default.
     pub color: Option<(u8, u8, u8)>,
+    /// How a layered wall is drawn while no ball is on its layer; None = not at all.
+    pub inactive: Option<(u8, u8, u8)>,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +116,8 @@ pub struct FlipperSnapshot {
     pub x1: f32, pub y1: f32,  // pivot end
     pub x2: f32, pub y2: f32,  // tip end
     pub label: String,
+    /// Set while the flipper's layer is idle (a faint outline); None = the usual colour.
+    pub color: Option<(u8, u8, u8)>,
 }
 
 #[derive(Debug, Clone)]
@@ -164,6 +186,7 @@ pub struct LetterGroupSnapshot {
 
 struct FlipperInfo {
     layer:        u8,
+    inactive:     Option<(u8, u8, u8)>,
     body_handle:  RigidBodyHandle,
     joint_handle: ImpulseJointHandle,
     pivot:        [f32; 2],
@@ -178,6 +201,7 @@ struct FlipperInfo {
 
 struct BumperInfo {
     layer: u8,
+    inactive: Option<(u8, u8, u8)>,
     // Colours a script put on the bumper at runtime (table 3's heat).
     color_override: Option<(u8, u8, u8)>,
     outer_override: Option<(u8, u8, u8)>,
@@ -326,6 +350,7 @@ struct DropTargetInfo {
 
 struct DropTargetGroupInfo {
     layer: u8,
+    inactive: Option<(u8, u8, u8)>,
     targets: Vec<DropTargetInfo>,
     // Sim seconds after the last target falls until all come back. Like the
     // original, a group with no reset (or 0) stays down once cleared.
@@ -354,6 +379,7 @@ struct RolloverInfo {
 
 struct RolloverGroupInfo {
     layer:            u8,
+    inactive:         Option<(u8, u8, u8)>,
     rollovers:        Vec<RolloverInfo>,
     score:            u64,   // group-level score: per-rollover fallback AND completion bonus
     cycle_on_flipper: bool,
@@ -822,7 +848,7 @@ impl PhysicsWorld {
             let h = bodies.insert(rb);
             let c = ColliderBuilder::cuboid(0.05, table.height / 2.0).build();
             colliders.insert_with_parent(c, h, &mut bodies);
-            wall_segs.push(WallSnapshot { x1: x, y1: 0.0, x2: x, y2: table.height, layer: None, label: None, color: None });
+            wall_segs.push(WallSnapshot { x1: x, y1: 0.0, x2: x, y2: table.height, layer: None, label: None, color: None, inactive: None });
             let _ = w; // suppress warning
         }
 
@@ -996,7 +1022,7 @@ impl PhysicsWorld {
             .collision_groups(groups)
             .build();
         let col_h = colliders.insert_with_parent(col, h, bodies);
-        segs.push(WallSnapshot { x1, y1, x2, y2, layer, label, color });
+        segs.push(WallSnapshot { x1, y1, x2, y2, layer, label, color, inactive: parse_inactive_color(&w.inactive_layer_color) });
         Some(col_h)
     }
 
@@ -1008,7 +1034,7 @@ impl PhysicsWorld {
                 position: Some([p0[0], p0[1], p1[0], p1[1]]),
                 id: None, color: None, kick: None, restitution: None,
                 kill: None, disabled: None, retract_when_hit: None, ignore_ball: None, score: None,
-                layer: None,
+                layer: None, inactive_layer_color: a.inactive_layer_color.clone(),
             };
             let seg_label = if i == 0 { Some(label.clone()) } else { None };
             let _ = Self::add_wall(&dummy_def, bodies, colliders, segs, a.layer, seg_label, color);
@@ -1023,7 +1049,7 @@ impl PhysicsWorld {
                 position: Some([pair[0][0], pair[0][1], pair[1][0], pair[1][1]]),
                 id: None, color: None, kick: None, restitution: None,
                 kill: None, disabled: None, retract_when_hit: None, ignore_ball: None, score: None,
-                layer: None,
+                layer: None, inactive_layer_color: p.inactive_layer_color.clone(),
             };
             let seg_label = if i == 0 { Some(label.clone()) } else { None };
             let _ = Self::add_wall(&dummy, bodies, colliders, segs, p.layer, seg_label, color);
@@ -1045,6 +1071,7 @@ impl PhysicsWorld {
 
         bumpers.push(BumperInfo {
             layer: b.layer.unwrap_or(0),
+            inactive: parse_inactive_color(&b.inactive_layer_color),
             color_override: None,
             outer_override: None,
             body: h,
@@ -1139,6 +1166,7 @@ impl PhysicsWorld {
 
         flippers.push(FlipperInfo {
             layer: f.layer.unwrap_or(0),
+            inactive: parse_inactive_color(&f.inactive_layer_color),
             body_handle: h,
             joint_handle: joint_h,
             pivot:       f.position,
@@ -1214,6 +1242,7 @@ impl PhysicsWorld {
         }).collect();
         DropTargetGroupInfo {
             layer: d.layer.unwrap_or(0),
+            inactive: parse_inactive_color(&d.inactive_layer_color),
             targets,
             reset_delay: d.reset.filter(|&r| r > 0.0),
             reset_timer: None,
@@ -1241,6 +1270,7 @@ impl PhysicsWorld {
         }).collect();
         RolloverGroupInfo {
             layer:            r.layer.unwrap_or(0),
+            inactive:         parse_inactive_color(&r.inactive_layer_color),
             rollovers,
             score:            group_score,
             cycle_on_flipper: r.cycle_on_flipper.unwrap_or(false),
@@ -2683,45 +2713,49 @@ impl PhysicsWorld {
             .collect();
         // Elements on another layer (table 7's mini table) show only while a ball is on it.
         let occupied_layers = self.balls.iter().fold(0u32, |m, b| m | (1u32 << b.layer.min(31)));
-        let shown = |layer: u8| layer == 0 || occupied_layers & (1u32 << layer.min(31)) != 0;
+        let on = |layer: u8| layer == 0 || occupied_layers & (1u32 << layer.min(31)) != 0;
+        // Elements of an idle layer show faintly in their inactive colour, or not at all without one.
+        let shown = |layer: u8, inactive: Option<(u8, u8, u8)>| on(layer) || inactive.is_some();
+        let faint = |layer: u8, inactive: Option<(u8, u8, u8)>| if on(layer) { None } else { inactive };
 
         // Read the tip position straight from the physics body's actual
         // transform (translation + rotation) rather than a separately
         // tracked angle, now that the flipper is a real dynamic body.
-        let flippers: Vec<FlipperSnapshot> = self.flippers.iter().filter(|fl| shown(fl.layer)).filter_map(|fl| {
+        let flippers: Vec<FlipperSnapshot> = self.flippers.iter().filter(|fl| shown(fl.layer, fl.inactive)).filter_map(|fl| {
             let body = self.bodies.get(fl.body_handle)?;
             let local_tip_x = if fl.is_right { -fl.half_len } else { fl.half_len };
             let tip = body.position() * Vector::new(local_tip_x, 0.0);
-            Some(FlipperSnapshot { x1: fl.pivot[0], y1: fl.pivot[1], x2: tip.x, y2: tip.y, label: fl.label.clone() })
+            Some(FlipperSnapshot { x1: fl.pivot[0], y1: fl.pivot[1], x2: tip.x, y2: tip.y, label: fl.label.clone(), color: faint(fl.layer, fl.inactive) })
         }).collect();
 
-        let bumpers = self.bumpers.iter().filter(|b| shown(b.layer)).map(|b| BumperSnapshot {
+        let bumpers = self.bumpers.iter().filter(|b| shown(b.layer, b.inactive)).map(|b| BumperSnapshot {
             x: b.position[0], y: b.position[1],
             radius: b.radius,
             outer_radius: b.outer_radius,
             lit: b.lit_ticks > 0,
             label: b.label.clone(),
-            color: b.color_override.or(b.color),
-            outer_color: b.outer_override.or(b.outer_color),
+            color: faint(b.layer, b.inactive).or(b.color_override).or(b.color),
+            outer_color: faint(b.layer, b.inactive).or(b.outer_override).or(b.outer_color),
             next_award: (!b.award_ladder.is_empty()).then(|| b.award_ladder[b.ladder_rung]),
         }).collect();
 
         let kick_walls = self.kick_walls.iter()
-            .filter(|kw| kw.active && kw.follows.is_none() && shown(kw.layer))
-            .map(|kw| WallSnapshot { x1: kw.x1, y1: kw.y1, x2: kw.x2, y2: kw.y2, layer: None, label: Some(kw.label.clone()), color: None })
+            .filter(|kw| kw.active && kw.follows.is_none() && on(kw.layer))
+            .map(|kw| WallSnapshot { x1: kw.x1, y1: kw.y1, x2: kw.x2, y2: kw.y2, layer: None, label: Some(kw.label.clone()), color: None, inactive: None })
             .collect();
 
-        let drop_targets: Vec<WallSnapshot> = self.drop_target_groups.iter().filter(|g| shown(g.layer))
+        let drop_targets: Vec<WallSnapshot> = self.drop_target_groups.iter().filter(|g| shown(g.layer, g.inactive))
             .flat_map(|g| g.targets.iter().enumerate().filter(|(_, t)| t.active)
-                .map(move |(i, t)| (g.label.clone(), g.color, i, t)))
+                .map(move |(i, t)| (g.label.clone(), faint(g.layer, g.inactive).or(g.color), i, t)))
             .map(|(glabel, color, i, t)| WallSnapshot {
                 x1: t.x1, y1: t.y1, x2: t.x2, y2: t.y2, layer: None,
                 label: Some(format!("{glabel}.{i}")),
                 color,
+                inactive: None,
             })
             .collect();
 
-        let rollover_groups = self.rollover_groups.iter().filter(|g| shown(g.layer)).map(|g| {
+        let rollover_groups = self.rollover_groups.iter().filter(|g| shown(g.layer, g.inactive)).map(|g| {
             // During the completion flash the renderer overrides all rollovers
             // to blink together.  4 phases: lit → unlit → lit → unlit → reset.
             let flash_override = if g.flash_ticks > 0 {
@@ -2731,12 +2765,13 @@ impl PhysicsWorld {
             } else {
                 None
             };
+            let idle = faint(g.layer, g.inactive).is_some();
             RolloverGroupSnapshot {
                 rollovers: g.rollovers.iter().enumerate().filter(|_| g.visible).map(|(i, rv)| RolloverSnapshot {
                     x: rv.x, y: rv.y, radius: rv.radius,
-                    lit: flash_override.unwrap_or(rv.lit),
+                    lit: !idle && flash_override.unwrap_or(rv.lit),
                     label: format!("{}.{}", g.label, i),
-                    color: rv.color,
+                    color: faint(g.layer, g.inactive).or(rv.color),
                 }).collect(),
             }
         }).collect();
@@ -2758,9 +2793,9 @@ impl PhysicsWorld {
         FieldSnapshot {
             balls,
             shapes: self.shapes.clone(),
-            walls: self.wall_segments.iter().cloned().chain(self.decor_lines.iter().filter(|d| d.visible).map(|d| WallSnapshot { x1: d.x1, y1: d.y1, x2: d.x2, y2: d.y2, layer: None, label: Some(d.id.clone()), color: d.color }))
-                .chain(self.moving_walls.iter().filter(|w| w.active).map(|w| WallSnapshot { x1: w.x1, y1: w.y1, x2: w.x2, y2: w.y2, layer: None, label: Some(w.id.clone()), color: w.color }))
-                .chain(self.launch_barrier.iter().filter(|b| b.active).map(|b| WallSnapshot { x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2, layer: None, label: None, color: b.color })).collect(),
+            walls: self.wall_segments.iter().cloned().chain(self.decor_lines.iter().filter(|d| d.visible).map(|d| WallSnapshot { x1: d.x1, y1: d.y1, x2: d.x2, y2: d.y2, layer: None, label: Some(d.id.clone()), color: d.color, inactive: None }))
+                .chain(self.moving_walls.iter().filter(|w| w.active).map(|w| WallSnapshot { x1: w.x1, y1: w.y1, x2: w.x2, y2: w.y2, layer: None, label: Some(w.id.clone()), color: w.color, inactive: None }))
+                .chain(self.launch_barrier.iter().filter(|b| b.active).map(|b| WallSnapshot { x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2, layer: None, label: None, color: b.color, inactive: None })).collect(),
             kick_walls,
             bumpers,
             flippers,
@@ -6781,12 +6816,14 @@ mod table_7_lock_tests {
         place(&mut w, x, y);
         for _ in 0..4 { step(&mut w); }
         assert!(!w.drain_score_events().contains(&1000), "a main-layer ball does not touch it");
-        assert!(w.snapshot().bumpers.iter().all(|s| (s.x - x).abs() > 0.01), "and it is not drawn");
+        let faint = w.snapshot().bumpers.iter().find(|s| (s.x - x).abs() < 0.01).and_then(|s| s.color).expect("drawn faintly");
+        assert!(faint.0.max(faint.1).max(faint.2) <= 60, "in its faint inactive colour: {faint:?}");
         w.set_ball_layer(0, 1);
         place(&mut w, x, y);
         for _ in 0..16 { step(&mut w); place(&mut w, x, y); }
         assert!(w.drain_score_events().contains(&1000), "a mini table ball does");
-        assert!(w.snapshot().bumpers.iter().any(|s| (s.x - x).abs() < 0.01), "and it is drawn");
+        let full = w.snapshot().bumpers.iter().find(|s| (s.x - x).abs() < 0.01).and_then(|s| s.color).expect("drawn");
+        assert!(full.0.max(full.1).max(full.2) > 100, "and in its full colour: {full:?}");
     }
 
     #[test]
@@ -7042,5 +7079,26 @@ mod engine_rule_tests {
         let without = renderer.render(&bare, 0.0, 100, 70, false);
         let changed = with.chars.iter().zip(&without.chars).filter(|(a, b)| a != b).count();
         assert!(changed >= 3, "the trail adds dots: {changed}");
+    }
+
+    #[test]
+    fn layers_without_a_ball_are_drawn_faintly_in_their_inactive_colour() {
+        let w = world(7);
+        let snap = w.snapshot();
+        let loops = snap.walls.iter().filter(|s| s.layer == Some(2) && s.inactive == Some((0, 60, 35))).count();
+        assert!(loops > 10, "the left orbit has its faint green outline: {loops}");
+        assert!(snap.walls.iter().all(|s| s.layer != Some(4) || s.inactive.map_or(true, |c| c != (0, 0, 0))),
+            "a fully transparent colour means hidden");
+        let renderer = crate::renderer::FieldRenderer::new();
+        let frame = renderer.render(&snap, 0.0, 100, 70, false);
+        let faint = |f: &crate::renderer::ColoredFrame| f.colors.iter().filter(|&&c| c == ratatui::style::Color::Rgb(0, 60, 35)).count();
+        let idle = faint(&frame);
+        assert!(idle > 20, "and the renderer draws it: {idle} cells");
+
+        // A ball on that layer draws it in its full colour instead (the right orbit stays faint).
+        let mut w = world(7);
+        w.set_ball_layer(0, 2);
+        let active = faint(&renderer.render(&w.snapshot(), 0.0, 100, 70, false));
+        assert!(active < idle, "the left orbit is no longer faint: {active} against {idle}");
     }
 }

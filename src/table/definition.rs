@@ -284,6 +284,11 @@ pub struct WallDef {
     /// None means universal — active on all layers.
     #[serde(default, deserialize_with = "de_layer_opt")]
     pub layer: Option<u8>,
+
+    /// RGBA the wall is drawn in while no ball is on its layer (the original's
+    /// faint outline of ramps and the mini table); without it the wall is hidden.
+    #[serde(rename = "inactiveLayerColor", default)]
+    pub inactive_layer_color: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -415,6 +420,8 @@ pub struct BumperDef {
     /// table is on layer 1.
     #[serde(default, deserialize_with = "de_layer_opt")]
     pub layer: Option<u8>,
+    #[serde(rename = "inactiveLayerColor", default)]
+    pub inactive_layer_color: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -446,6 +453,8 @@ pub struct FlipperDef {
 
     #[serde(default, deserialize_with = "de_layer_opt")]
     pub layer: Option<u8>,
+    #[serde(rename = "inactiveLayerColor", default)]
+    pub inactive_layer_color: Option<serde_json::Value>,
 }
 
 impl FlipperDef {
@@ -485,6 +494,8 @@ pub struct RolloverGroupDef {
 
     #[serde(default, deserialize_with = "de_layer_opt")]
     pub layer: Option<u8>,
+    #[serde(rename = "inactiveLayerColor", default)]
+    pub inactive_layer_color: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -537,6 +548,8 @@ pub struct DropTargetGroupDef {
 
     #[serde(default, deserialize_with = "de_layer_opt")]
     pub layer: Option<u8>,
+    #[serde(rename = "inactiveLayerColor", default)]
+    pub inactive_layer_color: Option<serde_json::Value>,
 }
 
 impl DropTargetGroupDef {

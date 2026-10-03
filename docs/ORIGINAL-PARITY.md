@@ -37,7 +37,7 @@ These are the building blocks. Most per-table gaps are "needs C1 + C3 + C4" and 
 | C5 | Element control | `setRetracted`, `setVisible`, `setNewColor`; rollover setters (set all, set by index, activate first, `setIgnoreBall`); movable rollover circles; drop target make-visible; spinner score |
 | C6 | Sensors by id | `ballInSensorRange` for every sensor, with each ball's most recent sensor id (ramp and orbit direction detection) |
 | C7 | Per-ball state | Ball primary and secondary colors (set at runtime), per-ball force hook (table 6 gravity wells) |
-| C8 | Full layer model | Layers as separate collision worlds, applied to bumpers, flippers, drop targets, rollovers, sensors; layer 0 is a layer, not "universal"; inactive-layer fade. **DONE except the inactive-layer fade** (an element with no layer is layer 0; a ball only touches and triggers elements of its own layer; layered pieces are drawn only while a ball is on that layer, where the original draws them faintly in `inactiveLayerColor`) |
+| C8 | Full layer model | Layers as separate collision worlds, applied to bumpers, flippers, drop targets, rollovers, sensors; layer 0 is a layer, not "universal"; inactive-layer fade. **DONE except the 250 ms fade** (an element with no layer is layer 0; a ball only touches and triggers elements of its own layer; pieces of an idle layer are drawn faintly in `inactiveLayerColor`, lifted to a minimum brightness so a terminal shows them, and hidden when the table gives none) |
 | C9 | Shape renderer | `setShapes`: arbitrary colored circles and lines each frame (table 7 star map) |
 | C10 | Multiplier and rollover rules | Fractional unbounded score multiplier; carry-over rules between balls; original rollover scoring (per rollover only, no completion bonus, no auto reset, `reset` timers, `toggleOff`) |
 | C11 | Score animations | Floating score text at the ball position, colored by value |
@@ -166,7 +166,7 @@ shrinking towards the tail); table 8's billiard ball decoration (drawn dimmed, n
 - One high score per table (original keeps the top 5 plus last score); one sound toggle (original also has music, speed, trails, zoom).
 - No unlimited-balls mode.
 - Tables without a script (only table 9, our own) still get the invented drop-bank clear bonus (2000) and rollover completion bonus.
-- Inactive layers are hidden, not faded in `inactiveLayerColor`; layer colours are a fixed table.
+- Inactive layers switch to their faint colour at once; the original fades between the two over 250 ms.
 - No 750 ms input lockout after a ball loss; no variable plunger (`plunger_ticks` exists but is unused).
 - **Documented exception:** tables 6 and 7 use `ballradius` 0.46 (original 0.5 and 0.49), set in commit `5b628f1` so the ball does not stick at the
   launch ramps. Checked on 2026-10-03 by 40 random launches per table with the original radii: only 5 of 40 balls (table 6) and 0 of 40

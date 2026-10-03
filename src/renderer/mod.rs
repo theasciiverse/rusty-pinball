@@ -137,8 +137,9 @@ impl FieldRenderer {
         for w in &snap.walls {
             let color = match w.layer {
                 None    => w.color.map(rgb).unwrap_or(COL_WALL),
-                Some(n) if snap.occupied_layers & (1u32 << n.min(31)) != 0 => COL_LAYER[n.min(4) as usize],
-                Some(_) => continue,  // inactive layer — not visible from below
+                Some(n) if snap.occupied_layers & (1u32 << n.min(31)) != 0 => w.color.map(rgb).unwrap_or(COL_LAYER[n.min(4) as usize]),
+                // Another layer: the original's faint outline, if the table gives one.
+                Some(_) => match w.inactive { Some(c) => rgb(c), None => continue },
             };
             draw_line(&mut pixels, &mut grid,
                 to_cx(w.x1), to_cy(w.y1), to_cx(w.x2), to_cy(w.y2),
@@ -211,7 +212,7 @@ impl FieldRenderer {
         for fl in &snap.flippers {
             draw_line(&mut pixels, &mut grid,
                 to_cx(fl.x1), to_cy(fl.y1), to_cx(fl.x2), to_cy(fl.y2),
-                COL_FLIPPER);
+                fl.color.map(rgb).unwrap_or(COL_FLIPPER));
             label_at(&mut labels, to_cx(fl.x1), to_cy(fl.y1), &fl.label);
         }
 
