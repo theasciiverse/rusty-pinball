@@ -24,6 +24,13 @@ pub(super) trait TableScript {
     /// Every step, before events: for motion and forces (table 5, table 6).
     fn tick(&mut self, _w: &mut PhysicsWorld, _dt: f32) {}
     /// `ball` is the index of the ball that caused the event.
+    /// Ids of plain walls this script raises and lowers with `set_wall_retracted`
+    /// (kick walls and the launch barrier need no listing).
+    fn scripted_walls(&self) -> &'static [&'static str] { &[] }
+    /// A new game's world has just been built.
+    fn game_started(&mut self, _w: &mut PhysicsWorld) {}
+    /// The ball in play was lost (before the next one is parked).
+    fn ball_lost(&mut self, _w: &mut PhysicsWorld) {}
     fn bumper_hit(&mut self, _w: &mut PhysicsWorld, _ball: usize, _id: &str) {}
     fn drop_bank_cleared(&mut self, _w: &mut PhysicsWorld, _ball: usize, _id: &str) {}
     /// A ball lit the last rollover of a group (not called for script-lit groups).
@@ -39,6 +46,7 @@ pub(super) fn script_for(table: &TableDef) -> Option<Box<dyn TableScript>> {
     match table.delegate.as_deref() {
         Some("Field1Delegate") => Some(Box::new(Classic)),
         Some("Field2Delegate") => Some(Box::new(RoundAndRound)),
+        Some("Field4Delegate") => Some(Box::new(CompoundInterest { bumper_multiplier_increase: 1 })),
         Some("Field6Delegate") => Some(Box::new(Orbiters::new(clock_seed()))),
         _ => None,
     }
@@ -379,6 +387,87 @@ impl TableScript for Orbiters {
                     w.set_ball_color(ball, Some(PLANET_BALL_COLORS[i]));
                 }
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Table 4: Compound Interest (Field4Delegate)
+//
+// Every bumper hit adds a percentage to the score multiplier and lights the
+// next light in its colour's column of the 6x3 status grid. The top drop bank
+// and the flipper lanes raise how much each hit adds; losing the ball resets
+// it. The ramp sensors raise and lower the ramp's blocker and kicker. The ball
+// locks, multiball and jackpot the grid leads to are round 2.
+// ---------------------------------------------------------------------------
+
+struct CompoundInterest {
+    /// Percent each bumper hit adds to the multiplier (starts at 1).
+    bumper_multiplier_increase: u32,
+}
+
+impl CompoundInterest {
+    fn raise_increase(&mut self, w: &mut PhysicsWorld, by: u32) {
+        self.bumper_multiplier_increase += by;
+        w.show_message(&format!("Bumper Multiplier {}%", self.bumper_multiplier_increase), 1500);
+    }
+}
+
+impl TableScript for CompoundInterest {
+    fn handles_rollovers(&self) -> bool { true }
+
+    fn scripted_walls(&self) -> &'static [&'static str] { &["TopRampBlocker"] }
+
+    fn game_started(&mut self, w: &mut PhysicsWorld) {
+        // The ramp's kicker starts out of the way; the launch barrier starts open.
+        w.set_wall_retracted("RightRampKicker", true);
+        w.set_wall_retracted("LaunchBarrier", true);
+    }
+
+    fn ball_lost(&mut self, _w: &mut PhysicsWorld) {
+        self.bumper_multiplier_increase = 1;
+    }
+
+    fn bumper_hit(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
+        let Some(color) = id.strip_prefix("Bumper.") else { return };
+        w.add_multiplier_percent(self.bumper_multiplier_increase as i32);
+        // The status grid row is the number of balls locked, which is 0 until
+        // the locks exist (round 2).
+        w.set_rollover(&format!("Rollovers.{color}"), 0, true);
+    }
+
+    fn drop_bank_cleared(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
+        announce_saver(w, "DropTargetLeftSave", "DropTargetRightSave", id);
+        if id == "DropTargetTop" {
+            self.raise_increase(w, 1);
+        }
+    }
+
+    fn rollover_group_completed(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
+        if id == "FlipperRollovers" {
+            self.raise_increase(w, 2);
+            w.set_all_rollovers(id, false);
+        }
+    }
+
+    fn sensor(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str, _previous: Option<&str>) {
+        match id {
+            "LaunchBarrierRetract" => w.set_wall_retracted("LaunchBarrier", true),
+            // Going up the ramp: close the lane behind the ball, open the blocker, extend the kicker.
+            "TopRampSensor" => {
+                w.set_wall_retracted("LaunchBarrier", false);
+                w.set_wall_retracted("TopRampBlocker", true);
+                w.set_wall_retracted("RightRampKicker", false);
+            }
+            "RightRampSensor" => {
+                w.set_wall_retracted("TopRampBlocker", false);
+                w.set_wall_retracted("RightRampKicker", true);
+            }
+            "AfterRampKickerSensor" => {
+                w.set_wall_retracted("TopRampBlocker", false);
+                w.set_wall_retracted("RightRampKicker", false);
+            }
+            _ => {}
         }
     }
 }

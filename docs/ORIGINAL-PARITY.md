@@ -90,7 +90,7 @@ Round 1 leaves out only what needs more than one ball: ball locks, multiball lau
 | 2 | Orbiting bumpers | DONE |
 | 5 | Rotating triangle | DONE. Colored-ball diagram, ramps, extra-ball barriers: TODO |
 | 6 | Orbiting planets, planet gravity, planet colors and activation, ramp detectors | DONE (all five planets on starts multiball, round 2) |
-| 4 | Status grid lit by bumpers, percent multiplier, ramp walls | TODO |
+| 4 | Status grid lit by bumpers, percent multiplier, ramp walls | DONE (locks, multiball, jackpot: round 2; the grid only lights row 1 until locks exist) |
 | 3 | Bumper bonus, indicator rings | TODO |
 | 8 | Insert lights, rack bonus, gates | TODO |
 | 7 | Star-map field, constellations | TODO |
@@ -184,15 +184,15 @@ The centre 6x3 grid is the multiball status display, not something the ball ligh
 
 | Behavior | Status |
 |---|---|
-| Six color columns `Rollovers.<Color>` x 3 rows, all `ignoreBall` in normal play. Each colored bumper (`Bumper.Red` and so on) lights the next light in its column (row = balls locked) | MISSING (C1, C5) |
+| Six color columns `Rollovers.<Color>` x 3 rows, all `ignoreBall` in normal play. Each colored bumper (`Bumper.Red` and so on) lights the next light in its column (row = balls locked) | DONE for row 1 (rows 2 and 3 come with locks, round 2) |
 | Whole row lit across all six colors: the matching lock rollover on the right (`LockedBallRollover1..3`) activates; message "Ball Lock Ready" / "Multiball Ready" | MISSING |
 | Roll into a lock rollover: the ball is removed without loss, a kicker un-retracts, "Ball N Locked" | MISSING (C2: `removeBallWithoutBallLoss`) |
 | Third lock: multiball (savers restored; `ignoreBall` turns off so the ball lights the grid; balls launched at +1000 and +3500 ms) | MISSING |
 | Light all 18 in multiball: jackpot `jackpot * 1000` points (25 000 first, +5 000 each time) and multiplier up by `jackpot` percent; grid clears | MISSING |
-| Every bumper hit adds `bumperMultiplierIncrease` percent to the score multiplier (starts 1; +1 per top drop bank clear; +2 per `FlipperRollovers` completion; reset each ball) | MISSING: needs a fractional multiplier (C10) |
-| Ramp logic: `TopRampSensor`, `RightRampSensor`, `AfterRampKickerSensor`, `TopRampBlocker`, `RightRampKicker` toggle walls so a ball takes the ramp | MISSING (C5, C6) |
-| Launch barrier (retract sensor only; also closed by `TopRampSensor`) | PARTIAL: opens/closes by the generic id rule, but the table's own enabling sensor differs |
-| Save banks and top bank | savers DONE; top bank multiplier step MISSING |
+| Every bumper hit adds `bumperMultiplierIncrease` percent to the score multiplier (starts 1; +1 per top drop bank clear; +2 per `FlipperRollovers` completion; reset each ball) | DONE (fractional multiplier shown as `x1.37`) |
+| Ramp logic: `TopRampSensor`, `RightRampSensor`, `AfterRampKickerSensor`, `TopRampBlocker`, `RightRampKicker` toggle walls so a ball takes the ramp | DONE |
+| Launch barrier (retract sensor only; also closed by `TopRampSensor`) | DONE |
+| Save banks and top bank | DONE |
 
 ### Table 5: Eye of Horus (`Field5Delegate`)
 

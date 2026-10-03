@@ -24,6 +24,9 @@ pub struct GameState {
     pub balls_remaining: u8,
     pub phase: Phase,
     pub multiplier: u32,
+    /// Percent added on top of the whole-number multiplier by table scripts (table 4
+    /// adds 1% per bumper hit); 137 here with `multiplier` 1 is a x2.37 multiplier.
+    pub bonus_percent: u32,
     /// Ticks (sync calls) left in the timed super mode; 0 = inactive.
     pub super_mode_ticks: u32,
     /// The message being shown to the player and the ticks (sync calls, ~30 Hz,
@@ -40,6 +43,7 @@ impl GameState {
             balls_remaining: ball_count,
             phase: Phase::WaitingToLaunch,
             multiplier: 1,
+            bonus_percent: 0,
             super_mode_ticks: 0,
             message: None,
         }
@@ -68,8 +72,21 @@ impl GameState {
         self.super_mode_ticks.div_ceil(SYNC_HZ)
     }
 
+    /// The whole multiplier in percent (100 = x1), with super mode doubling and
+    /// any bonus percent from table scripts.
+    pub fn multiplier_percent(&self) -> u32 {
+        (self.multiplier * 100 + self.bonus_percent) * if self.super_mode_ticks > 0 { SUPER_MODE_FACTOR } else { 1 }
+    }
+
+    /// "x3" for a whole multiplier, "x1.37" when a script has added a percentage.
+    pub fn multiplier_text(&self) -> String {
+        let pct = self.multiplier * 100 + self.bonus_percent;
+        if pct % 100 == 0 { format!("x{}", pct / 100) } else { format!("x{}.{:02}", pct / 100, pct % 100) }
+    }
+
     pub fn add_score(&mut self, points: u64) {
-        self.score += points * self.effective_multiplier() as u64;
+        // Rounded like the original's Math.round(points * multiplier).
+        self.score += (points * self.multiplier_percent() as u64 + 50) / 100;
         if self.score > self.high_score {
             self.high_score = self.score;
         }
@@ -86,6 +103,9 @@ impl GameState {
         }
 
         self.tick_message();
+        for pct in physics.drain_multiplier_percent_events() {
+            self.bonus_percent = self.bonus_percent.saturating_add_signed(pct);
+        }
         for delta in physics.drain_multiplier_events() {
             self.apply_multiplier_delta(delta);
             if delta > 0 {
@@ -113,6 +133,7 @@ impl GameState {
         // Multiplier and super mode are per-ball: a fresh ball always
         // starts back at ×1, mode off.
         self.multiplier = 1;
+        self.bonus_percent = 0;
         self.super_mode_ticks = 0;
     }
 
@@ -139,6 +160,27 @@ mod tests {
         game.show_message("first", 3000);
         game.show_message("second", 3000);
         assert_eq!(game.message.as_ref().map(|m| m.0.as_str()), Some("second"));
+    }
+
+    #[test]
+    fn a_percent_bonus_scales_scores_shows_as_a_fraction_and_resets_each_ball() {
+        let mut game = GameState::new(3);
+        assert_eq!(game.multiplier_text(), "x1");
+        game.bonus_percent = 37;
+        assert_eq!(game.multiplier_text(), "x1.37");
+        game.add_score(1000);
+        assert_eq!(game.score, 1370);
+        game.add_score(5); // 6.85 rounds to 7
+        assert_eq!(game.score, 1377);
+
+        game.multiplier = 3;
+        assert_eq!(game.multiplier_text(), "x3.37");
+        game.super_mode_ticks = 1;
+        assert_eq!(game.multiplier_percent(), 674, "super mode doubles the whole thing");
+
+        game.ball_drained();
+        assert_eq!((game.multiplier, game.bonus_percent), (1, 0));
+        assert_eq!(game.multiplier_text(), "x1");
     }
 
     #[test]

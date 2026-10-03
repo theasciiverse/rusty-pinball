@@ -482,6 +482,8 @@ pub struct PhysicsWorld {
     // Signed multiplier deltas (currently only ever positive) from
     // multiplier-step rollover groups completing.
     multiplier_events: RefCell<Vec<i32>>,
+    // Percent points a table script adds to the multiplier (table 4's bumpers).
+    multiplier_percent_events: RefCell<Vec<i32>>,
     // Count of "start (or restart) the timed super mode" triggers this step.
     super_mode_events: RefCell<u32>,
 
@@ -534,13 +536,18 @@ impl PhysicsWorld {
         let g = table.gravity_magnitude();
         let gravity = Vector::new(0.0_f32, -g);
 
+        // The table's script (if any) names walls it raises and lowers; those are
+        // registered as scripted walls instead of plain static ones.
+        let script = scripts::script_for(table);
+        let scripted_wall_ids: &[&str] = script.as_ref().map_or(&[], |sc| sc.scripted_walls());
+
         for (elem_idx, elem) in table.elements.iter().enumerate() {
             match elem {
                 ElementDef::WallElement(w) => {
                     let label = label_for(elem_idx, &w.id);
                     let wall_col = Self::add_wall(w, &mut bodies, &mut colliders, &mut wall_segs, w.layer, Some(label.clone()), parse_color(&w.color));
                     if let (Some(id), Some(col), Some([x1, y1, x2, y2])) = (w.id.as_deref(), wall_col, w.position) {
-                        if id.starts_with("TriangleWall") {
+                        if id.starts_with("TriangleWall") || scripted_wall_ids.contains(&id) {
                             if let Some(body) = colliders.get(col).and_then(|c| c.parent()) {
                                 wall_segs.pop();
                                 moving_walls.push(MovingWallInfo {
@@ -745,6 +752,7 @@ impl PhysicsWorld {
             score_events: RefCell::new(Vec::new()),
             sound_events: RefCell::new(Vec::new()),
             multiplier_events: RefCell::new(Vec::new()),
+            multiplier_percent_events: RefCell::new(Vec::new()),
             super_mode_events: RefCell::new(0),
             drain_y: 1.0,
             field_width:  table.width,
@@ -758,7 +766,7 @@ impl PhysicsWorld {
             gate_cleared: false,
             gate_ball,
             relaunch_needed: false,
-            script: scripts::script_for(table),
+            script,
             scheduled: Vec::new(),
             script_events: Vec::new(),
             message_events: RefCell::new(Vec::new()),
@@ -767,6 +775,10 @@ impl PhysicsWorld {
         // as the original does on its first tick, so nothing jumps on frame one.
         movers::advance_rotating_groups(&mut world.rotating_groups, 0.0, &mut world.bumpers, &mut world.bodies);
         movers::advance_rotating_triangles(&mut world.rotating_triangles, 0.0, &mut world.moving_walls, &mut world.bodies);
+        if let Some(mut script) = world.script.take() {
+            script.game_started(&mut world);
+            world.script = Some(script);
+        }
         world
     }
 
@@ -1797,6 +1809,49 @@ impl PhysicsWorld {
         }
     }
 
+    /// The ball in play was lost (call before `park_ball`): tells the table script.
+    pub fn ball_lost(&mut self) {
+        if let Some(mut script) = self.script.take() {
+            script.ball_lost(self);
+            self.script = Some(script);
+        }
+    }
+
+    /// Retracts or extends a wall by id: a kick wall, a scripted wall or the
+    /// launch barrier. A retracted wall is neither solid nor drawn.
+    fn set_wall_retracted(&mut self, id: &str, retracted: bool) {
+        let groups = if retracted { InteractionGroups::none() } else { InteractionGroups::all() };
+        if let Some(kw) = self.kick_walls.iter_mut().find(|k| k.shot_id.as_deref() == Some(id)) {
+            kw.active = !retracted;
+            kw.retract_pending = false;
+            if let Some(col) = self.colliders.get_mut(kw.collider_handle) { col.set_collision_groups(groups); }
+            return;
+        }
+        if let Some(mw) = self.moving_walls.iter_mut().find(|m| m.id == id) {
+            mw.active = !retracted;
+            if let Some(col) = self.colliders.get_mut(mw.collider) { col.set_collision_groups(groups); }
+            return;
+        }
+        if id == LAUNCH_BARRIER_ID {
+            if let Some(b) = &mut self.launch_barrier {
+                b.active = !retracted;
+                if let Some(col) = self.colliders.get_mut(b.collider) { col.set_collision_groups(groups); }
+            }
+        }
+    }
+
+    fn wall_retracted(&self, id: &str) -> Option<bool> {
+        if let Some(kw) = self.kick_walls.iter().find(|k| k.shot_id.as_deref() == Some(id)) { return Some(!kw.active); }
+        if let Some(mw) = self.moving_walls.iter().find(|m| m.id == id) { return Some(!mw.active); }
+        if id == LAUNCH_BARRIER_ID { return self.launch_barrier.as_ref().map(|b| !b.active); }
+        None
+    }
+
+    /// Adds `percent` points to the score multiplier (1 = +0.01x).
+    fn add_multiplier_percent(&self, percent: i32) {
+        self.multiplier_percent_events.borrow_mut().push(percent);
+    }
+
     /// Adds points (the game state applies the score multiplier).
     fn add_score(&self, points: u64) {
         self.score_events.borrow_mut().push(points);
@@ -1846,6 +1901,10 @@ impl PhysicsWorld {
         if let Some(r) = self.rollover_group_mut(id).and_then(|g| g.rollovers.get_mut(index)) {
             r.color = color;
         }
+    }
+
+    pub fn drain_multiplier_percent_events(&self) -> Vec<i32> {
+        self.multiplier_percent_events.borrow_mut().drain(..).collect()
     }
 
     /// Messages the player should see, with their durations in ms.
@@ -3285,10 +3344,13 @@ mod rotating_triangle_tests {
     }
 
     #[test]
-    fn other_tables_have_no_moving_walls() {
+    fn other_tables_have_no_rotating_triangle_and_only_scripted_walls() {
         for n in [1u8, 2, 3, 4, 6, 7, 8, 9] {
             let w = PhysicsWorld::from_table(&load_table(n).unwrap());
-            assert!(w.rotating_triangles.is_empty() && w.moving_walls.is_empty(), "table {n}");
+            assert!(w.rotating_triangles.is_empty(), "table {n}");
+            let ids: Vec<&str> = w.moving_walls.iter().map(|m| m.id.as_str()).collect();
+            let expected: &[&str] = if n == 4 { &["TopRampBlocker"] } else { &[] };
+            assert_eq!(ids, expected, "table {n}");
         }
     }
 }
@@ -3731,9 +3793,9 @@ mod script_tests {
 
     #[test]
     fn a_table_without_a_script_keeps_the_generic_completion() {
-        let (_, mut world) = world_for(4); // no script for Field4Delegate yet
+        let (_, mut world) = world_for(9); // Party Land is our own design: no original script, ever
         assert!(world.script.is_none());
-        let id = world.rollover_groups.iter().find(|g| g.cycle_on_flipper).and_then(|g| g.shot_id.clone()).unwrap();
+        let id = "PukeRollovers".to_string();
         let n = world.rollover_count(&id);
         for i in 0..n - 1 { world.set_rollover(&id, i, true); }
         let (x, y) = rollover_pos(&world, &id, n - 1);
@@ -4220,5 +4282,142 @@ mod table_6_tests {
         place(&mut world, x, y);
         world.step(1.0 / 240.0, &InputState::default());
         assert_eq!(world.drain_multiplier_events(), vec![1]);
+    }
+}
+
+#[cfg(test)]
+mod table_4_tests {
+    use super::*;
+    use crate::game::GameState;
+    use crate::table::load_table;
+
+    fn world4() -> PhysicsWorld { PhysicsWorld::from_table(&load_table(4).unwrap()) }
+
+    fn place(w: &mut PhysicsWorld, x: f32, y: f32) {
+        let body = w.bodies.get_mut(w.balls[0].body).unwrap();
+        body.set_translation(Vector::new(x, y), true);
+        body.set_linvel(Vector::new(0.0, 0.0), true);
+        body.set_gravity_scale(0.0, true);
+    }
+
+    fn touch_bumper(w: &mut PhysicsWorld, id: &str) {
+        let (bx, by, br) = {
+            let b = w.bumpers.iter().find(|b| b.shot_id.as_deref() == Some(id)).unwrap_or_else(|| panic!("no bumper {id}"));
+            (b.position[0], b.position[1], b.radius)
+        };
+        let y = by + br + w.ball_radius + 0.01;
+        place(w, bx, y);
+        // Let the 12 substep bumper debounce lapse so back-to-back calls each count.
+        for _ in 0..16 { w.step(1.0 / 240.0, &InputState::default()); place(w, bx, y); }
+    }
+
+    fn lit(w: &PhysicsWorld, id: &str) -> Vec<bool> { w.rollover_group(id).unwrap().rollovers.iter().map(|r| r.lit).collect() }
+    fn messages(w: &PhysicsWorld) -> Vec<String> { w.drain_message_events().into_iter().map(|m| m.0).collect() }
+
+    #[test]
+    fn a_coloured_bumper_adds_a_percent_and_lights_its_columns_first_light() {
+        let mut world = world4();
+        let before = world.drain_multiplier_percent_events().len();
+        assert_eq!(before, 0);
+        touch_bumper(&mut world, "Bumper.Red");
+        let events = world.drain_multiplier_percent_events();
+        assert!(!events.is_empty() && events.iter().all(|&p| p == 1), "each hit is +1%: {events:?}");
+        assert_eq!(lit(&world, "Rollovers.Red"), vec![true, false, false]);
+        assert_eq!(lit(&world, "Rollovers.Blue"), vec![false, false, false], "other colours untouched");
+    }
+
+    #[test]
+    fn the_top_bank_and_flipper_lanes_raise_what_a_hit_adds_and_losing_the_ball_resets_it() {
+        let mut world = world4();
+        touch_bumper(&mut world, "Bumper.Green");
+        world.drain_multiplier_percent_events();
+        messages(&world);
+
+        // Top bank cleared: +1 per hit, so 2.
+        world.script.as_mut().unwrap(); // the table has a script
+        let gi = world.drop_target_groups.iter().position(|g| g.shot_id.as_deref() == Some("DropTargetTop")).unwrap();
+        let last = world.drop_target_groups[gi].targets.len() - 1;
+        for ti in 0..last {
+            world.drop_target_groups[gi].targets[ti].active = false;
+            let ch = world.drop_target_groups[gi].targets[ti].collider;
+            world.colliders.get_mut(ch).unwrap().set_collision_groups(InteractionGroups::none());
+        }
+        let t = &world.drop_target_groups[gi].targets[last];
+        let (mx, my) = ((t.x1 + t.x2) / 2.0, (t.y1 + t.y2) / 2.0);
+        place(&mut world, mx, my);
+        world.step_frame(0.033, &InputState::default());
+        assert!(messages(&world).iter().any(|m| m == "Bumper Multiplier 2%"));
+        touch_bumper(&mut world, "Bumper.Cyan");
+        assert!(world.drain_multiplier_percent_events().iter().all(|&p| p == 2), "now +2% per hit");
+
+        // Flipper lanes completed: +2 more, so 4.
+        let n = world.rollover_count("FlipperRollovers");
+        for i in 0..n - 1 { world.set_rollover("FlipperRollovers", i, true); }
+        let (x, y) = world.rollover_center("FlipperRollovers", n - 1).unwrap();
+        place(&mut world, x, y);
+        world.step(1.0 / 240.0, &InputState::default());
+        assert!(messages(&world).iter().any(|m| m == "Bumper Multiplier 4%"));
+        assert!(lit(&world, "FlipperRollovers").iter().all(|&l| !l), "the lanes clear");
+
+        world.ball_lost();
+        touch_bumper(&mut world, "Bumper.Yellow");
+        assert!(world.drain_multiplier_percent_events().iter().all(|&p| p == 1), "a lost ball resets it to 1");
+    }
+
+    /// Through the game state: percent adds up and shows as a fraction.
+    #[test]
+    fn bumper_hits_build_a_fractional_multiplier_in_the_game() {
+        let mut world = world4();
+        let mut game = GameState::new(3);
+        for color in ["Red", "Blue", "Green", "Cyan", "Yellow"] {
+            touch_bumper(&mut world, &format!("Bumper.{color}"));
+            game.sync(&world);
+        }
+        assert!(game.bonus_percent >= 5, "at least one percent per bumper, got {}", game.bonus_percent);
+        assert_eq!(game.multiplier, 1);
+        assert!(game.multiplier_text().starts_with("x1."), "{}", game.multiplier_text());
+    }
+
+    fn through(w: &mut PhysicsWorld, id: &str) {
+        let s = w.sensors.iter().find(|s| s.id == id).unwrap();
+        let (x, y) = ((s.rect[0] + s.rect[2]) / 2.0, (s.rect[1] + s.rect[3]) / 2.0);
+        place(w, x, y);
+        w.step(1.0 / 240.0, &InputState::default());
+    }
+
+    #[test]
+    fn the_ramp_sensors_raise_and_lower_the_blocker_and_kicker() {
+        let mut world = world4();
+        assert_eq!(world.wall_retracted("RightRampKicker"), Some(true), "the kicker starts out of the way");
+        assert_eq!(world.wall_retracted("TopRampBlocker"), Some(false), "the blocker starts in place");
+
+        through(&mut world, "TopRampSensor");
+        assert_eq!(world.wall_retracted("TopRampBlocker"), Some(true), "up the ramp: blocker out of the way");
+        assert_eq!(world.wall_retracted("RightRampKicker"), Some(false), "kicker in place");
+        assert_eq!(world.wall_retracted("LaunchBarrier"), Some(false), "and the lane closes behind the ball");
+
+        through(&mut world, "RightRampSensor");
+        assert_eq!(world.wall_retracted("TopRampBlocker"), Some(false));
+        assert_eq!(world.wall_retracted("RightRampKicker"), Some(true));
+
+        through(&mut world, "AfterRampKickerSensor");
+        assert_eq!(world.wall_retracted("TopRampBlocker"), Some(false));
+        assert_eq!(world.wall_retracted("RightRampKicker"), Some(false));
+
+        through(&mut world, "LaunchBarrierRetract");
+        assert_eq!(world.wall_retracted("LaunchBarrier"), Some(true));
+    }
+
+    #[test]
+    fn a_retracted_scripted_wall_is_neither_solid_nor_drawn() {
+        let mut world = world4();
+        let drawn = |w: &PhysicsWorld| w.snapshot().walls.iter().any(|s| s.label.as_deref().map_or(false, |l| l.contains("TopRampBlocker")));
+        assert!(drawn(&world));
+        world.set_wall_retracted("TopRampBlocker", true);
+        assert!(!drawn(&world));
+        let col = world.moving_walls.iter().find(|m| m.id == "TopRampBlocker").unwrap().collider;
+        assert_eq!(world.colliders.get(col).unwrap().collision_groups(), InteractionGroups::none());
+        world.set_wall_retracted("TopRampBlocker", false);
+        assert!(drawn(&world));
     }
 }

@@ -279,7 +279,7 @@ impl App {
 
             let events: Vec<_> = physics.drain_sound_events().into_iter().collect();
             let drained = prev_phase == Phase::Playing && game.phase != Phase::Playing;
-            if drained { physics.park_ball(); }
+            if drained { physics.ball_lost(); physics.park_ball(); }
             (events, drained)
         } else {
             return;

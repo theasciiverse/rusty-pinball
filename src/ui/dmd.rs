@@ -74,7 +74,7 @@ pub fn draw_dmd(frame: &mut Frame, area: Rect, game: &GameState, snap: &FieldSna
             format!("SUPER {}s", game.super_mode_seconds_remaining()),
             Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
         ),
-        crate::game::Phase::Playing         => Span::styled(format!("×{}", game.multiplier), score_style),
+        crate::game::Phase::Playing         => Span::styled(game.multiplier_text().replacen('x', "×", 1), score_style),
         crate::game::Phase::BallLost        => Span::styled("BALL LOST  SPACE", Style::default().fg(Color::Red)),
         crate::game::Phase::GameOver        => Span::styled("GAME OVER  SPACE", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
     };
