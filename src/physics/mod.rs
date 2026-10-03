@@ -189,6 +189,9 @@ struct KickWallInfo {
     // Rapier collider handle — used for collision-event-based kick detection.
     collider_handle: ColliderHandle,
     shot_id: Option<String>,
+    // A kick wall on a wall that moves (table 5's triangle) follows it: its ends
+    // and normal are updated each step and it is drawn as the moving wall.
+    follows: Option<usize>,
 }
 
 /// The wall that closes the shooter lane's exit behind the ball so it can't
@@ -546,10 +549,12 @@ impl PhysicsWorld {
                 ElementDef::WallElement(w) => {
                     let label = label_for(elem_idx, &w.id);
                     let wall_col = Self::add_wall(w, &mut bodies, &mut colliders, &mut wall_segs, w.layer, Some(label.clone()), parse_color(&w.color));
+                    let mut moving_index: Option<usize> = None;
                     if let (Some(id), Some(col), Some([x1, y1, x2, y2])) = (w.id.as_deref(), wall_col, w.position) {
                         if id.starts_with("TriangleWall") || scripted_wall_ids.contains(&id) {
                             if let Some(body) = colliders.get(col).and_then(|c| c.parent()) {
                                 wall_segs.pop();
+                                moving_index = Some(moving_walls.len());
                                 moving_walls.push(MovingWallInfo {
                                     id: id.to_string(), body, collider: col,
                                     x1, y1, x2, y2, color: parse_color(&w.color), active: true,
@@ -603,10 +608,13 @@ impl PhysicsWorld {
                                 interior_normal,
                                 collider_handle: col,
                                 shot_id: w.id.clone(),
+                                follows: moving_index,
                             });
                             // Kick walls are rendered via the kick_walls path only;
-                            // remove the segment add_wall just pushed to wall_segs.
-                            wall_segs.pop();
+                            // remove the segment add_wall just pushed to wall_segs
+                            // (a wall that moves was already taken out above, and is
+                            // drawn from its live position).
+                            if moving_index.is_none() { wall_segs.pop(); }
                         }
                     }
                 }
@@ -1299,6 +1307,20 @@ impl PhysicsWorld {
             }
         }
 
+        // Kick walls on moving walls follow them (position and which way they push).
+        for k in 0..self.kick_walls.len() {
+            let Some(mi) = self.kick_walls[k].follows else { continue };
+            let (x1, y1, x2, y2) = { let m = &self.moving_walls[mi]; (m.x1, m.y1, m.x2, m.y2) };
+            let (dx, dy) = (x2 - x1, y2 - y1);
+            let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+            let (nx, ny) = (dy / len, -dx / len);
+            let (mx, my) = ((x1 + x2) / 2.0, (y1 + y2) / 2.0);
+            let (fcx, fcy) = (self.field_width / 2.0, self.field_height / 2.0);
+            let kw = &mut self.kick_walls[k];
+            kw.x1 = x1; kw.y1 = y1; kw.x2 = x2; kw.y2 = y2;
+            kw.interior_normal = if (fcx - mx) * nx + (fcy - my) * ny >= 0.0 { [nx, ny] } else { [-nx, -ny] };
+        }
+
         // Bumper proximity detection: collect hits, then apply kicks + score
         {
             let mut hits: Vec<(usize, usize, f32, f32)> = Vec::new(); // (bumper, ball, nx, ny)
@@ -1376,7 +1398,15 @@ impl PhysicsWorld {
                         if hits.iter().any(|h| h.0 == i) { continue; }
                         let (dist, _, _) = Self::point_to_segment_dist(bp.x, bp.y, kw.x1, kw.y1, kw.x2, kw.y2);
                         if dist < self.ball_radius + KICK_WALL_TOUCH_MARGIN {
-                            hits.push((i, bi, kw.interior_normal[0], kw.interior_normal[1]));
+                            // Push toward the side the ball is on, like the original
+                            // (the interior normal is only the fallback when the ball
+                            // is exactly on the wall's line).
+                            let (dx, dy) = (kw.x2 - kw.x1, kw.y2 - kw.y1);
+                            let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+                            let (nx, ny) = (dy / len, -dx / len);
+                            let side = (bp.x - kw.x1) * nx + (bp.y - kw.y1) * ny;
+                            let (nx, ny) = if side > 1e-4 { (nx, ny) } else if side < -1e-4 { (-nx, -ny) } else { (kw.interior_normal[0], kw.interior_normal[1]) };
+                            hits.push((i, bi, nx, ny));
                         }
                     }
                 }
@@ -1824,7 +1854,9 @@ impl PhysicsWorld {
         if let Some(kw) = self.kick_walls.iter_mut().find(|k| k.shot_id.as_deref() == Some(id)) {
             kw.active = !retracted;
             kw.retract_pending = false;
+            let follows = kw.follows;
             if let Some(col) = self.colliders.get_mut(kw.collider_handle) { col.set_collision_groups(groups); }
+            if let Some(mi) = follows { self.moving_walls[mi].active = !retracted; }
             return;
         }
         if let Some(mw) = self.moving_walls.iter_mut().find(|m| m.id == id) {
@@ -2195,7 +2227,7 @@ impl PhysicsWorld {
         }).collect();
 
         let kick_walls = self.kick_walls.iter()
-            .filter(|kw| kw.active)
+            .filter(|kw| kw.active && kw.follows.is_none())
             .map(|kw| WallSnapshot { x1: kw.x1, y1: kw.y1, x2: kw.x2, y2: kw.y2, layer: None, label: Some(kw.label.clone()), color: None })
             .collect();
 
@@ -4419,5 +4451,85 @@ mod table_4_tests {
         assert_eq!(world.colliders.get(col).unwrap().collision_groups(), InteractionGroups::none());
         world.set_wall_retracted("TopRampBlocker", false);
         assert!(drawn(&world));
+    }
+}
+
+#[cfg(test)]
+mod table_5_triangle_kick_tests {
+    use super::*;
+    use crate::table::{load_table, ElementDef};
+
+    /// Every plain wall must be drawn (the triangle's kick registration must not
+    /// remove some other wall's segment), and the triangle must be drawn once.
+    #[test]
+    fn plain_walls_are_all_drawn_and_the_triangle_is_drawn_once() {
+        let table = load_table(5).unwrap();
+        let world = PhysicsWorld::from_table(&table);
+        for (i, e) in table.elements.iter().enumerate() {
+            let ElementDef::WallElement(w) = e else { continue };
+            let plain = w.kick.is_none() && w.disabled != Some(true) && w.kill != Some(true)
+                && w.ignore_ball != Some(true) && w.id.as_deref().map_or(true, |id| !id.starts_with("TriangleWall"));
+            if !plain { continue; }
+            let label = i.to_string();
+            let drawn = world.wall_segments.iter().any(|s| s.label.as_deref().map_or(false, |l| l == label || l.starts_with(&format!("{i}:"))));
+            assert!(drawn, "wall element {i} ({:?}) is missing from the drawn walls", w.id);
+        }
+        let snap = world.snapshot();
+        let triangle = |ws: &Vec<WallSnapshot>| ws.iter().filter(|s| s.label.as_deref().map_or(false, |l| l.contains("TriangleWall"))).count();
+        assert_eq!(triangle(&snap.walls), 3, "the live triangle is drawn");
+        assert_eq!(triangle(&snap.kick_walls), 0, "and not a second, static one as a kick wall");
+    }
+
+    /// The triangle's kick follows the walls as they turn.
+    #[test]
+    fn the_triangles_kick_follows_the_rotating_walls() {
+        let table = load_table(5).unwrap();
+        let mut world = PhysicsWorld::from_table(&table);
+        for _ in 0..40 { world.step_frame(0.033, &InputState::default()); }
+        for id in ["TriangleWall1", "TriangleWall2", "TriangleWall3"] {
+            let m = world.moving_walls.iter().find(|m| m.id == id).unwrap();
+            let kw = world.kick_walls.iter().find(|k| k.shot_id.as_deref() == Some(id)).unwrap_or_else(|| panic!("{id} has a kick"));
+            let d = (kw.x1 - m.x1).abs() + (kw.y1 - m.y1).abs() + (kw.x2 - m.x2).abs() + (kw.y2 - m.y2).abs();
+            assert!(d < 1e-3, "{id}: kick wall {:?} is not at the live wall {:?}", (kw.x1, kw.y1, kw.x2, kw.y2), (m.x1, m.y1, m.x2, m.y2));
+        }
+    }
+
+    /// A ball hitting a rotated triangle wall is thrown off it (kick 3), at the
+    /// wall's current position and facing.
+    #[test]
+    fn a_ball_is_kicked_off_the_triangle_where_it_is_now() {
+        let mut world = PhysicsWorld::from_table(&load_table(5).unwrap());
+        let input = InputState::default();
+        for _ in 0..25 { world.step_frame(0.033, &input); }
+        let m = world.moving_walls.iter().find(|m| m.id == "TriangleWall2").unwrap();
+        let (mx, my) = ((m.x1 + m.x2) / 2.0, (m.y1 + m.y2) / 2.0);
+        let (ox, oy) = (mx - 10.0, my - 18.86);
+        let l = ox.hypot(oy);
+        let out = [ox / l, oy / l];
+        let incoming = 5.0;
+        let ball_h = world.ball_handle().unwrap();
+        let body = world.bodies.get_mut(ball_h).unwrap();
+        body.set_translation(Vector::new(mx + out[0] * 2.5, my + out[1] * 2.5), true);
+        body.set_linvel(Vector::new(-out[0] * incoming, -out[1] * incoming), true);
+        body.set_gravity_scale(0.0, true);
+        let mut best = f32::MIN;
+        for _ in 0..20 {
+            world.step_frame(0.033, &input);
+            let v = world.bodies.get(ball_h).unwrap().linvel();
+            best = best.max(v.x * out[0] + v.y * out[1]);
+        }
+        let expected = 0.6 * incoming + 3.0 / 0.785;
+        assert!(best > expected * 0.9, "left the triangle at {best:.2}, expected about {expected:.2}");
+    }
+
+    #[test]
+    fn retracting_a_triangle_wall_removes_its_kick_and_its_drawing() {
+        let mut world = PhysicsWorld::from_table(&load_table(5).unwrap());
+        world.set_wall_retracted("TriangleWall2", true);
+        assert_eq!(world.wall_retracted("TriangleWall2"), Some(true));
+        let snap = world.snapshot();
+        assert_eq!(snap.walls.iter().filter(|s| s.label.as_deref().map_or(false, |l| l.contains("TriangleWall"))).count(), 2);
+        world.set_wall_retracted("TriangleWall2", false);
+        assert_eq!(world.snapshot().walls.iter().filter(|s| s.label.as_deref().map_or(false, |l| l.contains("TriangleWall"))).count(), 3);
     }
 }
