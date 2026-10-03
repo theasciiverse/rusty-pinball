@@ -5935,3 +5935,138 @@ mod table_3_multiball_tests {
         assert_eq!(w.ball_count(), 1, "no multiball: the ring is not lit again");
     }
 }
+
+#[cfg(test)]
+mod table_6_multiball_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    const BALL_COLORS: [(u8, u8, u8); 5] = scripts::PLANET_BALL_COLORS;
+
+    fn orbiters() -> PhysicsWorld {
+        let mut world = PhysicsWorld::from_table(&load_table(6).unwrap());
+        world.script = Some(Box::new(scripts::Orbiters::new(99)));
+        world.step(1.0 / 240.0, &InputState::default());
+        world
+    }
+
+    fn place(w: &mut PhysicsWorld, x: f32, y: f32) {
+        let body = w.bodies.get_mut(w.balls[0].body).unwrap();
+        body.set_translation(Vector::new(x, y), true);
+        body.set_linvel(Vector::new(0.0, 0.0), true);
+        body.set_gravity_scale(0.0, true);
+    }
+
+    fn step(w: &mut PhysicsWorld) { w.step(1.0 / 240.0, &InputState::default()); }
+
+    fn run_sim_seconds(w: &mut PhysicsWorld, secs: f32) {
+        let frame = 0.033;
+        for _ in 0..(secs / (frame * w.time_ratio())).ceil() as usize { w.step_frame(frame, &InputState::default()); }
+    }
+
+    fn messages(w: &PhysicsWorld) -> Vec<String> { w.drain_message_events().into_iter().map(|m| m.0).collect() }
+
+    fn through(w: &mut PhysicsWorld, id: &str) {
+        let s = w.sensors.iter().find(|s| s.id == id).unwrap_or_else(|| panic!("no sensor {id}"));
+        let (x, y) = ((s.rect[0] + s.rect[2]) / 2.0, (s.rect[1] + s.rect[3]) / 2.0);
+        w.balls[0].layer = s.from_layer.unwrap_or(w.balls[0].layer);
+        place(w, x, y);
+        step(w);
+    }
+
+    /// Gives ball 0 planet `i`'s colour and plays that planet's own shot.
+    fn switch_on(w: &mut PhysicsWorld, i: usize) {
+        w.set_ball_color(0, Some(BALL_COLORS[i]));
+        match i {
+            0 => {
+                let gi = w.drop_target_groups.iter().position(|g| g.shot_id.as_deref() == Some("Planet1Targets")).unwrap();
+                for ti in 0..w.drop_target_groups[gi].targets.len() { w.set_drop_target_down("Planet1Targets", ti, false); }
+                let last = w.drop_target_groups[gi].targets.len() - 1;
+                for ti in 0..last { w.set_drop_target_down("Planet1Targets", ti, true); }
+                let t = &w.drop_target_groups[gi].targets[last];
+                let (mx, my) = ((t.x1 + t.x2) / 2.0, (t.y1 + t.y2) / 2.0);
+                place(w, mx, my);
+                step(w);
+            }
+            1 => {
+                let n = w.rollover_count("Planet2Rollovers");
+                // An extra ball may have lit one on its way past.
+                w.set_all_rollovers("Planet2Rollovers", false);
+                for k in 0..n - 1 { w.set_rollover("Planet2Rollovers", k, true); }
+                let (x, y) = w.rollover_center("Planet2Rollovers", n - 1).unwrap();
+                place(w, x, y);
+                step(w);
+            }
+            2 => { through(w, "RightLoopDetector_Enter"); through(w, "RightLoopDetector_Trigger"); }
+            3 => { through(w, "LeftLoopDetector_Enter"); through(w, "LeftLoopDetector_Trigger"); }
+            _ => { through(w, "OrbitDetector_Right"); through(w, "OrbitDetector_Left"); }
+        }
+        w.balls[0].layer = 0;
+        place(w, 1.0, 1.0);
+        step(w);
+    }
+
+    fn savers_active(w: &PhysicsWorld) -> bool { w.kick_walls.iter().filter(|k| k.retract_when_hit).all(|k| k.active) }
+
+    fn all_five(w: &mut PhysicsWorld) { for i in 0..5 { switch_on(w, i); } }
+
+    #[test]
+    fn five_planets_start_a_multiball() {
+        let mut w = orbiters();
+        for kw in &mut w.kick_walls { if kw.retract_when_hit { kw.active = false; } }
+        for i in 0..4 { switch_on(&mut w, i); }
+        assert!(!messages(&w).iter().any(|m| m == "Multiball!"), "four are not enough");
+        switch_on(&mut w, 4);
+        let msgs = messages(&w);
+        assert!(msgs.iter().any(|m| m == "Multiball!"), "got {msgs:?}");
+        assert!(!msgs.iter().any(|m| m == "Planet 5 Activated!"));
+        assert!(savers_active(&w), "both savers come back");
+        w.set_ball_color(0, None);
+        step(&mut w);
+        for i in 0..5 { assert!(!w.rollover_lit(&format!("Planet{}", i + 1), 0), "planet {} resets", i + 1); }
+
+        run_sim_seconds(&mut w, 1.2);
+        assert_eq!(w.ball_count(), 2, "one extra ball at 1 s");
+        run_sim_seconds(&mut w, 3.2);
+        assert_eq!(w.ball_count(), 3, "another at 4 s");
+    }
+
+    #[test]
+    fn five_planets_during_the_multiball_pay_a_growing_jackpot() {
+        let mut w = orbiters();
+        all_five(&mut w);
+        run_sim_seconds(&mut w, 4.5);
+        assert_eq!(w.ball_count(), 3);
+        messages(&w);
+        w.drain_score_events();
+
+        all_five(&mut w);
+        let msgs = messages(&w);
+        assert!(msgs.iter().any(|m| m == "Jackpot!"), "got {msgs:?}");
+        assert!(w.drain_score_events().contains(&105_000), "100,000 plus the planet's 5,000");
+
+        all_five(&mut w);
+        assert!(messages(&w).iter().any(|m| m == "2x Jackpot!"));
+        assert!(w.drain_score_events().contains(&205_000));
+    }
+
+    #[test]
+    fn when_the_multiball_ends_the_planets_reset_and_it_can_start_again() {
+        let mut w = orbiters();
+        all_five(&mut w);
+        run_sim_seconds(&mut w, 4.5);
+        assert_eq!(w.ball_count(), 3);
+        w.game_time += 100.0; // no multiball saver
+        for i in (1..3).rev() {
+            let body = w.bodies.get_mut(w.balls[i].body).unwrap();
+            body.set_translation(Vector::new(5.0, -2.0), true);
+        }
+        run_sim_seconds(&mut w, 0.5);
+        assert_eq!(w.ball_count(), 1);
+        run_sim_seconds(&mut w, 0.5);
+        messages(&w);
+        all_five(&mut w);
+        let msgs = messages(&w);
+        assert!(msgs.iter().any(|m| m == "Multiball!"), "a second multiball, not a jackpot; got {msgs:?} balls {}", w.ball_count());
+    }
+}

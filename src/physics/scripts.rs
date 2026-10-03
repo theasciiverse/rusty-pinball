@@ -182,8 +182,7 @@ impl TableScript for RoundAndRound {
 // Five planets orbit a sun; each pulls the ball. Rolling over a planet gives
 // the ball that planet's colour; a ball of the right colour that then scores
 // its planet's shot (a ramp, its bank or its rollovers) switches the planet
-// on. Reaching all five starts multiball in the original; that is round 2, so
-// here the planets simply stay lit.
+// on. All five on starts multiball; during it, all five again is a jackpot.
 // ---------------------------------------------------------------------------
 
 fn clock_seed() -> u32 {
@@ -207,6 +206,11 @@ const GRAVITY_DEPTH_SQUARED: f32 = 4.0;
 /// Beyond this distance from the sun nothing pulls the ball.
 const GRAVITY_RANGE_SQUARED: f32 = 64.0;
 
+const JACKPOT_SCORE: u64 = 100_000;
+/// Timer tokens: the first extra ball at 1000 ms, the second at 4000 ms (after which the multiball is active).
+const TOKEN_ORBITERS_BALL_1: u32 = 21;
+const TOKEN_ORBITERS_BALL_2: u32 = 22;
+
 const RAMP_BONUS_SECONDS: f32 = 12.0;
 const RAMP_SCORE: u64 = 2500;
 const PLANET_TARGETS_SCORE: u64 = 5000;
@@ -223,7 +227,13 @@ struct Planet {
     status: PlanetStatus,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OrbiterMultiball { Inactive, Starting, Active }
+
 pub(super) struct Orbiters {
+    multiball: OrbiterMultiball,
+    /// Grows by one with each jackpot in a multiball ("2x Jackpot!").
+    jackpot_multiplier: u64,
     planets: Vec<Planet>,
     seed: u32,
     initialized: bool,
@@ -235,7 +245,10 @@ pub(super) struct Orbiters {
 
 impl Orbiters {
     pub(super) fn new(seed: u32) -> Self {
-        Orbiters { planets: Vec::new(), seed, initialized: false, pulse: 0.0, ramp_multiplier: 1, ramp_seconds_left: 0.0 }
+        Orbiters {
+            multiball: OrbiterMultiball::Inactive, jackpot_multiplier: 1,
+            planets: Vec::new(), seed, initialized: false, pulse: 0.0, ramp_multiplier: 1, ramp_seconds_left: 0.0,
+        }
     }
 
     fn random(&mut self) -> f32 {
@@ -264,17 +277,45 @@ impl Orbiters {
         !self.planets.is_empty() && self.planets.iter().all(|p| p.status == PlanetStatus::On)
     }
 
+    fn switch_all_planets_off(&mut self) {
+        for p in &mut self.planets { p.status = PlanetStatus::Off; }
+    }
+
+    /// All five planets on: both savers back, the planets reset, balls at 1000 ms and 4000 ms.
+    fn start_multiball(&mut self, w: &mut PhysicsWorld) {
+        w.restore_ball_saver("BallSaver-left");
+        w.restore_ball_saver("BallSaver-right");
+        self.switch_all_planets_off();
+        // Starting until the last ball is out, so it does not end before it begins.
+        self.multiball = OrbiterMultiball::Starting;
+        self.jackpot_multiplier = 1;
+        w.show_message("Multiball!", 4000);
+        w.schedule(1000, TOKEN_ORBITERS_BALL_1);
+        w.schedule(4000, TOKEN_ORBITERS_BALL_2);
+    }
+
     /// Switches planet `i` on if the ball has that planet's colour.
     fn activate_planet_if_match(&mut self, w: &mut PhysicsWorld, ball: usize, i: usize) {
         let Some(planet) = self.planets.get(i) else { return };
         if planet.status == PlanetStatus::On { return; }
         if w.ball_color(ball) != Some(PLANET_BALL_COLORS[i]) { return; }
         self.planets[i].status = PlanetStatus::On;
-        w.add_score(PLANET_ACTIVATED_SCORE);
-        // With all five on the original starts multiball (round 2); until then the
-        // last planet gets the same message as the others.
-        let _ = self.all_planets_on();
-        w.show_message(&format!("Planet {} Activated!", i + 1), 1500);
+        let mut total = PLANET_ACTIVATED_SCORE;
+        if self.all_planets_on() {
+            if self.multiball == OrbiterMultiball::Inactive {
+                self.start_multiball(w);
+            } else {
+                // All five again during a multiball: a jackpot that grows each time.
+                let text = if self.jackpot_multiplier > 1 { format!("{}x Jackpot!", self.jackpot_multiplier) } else { "Jackpot!".to_string() };
+                w.show_message(&text, 2000);
+                total += JACKPOT_SCORE * self.jackpot_multiplier;
+                self.jackpot_multiplier += 1;
+                self.switch_all_planets_off();
+            }
+        } else {
+            w.show_message(&format!("Planet {} Activated!", i + 1), 1500);
+        }
+        w.add_score(total);
     }
 
     /// A ramp counts when the ball came through its `required` sensor first.
@@ -320,6 +361,12 @@ impl TableScript for Orbiters {
             w.set_rollover_color(&id, 0, Some(blend_to_black(PLANET_COLORS[i], dim)));
         }
 
+        // The multiball is over when one ball is left.
+        if self.multiball == OrbiterMultiball::Active && w.ball_count() <= 1 {
+            self.multiball = OrbiterMultiball::Inactive;
+            self.switch_all_planets_off();
+        }
+
         // Ramp bonus window.
         if self.ramp_seconds_left > 0.0 { self.ramp_seconds_left -= dt; }
         if self.ramp_seconds_left <= 0.0 { self.ramp_multiplier = 1; }
@@ -354,6 +401,17 @@ impl TableScript for Orbiters {
                 iy += dt * force * angle.sin();
             }
             w.apply_impulse_to_ball(ball, Vector::new(ix, iy));
+        }
+    }
+
+    fn scheduled(&mut self, w: &mut PhysicsWorld, token: u32) {
+        match token {
+            TOKEN_ORBITERS_BALL_1 => w.launch_extra_ball(),
+            TOKEN_ORBITERS_BALL_2 => {
+                w.launch_extra_ball();
+                self.multiball = OrbiterMultiball::Active;
+            }
+            _ => {}
         }
     }
 
