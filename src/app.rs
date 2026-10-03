@@ -48,6 +48,9 @@ pub struct App {
     terminal:      Terminal<CrosstermBackend<io::Stdout>>,
     audio:         Option<AudioManager>,
     sound_enabled: bool,
+    score_animations: bool,
+    ball_trails:   bool,
+    unlimited_balls: bool,
     high_scores:   [u64; 9],
     renderer:      FieldRenderer,
     menu:          MenuState,
@@ -83,6 +86,9 @@ impl App {
             terminal,
             audio,
             sound_enabled: saved.sound_enabled,
+            score_animations: saved.score_animations,
+            ball_trails:   saved.ball_trails,
+            unlimited_balls: saved.unlimited_balls,
             high_scores:   saved.high_scores,
             renderer:      FieldRenderer::new(),
             menu:          MenuState::new(),
@@ -180,10 +186,19 @@ impl App {
                         if let Some(a) = &mut self.audio {
                             a.set_enabled(self.sound_enabled);
                         }
-                        persist::save(&persist::SavedState {
-                            sound_enabled: self.sound_enabled,
-                            high_scores:   self.high_scores,
-                        });
+                        self.save_state();
+                    }
+                    MenuAction::ToggleScoreAnimations => {
+                        self.score_animations = !self.score_animations;
+                        self.save_state();
+                    }
+                    MenuAction::ToggleBallTrails => {
+                        self.ball_trails = !self.ball_trails;
+                        self.save_state();
+                    }
+                    MenuAction::ToggleUnlimitedBalls => {
+                        self.unlimited_balls = !self.unlimited_balls;
+                        self.save_state();
                     }
                     MenuAction::Exit          => return Ok(true),
                     MenuAction::None          => {}
@@ -242,12 +257,23 @@ impl App {
         }
     }
 
+    fn save_state(&self) {
+        persist::save(&persist::SavedState {
+            sound_enabled:    self.sound_enabled,
+            score_animations: self.score_animations,
+            ball_trails:      self.ball_trails,
+            unlimited_balls:  self.unlimited_balls,
+            high_scores:      self.high_scores,
+        });
+    }
+
     fn start_table(&mut self, n: u8) -> Result<()> {
         let table   = crate::table::load_table(n)?;
         let balls   = table.num_balls();
         let physics = PhysicsWorld::from_table(&table);
         let mut game = GameState::new(balls);
         game.high_score = self.high_scores[(n as usize).saturating_sub(1).min(8)];
+        game.unlimited_balls = self.unlimited_balls;
         self.paused = false;
         self.screen = Screen::Playing {
             table_idx: n,
@@ -328,10 +354,7 @@ impl App {
                 let slot = (*table_idx as usize).saturating_sub(1).min(8);
                 if game.high_score > self.high_scores[slot] {
                     self.high_scores[slot] = game.high_score;
-                    persist::save(&persist::SavedState {
-                        sound_enabled: self.sound_enabled,
-                        high_scores:   self.high_scores,
-                    });
+                    self.save_state();
                 }
             }
         }
@@ -341,10 +364,15 @@ impl App {
         match &self.screen {
             Screen::Menu => {
                 let menu          = &self.menu;
-                let sound_enabled = self.sound_enabled;
+                let settings = crate::ui::menu::MenuSettings {
+                    sound: self.sound_enabled,
+                    score_animations: self.score_animations,
+                    ball_trails: self.ball_trails,
+                    unlimited_balls: self.unlimited_balls,
+                };
                 let high_scores   = self.high_scores;
                 self.terminal.draw(|frame| {
-                    crate::ui::draw_menu(frame, menu, sound_enabled, &high_scores);
+                    crate::ui::draw_menu(frame, menu, &settings, &high_scores);
                 })?;
             }
             Screen::Playing { game, physics, camera_y, .. } => {
@@ -354,8 +382,9 @@ impl App {
                 let camera_y  = *camera_y;
                 let paused    = self.paused;
                 let debug_ids = self.debug_ids;
+                let view = crate::ui::ViewOptions { score_animations: self.score_animations, ball_trails: self.ball_trails };
                 self.terminal.draw(|frame| {
-                    crate::ui::draw(frame, physics, game, renderer, camera_y, paused, debug_ids);
+                    crate::ui::draw(frame, physics, game, renderer, camera_y, paused, debug_ids, view);
                 })?;
             }
         }

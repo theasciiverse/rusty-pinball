@@ -39,7 +39,7 @@ pub fn draw_dmd(frame: &mut Frame, area: Rect, game: &GameState, snap: &FieldSna
     let left_lines = dot_pad_lines(vec![
         Line::from(vec![
             Span::styled("SCORE     ", label_style),
-            Span::styled(format_score(game.score), score_style),
+            Span::styled(format!("{}{}", format_score(game.score), if game.unlimited_balls { "*" } else { "" }), score_style),
         ]),
         Line::from(vec![
             Span::styled("HI SCORE  ", label_style),
@@ -52,7 +52,10 @@ pub fn draw_dmd(frame: &mut Frame, area: Rect, game: &GameState, snap: &FieldSna
     let mut centre_raw = vec![
         Line::from(vec![
             Span::styled("BALLS  ", label_style),
-            Span::styled(ball_indicator(game.balls_remaining), Style::default().fg(Color::Red)),
+            Span::styled(
+                if game.unlimited_balls { unlimited_ball_indicator() } else { ball_indicator(game.balls_remaining) },
+                Style::default().fg(Color::Red),
+            ),
         ]),
     ];
     if !snap.letter_groups.is_empty() {
@@ -192,6 +195,9 @@ fn format_score(s: u64) -> String {
     }
     out.chars().rev().collect()
 }
+
+/// Unlimited play: a row of balls that dwindle in the original; here five that never run out.
+fn unlimited_ball_indicator() -> String { "● ● ● ● ●".to_string() }
 
 fn ball_indicator(remaining: u8) -> String {
     const MAX: u8 = 3;

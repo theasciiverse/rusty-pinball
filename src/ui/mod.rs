@@ -11,9 +11,16 @@ use ratatui::{
 
 use crate::{game::GameState, physics::{FieldSnapshot, PhysicsWorld}, renderer::FieldRenderer};
 
-pub fn draw_menu(frame: &mut Frame, state: &menu::MenuState, sound_enabled: bool, high_scores: &[u64; 9]) {
+pub fn draw_menu(frame: &mut Frame, state: &menu::MenuState, settings: &menu::MenuSettings, high_scores: &[u64; 9]) {
     let area = frame.area();
-    menu::draw_menu(frame, area, state, sound_enabled, high_scores);
+    menu::draw_menu(frame, area, state, settings, high_scores);
+}
+
+/// What the play screen shows beyond the table itself.
+#[derive(Clone, Copy)]
+pub struct ViewOptions {
+    pub score_animations: bool,
+    pub ball_trails: bool,
 }
 
 const DMD_HEIGHT: u16 = 6;
@@ -26,6 +33,7 @@ pub fn draw(
     camera_y: f32,
     paused: bool,
     debug_ids: bool,
+    view: ViewOptions,
 ) {
     let area = frame.area();
 
@@ -38,7 +46,8 @@ pub fn draw(
         .split(area);
 
     let mut snap = physics.snapshot();
-    snap.popups = game.popup_snapshots();
+    if view.score_animations { snap.popups = game.popup_snapshots(); }
+    if !view.ball_trails { for b in &mut snap.balls { b.trail.clear(); } }
     draw_play_area(frame, chunks[0], &snap, renderer, camera_y, debug_ids);
     dmd::draw_dmd(frame, chunks[1], game, &snap);
 

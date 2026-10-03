@@ -34,6 +34,9 @@ pub struct GameState {
     pub score: u64,
     pub high_score: u64,
     pub balls_remaining: u8,
+    /// Play with no ball limit (the original's "unlimited balls"): the game never ends and no
+    /// high score is recorded.
+    pub unlimited_balls: bool,
     /// The ball being played (1-based); an extra ball does not advance it.
     pub ball_number: u8,
     /// Extra balls won and not yet used (they are also counted in `balls_remaining`).
@@ -62,6 +65,7 @@ impl GameState {
             score: 0,
             high_score: 0,
             balls_remaining: ball_count,
+            unlimited_balls: false,
             ball_number: 1,
             extra_balls: 0,
             phase: Phase::WaitingToLaunch,
@@ -138,7 +142,7 @@ impl GameState {
         // Rounded like the original's Math.round(points * multiplier).
         let added = (points * self.multiplier_percent() as u64 + 50) / 100;
         self.score += added;
-        if self.score > self.high_score {
+        if self.score > self.high_score && !self.unlimited_balls {
             self.high_score = self.score;
         }
         added
@@ -223,7 +227,9 @@ impl GameState {
     /// back after, so it counts for the next ball. Super mode is per ball.
     pub fn ball_drained(&mut self, preserve_increase: bool) {
         let had_extra_ball = self.extra_balls > 0;
-        self.balls_remaining = self.balls_remaining.saturating_sub(1);
+        if !self.unlimited_balls {
+            self.balls_remaining = self.balls_remaining.saturating_sub(1);
+        }
         self.phase = if self.balls_remaining == 0 { Phase::GameOver } else { Phase::BallLost };
 
         let mut whole = (self.multiplier * 100 + self.bonus_percent) as f64 / 100.0;
@@ -482,5 +488,21 @@ mod tests {
         for _ in 0..(1500 * SYNC_HZ / 1000) { game.tick_message(); }
         assert_eq!(game.message.as_ref().map(|m| m.0.as_str()), Some("Ball 2"));
         assert!(!game.take_message_sound(), "'Ball 2' is silent, as in the original");
+    }
+
+    #[test]
+    fn with_unlimited_balls_the_game_never_ends_and_no_high_score_is_recorded() {
+        let mut game = GameState::new(3);
+        game.unlimited_balls = true;
+        game.high_score = 1_000;
+        game.add_score(5_000);
+        assert_eq!(game.high_score, 1_000, "not recorded");
+        for n in 2..=12 {
+            game.phase = Phase::Playing;
+            game.ball_drained(false);
+            assert_eq!(game.phase, Phase::BallLost, "ball {n} is lost, the game goes on");
+            assert_eq!(game.ball_number, n);
+        }
+        assert_eq!(game.balls_remaining, 3, "no ball is used up");
     }
 }

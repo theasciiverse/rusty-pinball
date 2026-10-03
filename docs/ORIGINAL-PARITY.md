@@ -158,13 +158,11 @@ when a ball is lost, and keeps an increase made in the last 7.5 s of game time, 
 (10 s of game time, no flipper held); bumper defaults (score 0, kick 0, as the original); additive launch jitter (independent per
 component, none for a zero delta); layers as separate worlds; table scripts for every table; floating score animations
 (the multiplied points rise 3 units over 2 s, coloured by value, fading in the second half); ball trails (20 frames, dimmed and
-shrinking towards the tail); table 8's billiard ball decoration (drawn dimmed, not solid).
+shrinking towards the tail); unlimited balls and menu switches for score animations and trails; table 8's billiard ball decoration (drawn dimmed, not solid).
 
 **Still open, roughly in order of how much a player would notice:**
 
-- Sounds: music on/off and sound effects are one toggle (the original has two).
-- One high score per table (original keeps the top 5 plus last score); one sound toggle (original also has music, speed, trails, zoom).
-- No unlimited-balls mode.
+- One high score per table (original keeps the top 5 plus last score); settings are sound (music and effects together), score animations, ball trails and unlimited balls (the original also has separate music, game speed and zoom).
 - Tables without a script (only table 9, our own) still get the invented drop-bank clear bonus (2000) and rollover completion bonus.
 - Inactive layers switch to their faint colour at once; the original fades between the two over 250 ms.
 - No 750 ms input lockout after a ball loss; no variable plunger (`plunger_ticks` exists but is unused).

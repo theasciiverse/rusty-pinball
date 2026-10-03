@@ -63,7 +63,7 @@ Running inside **tmux** is recommended for the best display experience.
 
 - The game field is taller than the visible viewport, the camera follows the ball automatically.
 - The flippers respond to letter keys (`Z`/`X`), arrow keys, and Left/Right Shift, so you can use whichever feels more natural. Shift on its own is only reported by terminals that support the Kitty keyboard protocol (kitty is one); elsewhere use `Z`/`X` or the arrows.
-- Sound can be toggled on or off from the main menu without leaving it.
+- Sound, floating score animations and ball trails can each be switched on or off from the main menu, and so can unlimited balls (the game never ends; no high score is recorded and the score shows a `*`). The choices are remembered.
 - For the smoothest experience, run in a dedicated tmux pane or a full-screen terminal window.
 
 ## Status against the original
