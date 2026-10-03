@@ -17,10 +17,16 @@ pub(super) trait TableScript {
     /// (the original leaves all of that to the delegate).
     fn handles_rollovers(&self) -> bool { false }
 
-    fn bumper_hit(&mut self, _w: &mut PhysicsWorld, _id: &str) {}
-    fn drop_bank_cleared(&mut self, _w: &mut PhysicsWorld, _id: &str) {}
+    /// Every step, before events: for motion and forces (table 5, table 6).
+    fn tick(&mut self, _w: &mut PhysicsWorld, _dt: f32) {}
+    /// `ball` is the index of the ball that caused the event.
+    fn bumper_hit(&mut self, _w: &mut PhysicsWorld, _ball: usize, _id: &str) {}
+    fn drop_bank_cleared(&mut self, _w: &mut PhysicsWorld, _ball: usize, _id: &str) {}
     /// A ball lit the last rollover of a group (not called for script-lit groups).
-    fn rollover_group_completed(&mut self, _w: &mut PhysicsWorld, _id: &str) {}
+    fn rollover_group_completed(&mut self, _w: &mut PhysicsWorld, _ball: usize, _id: &str) {}
+    /// A ball is inside the sensor `id` (called every step while it is). `previous`
+    /// is the sensor it was in before, so a script can tell which way it came.
+    fn sensor(&mut self, _w: &mut PhysicsWorld, _ball: usize, _id: &str, _previous: Option<&str>) {}
     /// A timer from `PhysicsWorld::schedule` fired.
     fn scheduled(&mut self, _w: &mut PhysicsWorld, _token: u32) {}
 }
@@ -72,7 +78,7 @@ struct Classic;
 impl TableScript for Classic {
     fn handles_rollovers(&self) -> bool { true }
 
-    fn rollover_group_completed(&mut self, w: &mut PhysicsWorld, id: &str) {
+    fn rollover_group_completed(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
         // Every group completion clears the group and raises the multiplier.
         w.set_all_rollovers(id, false);
         w.increment_multiplier();
@@ -83,7 +89,7 @@ impl TableScript for Classic {
         }
     }
 
-    fn drop_bank_cleared(&mut self, w: &mut PhysicsWorld, id: &str) {
+    fn drop_bank_cleared(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
         announce_saver(w, "DropTargetLeftSave", "DropTargetRightSave", id);
         // Any bank lights the next extra-ball light.
         if !w.rollovers_all_lit("ExtraBallRollovers") {
@@ -108,12 +114,12 @@ struct RoundAndRound;
 impl TableScript for RoundAndRound {
     fn handles_rollovers(&self) -> bool { true }
 
-    fn rollover_group_completed(&mut self, w: &mut PhysicsWorld, id: &str) {
+    fn rollover_group_completed(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
         w.set_all_rollovers(id, false);
         w.increment_multiplier();
     }
 
-    fn drop_bank_cleared(&mut self, w: &mut PhysicsWorld, id: &str) {
+    fn drop_bank_cleared(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
         announce_saver(w, "DropTargetLeft", "DropTargetRight", id);
         // Each bank feeds one column of the extra-ball lights (left 0, top left
         // 1, right 2); a column's next light is three along once one is lit.
@@ -136,7 +142,7 @@ impl TableScript for RoundAndRound {
         }
     }
 
-    fn bumper_hit(&mut self, w: &mut PhysicsWorld, id: &str) {
+    fn bumper_hit(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
         // Hitting the centre red bumper with every extra-ball light lit starts multiball.
         if id == "CenterBumper1" && w.rollovers_all_lit("ExtraBallRollovers") {
             start_multiball(w);

@@ -189,7 +189,7 @@ impl FieldRenderer {
             let rx = ((snap.field_width * 0.025 / field_w)    * dot_w as f32) as u32;
             let ry = ((snap.field_width * 0.025 / viewport_h) * dot_h as f32) as u32;
             fill_ellipse(&mut pixels, &mut grid,
-                to_cx(b.x), to_cy(b.y), rx.max(1), ry.max(1), snap.ball_color.map(rgb).unwrap_or(COL_BALL));
+                to_cx(b.x), to_cy(b.y), rx.max(1), ry.max(1), b.color.or(snap.ball_color).map(rgb).unwrap_or(COL_BALL));
         }
 
         // Build output.

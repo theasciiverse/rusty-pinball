@@ -38,6 +38,8 @@ pub struct BallSnapshot {
     pub y: f32,
     pub vx: f32,
     pub vy: f32,
+    /// A colour a table script gave this ball; None means the table's ball colour.
+    pub color: Option<(u8, u8, u8)>,
 }
 
 #[derive(Debug, Clone)]
@@ -216,10 +218,20 @@ struct MovingWallInfo {
 
 /// Something that happened this step which the table's script may react to.
 enum ScriptEvent {
-    BumperHit(String),
-    DropBankCleared(String),
-    RolloverGroupCompleted(String),
+    BumperHit { id: String, ball: usize },
+    DropBankCleared { id: String, ball: usize },
+    RolloverGroupCompleted { id: String, ball: usize },
+    /// A ball is inside a sensor; `previous` is the sensor it was in before.
+    Sensor { id: String, ball: usize, previous: Option<String> },
     Scheduled(u32),
+}
+
+/// A sensor rectangle with an id: balls inside it are reported to the table
+/// script, and each ball remembers the last one it was in.
+struct SensorInfo {
+    id: String,
+    rect: [f32; 4],
+    from_layer: Option<u8>,
 }
 
 /// One ball in play. `balls[0]` is the "primary" ball, the one parked in the
@@ -228,6 +240,12 @@ struct BallState {
     body: RigidBodyHandle,
     collider: ColliderHandle,
     layer: u8,
+    // Runtime colour a table script gave this ball (table 6 planets, table 5
+    // ramps); None means the table's ball colour.
+    color: Option<(u8, u8, u8)>,
+    // Id of the last sensor this ball was inside; scripts read it to tell which
+    // way a ball went through a ramp (original: Ball.mostRecentSensorId).
+    last_sensor: Option<String>,
 }
 
 struct DropTargetInfo {
@@ -456,6 +474,7 @@ pub struct PhysicsWorld {
 
     // Layer system: sensors that transition the ball between layers.
     layer_sensors: Vec<LayerSensorInfo>,
+    sensors: Vec<SensorInfo>,
 
     // Events accumulated during step; drained by game / audio layers
     score_events:  RefCell<Vec<u64>>,
@@ -506,6 +525,7 @@ impl PhysicsWorld {
         let mut spinners           = Vec::new();
         let mut wall_segs          = Vec::new();
         let mut layer_sensors      = Vec::new();
+        let mut sensors: Vec<SensorInfo> = Vec::new();
         let mut launch_barrier: Option<LaunchBarrierInfo> = None;
         let mut moving_walls: Vec<MovingWallInfo> = Vec::new();
         let (mut barrier_close_rect, mut barrier_open_rect) = (None, None);
@@ -597,6 +617,9 @@ impl PhysicsWorld {
                     spinners.push(Self::build_spinner(s, label_for(elem_idx, &s.id)));
                 }
                 ElementDef::SensorElement(s) => {
+                    if let (Some(id), Some(rect)) = (s.id.clone(), s.rect) {
+                        sensors.push(SensorInfo { id, rect, from_layer: s.ball_layer_from });
+                    }
                     match s.id.as_deref() {
                         Some("LaunchBarrierSensor")  => barrier_close_rect = s.rect,
                         Some("LaunchBarrierRetract") => barrier_open_rect  = s.rect,
@@ -670,7 +693,7 @@ impl PhysicsWorld {
             .collision_groups(ball_groups_for(0))
             .build();
         let ball_col_h = colliders.insert_with_parent(idle_col, idle_h, &mut bodies);
-        let balls = vec![BallState { body: idle_h, collider: ball_col_h, layer: 0 }];
+        let balls = vec![BallState { body: idle_h, collider: ball_col_h, layer: 0, color: None, last_sensor: None }];
         let gate_ball = Some(idle_h);
 
         let letter_groups = table.letter_awards.iter().map(|la| LetterGroupInfo {
@@ -718,6 +741,7 @@ impl PhysicsWorld {
             letter_groups,
             jackpot,
             layer_sensors,
+            sensors,
             score_events: RefCell::new(Vec::new()),
             sound_events: RefCell::new(Vec::new()),
             multiplier_events: RefCell::new(Vec::new()),
@@ -1084,7 +1108,7 @@ impl PhysicsWorld {
             .collision_groups(ball_groups_for(0))
             .build();
         let collider = self.colliders.insert_with_parent(col, body, &mut self.bodies);
-        BallState { body, collider, layer: 0 }
+        BallState { body, collider, layer: 0, color: None, last_sensor: None }
     }
 
     fn remove_body(&mut self, h: RigidBodyHandle) {
@@ -1297,7 +1321,7 @@ impl PhysicsWorld {
                 }
                 self.sound_events.borrow_mut().push(PhysicsSound::BumperHit);
                 if let Some(id) = self.bumpers[i].shot_id.clone() {
-                    self.script_events.push(ScriptEvent::BumperHit(id));
+                    self.script_events.push(ScriptEvent::BumperHit { id, ball: bi });
                 }
                 if let Some(pts) = Self::record_shot_opt(&mut self.letter_groups, &mut self.jackpot, &self.bumpers[i].shot_id) {
                     self.score_events.borrow_mut().push(pts);
@@ -1390,8 +1414,8 @@ impl PhysicsWorld {
 
         // Drop-target hit detection
         {
-            let mut hits: Vec<(usize, usize)> = Vec::new();
-            for &(_, bp, _) in &balls_now {
+            let mut hits: Vec<(usize, usize, usize)> = Vec::new(); // (group, target, ball)
+            for &(bi, bp, _) in &balls_now {
                 {
                     for (gi, group) in self.drop_target_groups.iter().enumerate() {
                         for (ti, target) in group.targets.iter().enumerate() {
@@ -1400,15 +1424,15 @@ impl PhysicsWorld {
                                 bp.x, bp.y,
                                 target.x1, target.y1, target.x2, target.y2,
                             );
-                            if dist < self.ball_radius + 0.05 && !hits.contains(&(gi, ti)) {
-                                hits.push((gi, ti));
+                            if dist < self.ball_radius + 0.05 && !hits.iter().any(|h| h.0 == gi && h.1 == ti) {
+                                hits.push((gi, ti, bi));
                             }
                         }
                     }
                 }
             }
             let mut savers_to_restore: Vec<&'static str> = Vec::new();
-            for (gi, ti) in hits {
+            for (gi, ti, bi) in hits {
                 let score = self.drop_target_groups[gi].score;
                 if score > 0 { self.score_events.borrow_mut().push(score); }
 
@@ -1428,7 +1452,7 @@ impl PhysicsWorld {
                     // sim time), or never if it has none, as in the original.
                     self.drop_target_groups[gi].reset_timer = self.drop_target_groups[gi].reset_delay;
                     if let Some(id) = self.drop_target_groups[gi].shot_id.clone() {
-                        self.script_events.push(ScriptEvent::DropBankCleared(id));
+                        self.script_events.push(ScriptEvent::DropBankCleared { id, ball: bi });
                     }
                     if let Some(saver) = self.drop_target_groups[gi].shot_id.as_deref().and_then(saver_for_drop_bank) {
                         savers_to_restore.push(saver);
@@ -1459,22 +1483,21 @@ impl PhysicsWorld {
 
         // Rollover detection, flipper cycling, and group-completion flash.
         {
-            let ball_pos: Vec<Vector> = balls_now.iter().map(|b| b.1).collect();
             // A table script owns group completion (the original's delegates do):
             // no flash, no completion bonus, no automatic reset.
             let script_rollovers = self.script.as_ref().map_or(false, |sc| sc.handles_rollovers());
             for group in &mut self.rollover_groups {
                 // ── Ball activation (skip while flashing — group is mid-reset) ──
                 if !group.ignore_ball && group.flash_ticks == 0 {
-                    let mut newly_lit = false;
-                    for &bp in &ball_pos {
+                    let mut newly_lit: Option<usize> = None;
+                    for &(bi, bp, _) in &balls_now {
                         for rv in &mut group.rollovers {
                             if rv.lit { continue; }
                             let dx = bp.x - rv.x;
                             let dy = bp.y - rv.y;
                             if dx * dx + dy * dy <= (rv.radius + self.ball_radius).powi(2) {
                                 rv.lit = true;
-                                newly_lit = true;
+                                newly_lit = Some(bi);
                                 let pts = if rv.score > 0 { rv.score } else { group.score };
                                 if pts > 0 {
                                     self.score_events.borrow_mut().push(pts);
@@ -1486,9 +1509,9 @@ impl PhysicsWorld {
                         }
                     }
                     // A ball lit the last one: tell the table's script.
-                    if newly_lit && group.rollovers.iter().all(|rv| rv.lit) {
+                    if let Some(ball) = newly_lit.filter(|_| group.rollovers.iter().all(|rv| rv.lit)) {
                         if let Some(id) = group.shot_id.clone() {
-                            self.script_events.push(ScriptEvent::RolloverGroupCompleted(id));
+                            self.script_events.push(ScriptEvent::RolloverGroupCompleted { id, ball });
                         }
                     }
                 }
@@ -1627,6 +1650,21 @@ impl PhysicsWorld {
             }
         }
 
+        // Sensors by id: report every ball inside one to the table script, which
+        // sees the ball's previous sensor; then the ball remembers this one.
+        for si in 0..self.sensors.len() {
+            let [x0, y0, x1, y1] = self.sensors[si].rect;
+            for &(bi, bp, _) in &balls_now {
+                if !(bp.x >= x0 && bp.x <= x1 && bp.y >= y0 && bp.y <= y1) { continue; }
+                if let Some(from) = self.sensors[si].from_layer {
+                    if from != self.balls[bi].layer { continue; }
+                }
+                let id = self.sensors[si].id.clone();
+                let previous = self.balls[bi].last_sensor.replace(id.clone());
+                self.script_events.push(ScriptEvent::Sensor { id, ball: bi, previous });
+            }
+        }
+
         // Shooter-lane gate: enable once the ball clears gate_y going upward.
         if !self.gate_cleared {
             if let (Some(ball_h), Some(gate_col_h)) = (self.gate_ball, self.gate_collider) {
@@ -1673,6 +1711,10 @@ impl PhysicsWorld {
             self.script_events.clear();
             return;
         }
+        // Per-step hook first (table 6 moves its planets and pulls the ball here).
+        let mut script = self.script.take().unwrap();
+        script.tick(self, dt);
+        self.script = Some(script);
         let mut due = Vec::new();
         for t in &mut self.scheduled { t.0 -= dt; }
         self.scheduled.retain(|&(left, token)| {
@@ -1687,9 +1729,10 @@ impl PhysicsWorld {
             let mut script = self.script.take().unwrap();
             for ev in events {
                 match ev {
-                    ScriptEvent::BumperHit(id) => script.bumper_hit(self, &id),
-                    ScriptEvent::DropBankCleared(id) => script.drop_bank_cleared(self, &id),
-                    ScriptEvent::RolloverGroupCompleted(id) => script.rollover_group_completed(self, &id),
+                    ScriptEvent::BumperHit { id, ball } => script.bumper_hit(self, ball, &id),
+                    ScriptEvent::DropBankCleared { id, ball } => script.drop_bank_cleared(self, ball, &id),
+                    ScriptEvent::RolloverGroupCompleted { id, ball } => script.rollover_group_completed(self, ball, &id),
+                    ScriptEvent::Sensor { id, ball, previous } => script.sensor(self, ball, &id, previous.as_deref()),
                     ScriptEvent::Scheduled(token) => script.scheduled(self, token),
                 }
             }
@@ -1751,6 +1794,57 @@ impl PhysicsWorld {
         match self.rollover_group_mut(id).and_then(|g| g.rollovers.iter_mut().find(|r| !r.lit)) {
             Some(r) => { r.lit = true; true }
             None => false,
+        }
+    }
+
+    /// Adds points (the game state applies the score multiplier).
+    fn add_score(&self, points: u64) {
+        self.score_events.borrow_mut().push(points);
+    }
+
+    fn ball_position_of(&self, ball: usize) -> Option<Vector> {
+        let body = self.bodies.get(self.balls.get(ball)?.body)?;
+        Some(body.translation())
+    }
+
+    fn ball_color(&self, ball: usize) -> Option<(u8, u8, u8)> {
+        self.balls.get(ball).and_then(|b| b.color)
+    }
+
+    fn set_ball_color(&mut self, ball: usize, color: Option<(u8, u8, u8)>) {
+        if let Some(b) = self.balls.get_mut(ball) { b.color = color; }
+    }
+
+    /// True if any ball on the field has exactly this colour.
+    fn any_ball_has_color(&self, color: (u8, u8, u8)) -> bool {
+        self.balls.iter().any(|b| b.color == Some(color))
+    }
+
+    fn apply_impulse_to_ball(&mut self, ball: usize, impulse: Vector) {
+        if let Some(body) = self.balls.get(ball).and_then(|b| self.bodies.get_mut(b.body)) {
+            body.apply_impulse(impulse, true);
+        }
+    }
+
+    fn rollover_center(&self, id: &str, index: usize) -> Option<(f32, f32)> {
+        self.rollover_group(id).and_then(|g| g.rollovers.get(index)).map(|r| (r.x, r.y))
+    }
+
+    fn rollover_radius(&self, id: &str, index: usize) -> Option<f32> {
+        self.rollover_group(id).and_then(|g| g.rollovers.get(index)).map(|r| r.radius)
+    }
+
+    /// Moves a rollover (the planets of table 6 orbit this way).
+    fn set_rollover_center(&mut self, id: &str, index: usize, x: f32, y: f32) {
+        if let Some(r) = self.rollover_group_mut(id).and_then(|g| g.rollovers.get_mut(index)) {
+            r.x = x;
+            r.y = y;
+        }
+    }
+
+    fn set_rollover_color(&mut self, id: &str, index: usize, color: Option<(u8, u8, u8)>) {
+        if let Some(r) = self.rollover_group_mut(id).and_then(|g| g.rollovers.get_mut(index)) {
+            r.color = color;
         }
     }
 
@@ -1964,6 +2058,8 @@ impl PhysicsWorld {
         }
         let first = &mut self.balls[0];
         first.layer = 0; // back on the main-field layer
+        first.color = None;
+        first.last_sensor = None;
         let (h, c) = (first.body, first.collider);
         if let Some(body) = self.bodies.get_mut(h) {
             body.set_translation(Vector::new(lx, ly), true);
@@ -2015,7 +2111,7 @@ impl PhysicsWorld {
 
     pub fn snapshot(&self) -> FieldSnapshot {
         let balls: Vec<BallSnapshot> = self.live_balls().into_iter()
-            .map(|(_, t, v)| BallSnapshot { x: t.x, y: t.y, vx: v.x, vy: v.y })
+            .map(|(i, t, v)| BallSnapshot { x: t.x, y: t.y, vx: v.x, vy: v.y, color: self.balls[i].color })
             .collect();
 
         // Read the tip position straight from the physics body's actual
@@ -3782,5 +3878,134 @@ mod multiball_game_flow_tests {
         if world.take_relaunch_needed() && game.phase == Phase::Playing { game.phase = Phase::WaitingToLaunch; }
         assert_eq!((game.phase, game.balls_remaining), (Phase::WaitingToLaunch, 3));
         assert!(!world.is_ball_drained());
+    }
+}
+
+#[cfg(test)]
+mod script_building_block_tests {
+    use super::*;
+    use crate::table::load_table;
+    use std::cell::RefCell as Cell;
+    use std::rc::Rc;
+
+    /// Records what the world tells a script.
+    #[derive(Default)]
+    struct Log {
+        sensors: Vec<(String, usize, Option<String>)>,
+        ticks: usize,
+        dt_total: f32,
+    }
+    struct Recorder(Rc<Cell<Log>>);
+    impl scripts::TableScript for Recorder {
+        fn tick(&mut self, _w: &mut PhysicsWorld, dt: f32) {
+            let mut l = self.0.borrow_mut();
+            l.ticks += 1;
+            l.dt_total += dt;
+        }
+        fn sensor(&mut self, _w: &mut PhysicsWorld, ball: usize, id: &str, previous: Option<&str>) {
+            self.0.borrow_mut().sensors.push((id.to_string(), ball, previous.map(str::to_string)));
+        }
+    }
+
+    fn recording_world(n: u8) -> (PhysicsWorld, Rc<Cell<Log>>) {
+        let mut world = PhysicsWorld::from_table(&load_table(n).unwrap());
+        let log = Rc::new(Cell::new(Log::default()));
+        world.script = Some(Box::new(Recorder(log.clone())));
+        (world, log)
+    }
+
+    fn place(w: &mut PhysicsWorld, x: f32, y: f32) {
+        let body = w.bodies.get_mut(w.balls[0].body).unwrap();
+        body.set_translation(Vector::new(x, y), true);
+        body.set_linvel(Vector::new(0.0, 0.0), true);
+        body.set_gravity_scale(0.0, true);
+    }
+
+    fn centre_of(w: &PhysicsWorld, id: &str) -> (f32, f32, Option<u8>) {
+        let s = w.sensors.iter().find(|s| s.id == id).unwrap_or_else(|| panic!("no sensor {id}"));
+        ((s.rect[0] + s.rect[2]) / 2.0, (s.rect[1] + s.rect[3]) / 2.0, s.from_layer)
+    }
+
+    #[test]
+    fn the_script_gets_a_tick_every_step_in_sim_time() {
+        let (mut world, log) = recording_world(1);
+        world.step_frame(0.033, &InputState::default());
+        let l = log.borrow();
+        assert_eq!(l.ticks, 8, "one per substep");
+        assert!((l.dt_total - 0.033 * world.time_ratio()).abs() < 1e-4, "adds up to the frame's sim time");
+    }
+
+    /// The callback sees the sensor the ball was in BEFORE, then the ball's
+    /// memory updates: that is how a script tells which way a ball went.
+    #[test]
+    fn a_sensor_reports_the_previous_sensor_then_the_ball_remembers_it() {
+        let (mut world, log) = recording_world(6);
+        let (ex, ey, efrom) = centre_of(&world, "LeftLoopDetector_Enter");
+        let (tx, ty, tfrom) = centre_of(&world, "LeftLoopDetector_Trigger");
+        let input = InputState::default();
+
+        world.balls[0].layer = efrom.unwrap_or(0);
+        place(&mut world, ex, ey);
+        world.step(1.0 / 240.0, &input);
+        world.balls[0].layer = tfrom.unwrap_or(0);
+        place(&mut world, tx, ty);
+        world.step(1.0 / 240.0, &input);
+        world.step(1.0 / 240.0, &input); // still inside the trigger
+
+        let l = log.borrow();
+        let enter = l.sensors.iter().find(|e| e.0 == "LeftLoopDetector_Enter").expect("enter reported");
+        assert_eq!(enter.2, None, "no sensor before the first");
+        let triggers: Vec<_> = l.sensors.iter().filter(|e| e.0 == "LeftLoopDetector_Trigger").collect();
+        assert_eq!(triggers[0].2.as_deref(), Some("LeftLoopDetector_Enter"), "came from the enter sensor");
+        assert_eq!(triggers[1].2.as_deref(), Some("LeftLoopDetector_Trigger"), "the next step it is its own previous");
+    }
+
+    #[test]
+    fn a_ball_outside_every_sensor_reports_nothing() {
+        let (mut world, log) = recording_world(6);
+        place(&mut world, 1.0, 1.0);
+        world.step(1.0 / 240.0, &InputState::default());
+        assert!(log.borrow().sensors.is_empty());
+    }
+
+    #[test]
+    fn ball_colours_are_per_ball_drawn_and_reset_for_a_new_ball() {
+        let mut world = PhysicsWorld::from_table(&load_table(6).unwrap());
+        world.launch_ball();
+        world.launch_extra_ball();
+        let orange = (0xFF, 0xBB, 0x44);
+        world.set_ball_color(1, Some(orange));
+        assert!(world.any_ball_has_color(orange));
+        assert_eq!(world.ball_color(0), None, "the other ball keeps the table colour");
+        let snap = world.snapshot();
+        assert_eq!(snap.balls[1].color, Some(orange));
+        assert_eq!(snap.balls[0].color, None);
+
+        world.park_ball();
+        assert!(!world.any_ball_has_color(orange), "a new ball starts with the default colour");
+    }
+
+    #[test]
+    fn a_moved_rollover_is_lit_where_it_is_now() {
+        let mut world = PhysicsWorld::from_table(&load_table(6).unwrap());
+        world.set_rollover_center("Planet1", 0, 4.0, 22.0);
+        assert_eq!(world.rollover_center("Planet1", 0), Some((4.0, 22.0)));
+        place(&mut world, 4.0, 22.0);
+        world.step(1.0 / 240.0, &InputState::default());
+        assert!(world.rollover_lit("Planet1", 0), "the ball lit it at its new position");
+        world.set_rollover_color("Planet1", 0, Some((1, 2, 3)));
+        assert_eq!(world.snapshot().rollover_groups.iter().flat_map(|g| g.rollovers.iter()).any(|r| r.color == Some((1, 2, 3))), true);
+    }
+
+    #[test]
+    fn impulses_and_scores_from_scripts_reach_the_ball_and_the_game() {
+        let mut world = PhysicsWorld::from_table(&load_table(6).unwrap());
+        world.launch_ball();
+        place(&mut world, 5.0, 10.0);
+        world.apply_impulse_to_ball(0, Vector::new(3.0, 0.0));
+        let v = world.bodies.get(world.balls[0].body).unwrap().linvel();
+        assert!(v.x > 1.0, "the impulse moved the ball: {v:?}");
+        world.add_score(5000);
+        assert_eq!(world.drain_score_events(), vec![5000]);
     }
 }
