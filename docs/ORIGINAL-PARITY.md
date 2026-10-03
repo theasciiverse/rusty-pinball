@@ -17,33 +17,34 @@ Status as of the table-scripts commit on branch `rapier-0.36` (audit baseline: `
 ## 1. The one structural fact
 
 In the original, each table is a JSON layout **plus a Java "delegate"** that holds that table's rules: scoring,
-multiball, ball locks, jackpots, moving parts, lights. Our port has **no delegate layer**. It runs the generic
-element behavior (bumpers, flippers, kick walls, rollovers, drop targets, spinners, layers) and a few things keyed
-on element ids (launch barrier, ball savers, the moving parts of tables 2 and 5). So tables 1 to 8 currently play
-as plain tables: the geometry and the generic scoring work, the rules do not.
+multiball, ball locks, jackpots, moving parts, lights. The port now has the same split: the generic element behaviour lives in
+`src/physics/mod.rs`, and each table's delegate is a Rust script (`src/physics/scripts.rs`, with the moving parts in
+`src/physics/movers.rs` and the star map in `src/physics/stars.rs`), chosen by the JSON's `delegate` name. The physics world
+holds a list of balls, so multiball, ball locks and per-ball features work.
 
-The physics world also holds **exactly one ball**, which blocks multiball, ball locks and per-ball features outright.
+**State on 2026-10-03:** tables 1 to 8 have every delegate rule ported, rounds 1 and 2 are complete (see the trackers below), and
+the engine rules of the original's `Field` and `GameState` are ported. What is left is listed in section 6.
 
-## 2. Missing capabilities (what the tables need)
+## 2. Capabilities (what the tables needed) and where they stand
 
-These are the building blocks. Most per-table gaps are "needs C1 + C3 + C4" and so on.
+These were the building blocks; the status column is current.
 
-| ID | Capability | What it is in the original |
-|---|---|---|
-| C1 | Table script layer | Delegate callbacks: `gameStarted`, `ballLost`, `tick`, `processCollision`, `allDropTargetsInGroupHit`, `allRolloversInGroupActivated`, `ballInSensorRange`, `spinnerActivated`, `flippersActivated`, plus element lookup by id. **Framework DONE** (`src/physics/scripts.rs`): bumper hit, drop bank cleared, rollover group completed by a ball, scheduled timer, with helpers to light rollovers, re-arm savers, launch balls, show messages; scripts exist for tables 1 and 2. Still to add: `ballLost`, `gameStarted`, `tick`, `ballInSensorRange`, `spinnerActivated`, `processCollision` for other elements |
-| C2 | Multi-ball | A list of balls; `createBall`, `launchBall`, `removeBallWithoutBallLoss`; "balls <= 1" means multiball ended; multiball saver. **Core DONE** (ball list, extra launches, silent drain, lock removal, all elements react to every ball, all balls drawn); still missing: the multiball saver, per-ball colors and last-sensor id (C6, C7), and anything that starts a multiball (C1, C3, C4) |
-| C3 | Scheduled actions | `scheduleAction(ms, fn)` on game time (multiball launches, light shows, gate timers). **DONE** (`PhysicsWorld::schedule`, token callbacks, cleared on a new ball) |
-| C4 | Game messages | Timed text shown in the score line, with a message sound ("Ball Saved", "Multiball!", "Jackpot!", ...). **DONE** except the message sound: real-time duration, shown on the DMD's second right-hand row |
-| C5 | Element control | `setRetracted`, `setVisible`, `setNewColor`; rollover setters (set all, set by index, activate first, `setIgnoreBall`); movable rollover circles; drop target make-visible; spinner score |
-| C6 | Sensors by id | `ballInSensorRange` for every sensor, with each ball's most recent sensor id (ramp and orbit direction detection) |
-| C7 | Per-ball state | Ball primary and secondary colors (set at runtime), per-ball force hook (table 6 gravity wells) |
-| C8 | Full layer model | Layers as separate collision worlds, applied to bumpers, flippers, drop targets, rollovers, sensors; layer 0 is a layer, not "universal"; inactive-layer fade. **DONE except the 250 ms fade** (an element with no layer is layer 0; a ball only touches and triggers elements of its own layer; pieces of an idle layer are drawn faintly in `inactiveLayerColor`, lifted to a minimum brightness so a terminal shows them, and hidden when the table gives none) |
-| C9 | Shape renderer | `setShapes`: arbitrary colored circles and lines each frame (table 7 star map) |
-| C10 | Multiplier and rollover rules | Fractional unbounded score multiplier; carry-over rules between balls; original rollover scoring (per rollover only, no completion bonus, no auto reset, `reset` timers, `toggleOff`) |
-| C11 | Score animations | Floating score text at the ball position, colored by value |
-| C12 | Ball and game flow | Extra ball, mercy ball (20 s early-drain save), multiball saver, stuck-ball bump, unlimited-balls mode, "Ball N" |
-| C13 | Audio parity | Rollover, message and start sounds; non-repeating bumper dings; score-driven music |
-| C14 | App features | Ball trails, spin dot, true zoom, game-speed setting, top 5 high scores plus last score, help and rules screen |
+| ID | Capability | What it is in the original | Status |
+|---|---|---|---|
+| C1 | Table script layer | Delegate callbacks: `gameStarted`, `ballLost`, `tick`, `processCollision`, `allDropTargetsInGroupHit`, `allRolloversInGroupActivated`, `ballInSensorRange`, `spinnerActivated`, plus element lookup by id | DONE (`TableScript` trait: bumper hit, wall hit, drop target and bank events, spinner, rollover group completed, sensors, timers, `tick`, `game_started`, `ball_lost`) |
+| C2 | Multi-ball | A list of balls; `createBall`, `launchBall`, `removeBallWithoutBallLoss`; "balls <= 1" means multiball ended; multiball saver | DONE |
+| C3 | Scheduled actions | `scheduleAction(ms, fn)` on game time | DONE (`PhysicsWorld::schedule`, token callbacks) |
+| C4 | Game messages | Timed text with a message sound | DONE |
+| C5 | Element control | `setRetracted`, `setVisible`, `setNewColor`, rollover setters, drop target make-visible, spinner score | DONE |
+| C6 | Sensors by id | `ballInSensorRange` with each ball's most recent sensor id | DONE |
+| C7 | Per-ball state | Runtime ball colours, per-ball forces | DONE (colours, forces; the secondary colour spin dot is not drawn) |
+| C8 | Full layer model | Layers as separate collision worlds | DONE except the 250 ms fade (an element with no layer is layer 0; a ball only touches and triggers elements of its own layer; pieces of an idle layer are drawn faintly in `inactiveLayerColor`, lifted to a minimum brightness so a terminal shows them, and hidden when the table gives none) |
+| C9 | Shape renderer | `setShapes`: coloured circles and lines each frame (table 7 star map) | DONE |
+| C10 | Multiplier and rollover rules | Fractional unbounded multiplier, carry-over rules, original rollover scoring | DONE for tables with a script (table 9 keeps its own completion bonus) |
+| C11 | Score animations | Floating score text at the ball, coloured by value | DONE |
+| C12 | Ball and game flow | Extra ball, mercy ball, multiball saver, stuck-ball bump, unlimited balls, "Ball N" | DONE |
+| C13 | Audio parity | Rollover, message and start sounds, non-repeating dings, score-driven music | DONE (unverified by ear) |
+| C14 | App features | Ball trails, spin dot, zoom, game speed, top 5 high scores plus last score, help screen | Ball trails DONE; spin dot, zoom, game speed, top 5 scores and a help screen are open |
 
 ### Which table needs what
 
@@ -92,7 +93,7 @@ Round 1 leaves out only what needs more than one ball: ball locks, multiball lau
 | 6 | Orbiting planets, planet gravity, planet colors and activation, ramp detectors | DONE (multiball and jackpot too) |
 | 4 | Status grid lit by bumpers, percent multiplier, ramp walls | DONE (locks, grid rows, multiball, jackpot too) |
 | 3 | Bumper bonus, heat meter, indicator rings | DONE (multiball and its flashing rings: round 2) |
-| 8 | Insert lights, rack bonus, gates, skill shot | DONE (whole table; decorative billiard-ball circles are still not drawn) |
+| 8 | Insert lights, rack bonus, gates, skill shot | DONE (whole table, with the billiard-ball decoration drawn) |
 | 7 | Star-map field, constellations, loop shots, guide arrows | DONE (ball locks, multiball, jackpot and the layered mini-table too) |
 
 ### Round 2: multiball for all tables
