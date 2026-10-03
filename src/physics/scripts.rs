@@ -51,7 +51,7 @@ pub(super) fn script_for(table: &TableDef) -> Option<Box<dyn TableScript>> {
         Some("Field1Delegate") => Some(Box::new(Classic)),
         Some("Field2Delegate") => Some(Box::new(RoundAndRound)),
         Some("Field3Delegate") => Some(Box::new(Ringmaster::new())),
-        Some("Field4Delegate") => Some(Box::new(CompoundInterest { bumper_multiplier_increase: 1 })),
+        Some("Field4Delegate") => Some(Box::new(CompoundInterest::new())),
         Some("Field5Delegate") => Some(Box::new(EyeOfHorus { ramp_bonus: [0; 4] })),
         Some("Field6Delegate") => Some(Box::new(Orbiters::new(clock_seed()))),
         Some("Field7Delegate") => Some(Box::new(AdAstra::new(clock_seed()))),
@@ -467,15 +467,91 @@ impl TableScript for Orbiters {
 // locks, multiball and jackpot the grid leads to are round 2.
 // ---------------------------------------------------------------------------
 
+const TOKEN_LOCKS_BALL_1: u32 = 31;
+const TOKEN_LOCKS_BALL_2: u32 = 32;
+const STATUS_COLORS_4: [&str; 6] = ["Blue", "Cyan", "Green", "Yellow", "Red", "Magenta"];
+/// The jackpot starts at 25 (x 1000 points, and that many percent of multiplier)
+/// and grows by 5 with each one.
+const BASE_JACKPOT_4: u64 = 25;
+const JACKPOT_INCREASE_4: u64 = 5;
+
 struct CompoundInterest {
     /// Percent each bumper hit adds to the multiplier (starts at 1).
     bumper_multiplier_increase: u32,
+    balls_locked: usize,
+    in_multiball: bool,
+    /// True until the last multiball ball is out, so it cannot end before it begins.
+    multiball_starting: bool,
+    jackpot: u64,
 }
 
 impl CompoundInterest {
+    fn new() -> Self {
+        CompoundInterest {
+            bumper_multiplier_increase: 1, balls_locked: 0, in_multiball: false,
+            multiball_starting: false, jackpot: BASE_JACKPOT_4,
+        }
+    }
+
     fn raise_increase(&mut self, w: &mut PhysicsWorld, by: u32) {
         self.bumper_multiplier_increase += by;
         w.show_message(&format!("Bumper Multiplier {}%", self.bumper_multiplier_increase), 1500);
+    }
+
+    fn status_group(color: &str) -> String { format!("Rollovers.{color}") }
+
+    fn lock_group(i: usize) -> String { format!("LockedBallRollover{}", i + 1) }
+
+    fn lock_kicker(i: usize) -> String { format!("LockedBallKicker{}", i + 1) }
+
+    fn all_status_lit_at(w: &PhysicsWorld, row: usize) -> bool {
+        STATUS_COLORS_4.iter().all(|c| w.rollover_lit(&Self::status_group(c), row))
+    }
+
+    fn set_status_lights(w: &mut PhysicsWorld, lit: bool) {
+        for c in STATUS_COLORS_4 { w.set_all_rollovers(&Self::status_group(c), lit); }
+    }
+
+    fn set_status_ignore_ball(w: &mut PhysicsWorld, ignore: bool) {
+        for c in STATUS_COLORS_4 { w.set_group_ignore_ball(&Self::status_group(c), ignore); }
+    }
+
+    /// Hides ball lock `i`'s rollover and makes it ignore balls.
+    fn hide_lock(w: &mut PhysicsWorld, i: usize) {
+        let id = Self::lock_group(i);
+        w.set_group_ignore_ball(&id, true);
+        w.set_rollovers_visible(&id, false);
+    }
+
+    fn clear_multiball_status(&mut self, w: &mut PhysicsWorld) {
+        Self::set_status_lights(w, false);
+        Self::set_status_ignore_ball(w, true);
+        self.balls_locked = 0;
+        self.in_multiball = false;
+        self.multiball_starting = false;
+    }
+
+    fn start_multiball(&mut self, w: &mut PhysicsWorld) {
+        w.show_message("Multiball!", 3000);
+        w.restore_ball_saver("BallSaver-left");
+        w.restore_ball_saver("BallSaver-right");
+        Self::hide_lock(w, 2);
+        self.balls_locked = 3;
+        self.in_multiball = true;
+        self.multiball_starting = true;
+        Self::set_status_lights(w, false);
+        Self::set_status_ignore_ball(w, false);
+        self.jackpot = BASE_JACKPOT_4;
+        w.schedule(1000, TOKEN_LOCKS_BALL_1);
+        w.schedule(3500, TOKEN_LOCKS_BALL_2);
+    }
+
+    fn do_jackpot(&mut self, w: &mut PhysicsWorld) {
+        w.add_score(self.jackpot * 1000);
+        w.show_message("Jackpot!", 3000);
+        w.scale_multiplier_percent(100 + self.jackpot);
+        self.jackpot += JACKPOT_INCREASE_4;
+        Self::set_status_lights(w, false);
     }
 }
 
@@ -485,6 +561,15 @@ impl TableScript for CompoundInterest {
     fn scripted_walls(&self) -> &'static [&'static str] { &["TopRampBlocker"] }
 
     fn game_started(&mut self, w: &mut PhysicsWorld) {
+        // The lock rollovers start hidden and disabled; of the lock kickers only
+        // the top one is out (the others come out as balls lock).
+        for i in 0..3 {
+            w.set_all_rollovers(&Self::lock_group(i), false);
+            Self::hide_lock(w, i);
+        }
+        w.set_wall_retracted(&Self::lock_kicker(1), true);
+        w.set_wall_retracted(&Self::lock_kicker(2), true);
+        self.clear_multiball_status(w);
         // The ramp's kicker starts out of the way; the launch barrier starts open.
         w.set_wall_retracted("RightRampKicker", true);
         w.set_wall_retracted("LaunchBarrier", true);
@@ -497,9 +582,19 @@ impl TableScript for CompoundInterest {
     fn bumper_hit(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
         let Some(color) = id.strip_prefix("Bumper.") else { return };
         w.add_multiplier_percent(self.bumper_multiplier_increase as i32);
-        // The status grid row is the number of balls locked, which is 0 until
-        // the locks exist (round 2).
-        w.set_rollover(&format!("Rollovers.{color}"), 0, true);
+        // The status grid row is the number of balls locked; a full row makes the
+        // next ball lock (or the multiball) ready.
+        if self.balls_locked >= 3 { return; }
+        let row = self.balls_locked;
+        w.set_rollover(&Self::status_group(color), row, true);
+        if !Self::all_status_lit_at(w, row) { return; }
+        let lock = Self::lock_group(row);
+        if w.group_ignores_ball(&lock) {
+            w.set_group_ignore_ball(&lock, false);
+            w.set_rollovers_visible(&lock, true);
+            w.set_all_rollovers(&lock, false);
+            w.show_message(if row == 2 { "Multiball Ready" } else { "Ball Lock Ready" }, 3000);
+        }
     }
 
     fn drop_bank_cleared(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
@@ -509,10 +604,49 @@ impl TableScript for CompoundInterest {
         }
     }
 
-    fn rollover_group_completed(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
-        if id == "FlipperRollovers" {
+    fn rollover_group_completed(&mut self, w: &mut PhysicsWorld, ball: usize, id: &str) {
+        if id == Self::lock_group(0) {
+            w.remove_ball_without_loss(ball);
+            w.set_wall_retracted(&Self::lock_kicker(1), false);
+            w.show_message("Ball 1 Locked", 3000);
+            self.balls_locked = 1;
+        } else if id == Self::lock_group(1) {
+            w.remove_ball_without_loss(ball);
+            w.set_wall_retracted(&Self::lock_kicker(2), false);
+            w.show_message("Ball 2 Locked", 3000);
+            self.balls_locked = 2;
+        } else if id == Self::lock_group(2) {
+            self.start_multiball(w);
+        } else if self.in_multiball && STATUS_COLORS_4.iter().any(|c| id == Self::status_group(c)) {
+            if STATUS_COLORS_4.iter().all(|c| w.rollovers_all_lit(&Self::status_group(c))) {
+                self.do_jackpot(w);
+            }
+        } else if id == "FlipperRollovers" {
             self.raise_increase(w, 2);
             w.set_all_rollovers(id, false);
+        }
+    }
+
+    fn tick(&mut self, w: &mut PhysicsWorld, _dt: f32) {
+        if self.in_multiball && !self.multiball_starting && w.ball_count() <= 1 {
+            self.clear_multiball_status(w);
+        }
+    }
+
+    fn scheduled(&mut self, w: &mut PhysicsWorld, token: u32) {
+        match token {
+            TOKEN_LOCKS_BALL_1 => {
+                w.set_wall_retracted(&Self::lock_kicker(1), true);
+                w.set_wall_retracted(&Self::lock_kicker(2), true);
+                Self::hide_lock(w, 1);
+                if w.ball_count() < 3 { w.launch_extra_ball(); }
+            }
+            TOKEN_LOCKS_BALL_2 => {
+                self.multiball_starting = false;
+                Self::hide_lock(w, 0);
+                if w.ball_count() < 3 { w.launch_extra_ball(); }
+            }
+            _ => {}
         }
     }
 

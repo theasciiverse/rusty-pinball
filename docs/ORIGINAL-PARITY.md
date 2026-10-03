@@ -90,7 +90,7 @@ Round 1 leaves out only what needs more than one ball: ball locks, multiball lau
 | 2 | Orbiting bumpers | DONE |
 | 5 | Rotating triangle, colored-ball diagram and lines, ramp colors and bonuses, extra-ball area | DONE (pyramid, multiball, multiball triangle reversal: round 2) |
 | 6 | Orbiting planets, planet gravity, planet colors and activation, ramp detectors | DONE (multiball and jackpot too) |
-| 4 | Status grid lit by bumpers, percent multiplier, ramp walls | DONE (locks, multiball, jackpot: round 2; the grid only lights row 1 until locks exist) |
+| 4 | Status grid lit by bumpers, percent multiplier, ramp walls | DONE (locks, grid rows, multiball, jackpot too) |
 | 3 | Bumper bonus, heat meter, indicator rings | DONE (multiball and its flashing rings: round 2) |
 | 8 | Insert lights, rack bonus, gates, skill shot | DONE (whole table; decorative billiard-ball circles are still not drawn) |
 | 7 | Star-map field, constellations, loop shots, guide arrows | DONE (ball locks, multiball, jackpot and the layered mini-table: round 2) |
@@ -108,7 +108,7 @@ The multi-ball core and the script layer exist (tables 1 and 2 already have mult
 | 2 Round and Round | Extra-ball lights, centre bumper multiball | DONE |
 | 3 Ringmaster | Ready ring, ramp starts it, flashing rings, double ramps, reset | DONE |
 | 6 Orbiters | All planets on, jackpot | DONE |
-| 4 Compound Interest | Ball locks, status grid rows, multiball, jackpot | TODO |
+| 4 Compound Interest | Ball locks, status grid rows, multiball, jackpot | DONE |
 | 5 Eye of Horus | Pyramid, multiball (four colored balls), jackpot, extra-ball use | TODO |
 | 7 Ad Astra | Ball lock lane, layers, multiball, jackpot | TODO |
 
@@ -197,7 +197,7 @@ The centre 6x3 grid is the multiball status display, not something the ball ligh
 
 | Behavior | Status |
 |---|---|
-| Six color columns `Rollovers.<Color>` x 3 rows, all `ignoreBall` in normal play. Each colored bumper (`Bumper.Red` and so on) lights the next light in its column (row = balls locked) | DONE for row 1 (rows 2 and 3 come with locks, round 2) |
+| Six color columns `Rollovers.<Color>` x 3 rows, all `ignoreBall` in normal play. Each colored bumper (`Bumper.Red` and so on) lights the next light in its column (row = balls locked) | DONE (row = balls locked) |
 | Whole row lit across all six colors: the matching lock rollover on the right (`LockedBallRollover1..3`) activates; message "Ball Lock Ready" / "Multiball Ready" | MISSING |
 | Roll into a lock rollover: the ball is removed without loss, a kicker un-retracts, "Ball N Locked" | MISSING (C2: `removeBallWithoutBallLoss`) |
 | Third lock: multiball (savers restored; `ignoreBall` turns off so the ball lights the grid; balls launched at +1000 and +3500 ms) | MISSING |

@@ -532,6 +532,9 @@ pub struct PhysicsWorld {
     extra_ball_events: RefCell<u32>,
     // Percent points a table script adds to the multiplier (table 4's bumpers).
     multiplier_percent_events: RefCell<Vec<i32>>,
+    // Factors (in percent, 125 = x1.25) a table script multiplies the whole score
+    // multiplier by (table 4's jackpot).
+    multiplier_scale_events: RefCell<Vec<u64>>,
     // Count of "start (or restart) the timed super mode" triggers this step.
     super_mode_events: RefCell<u32>,
 
@@ -850,6 +853,7 @@ impl PhysicsWorld {
             sound_events: RefCell::new(Vec::new()),
             multiplier_events: RefCell::new(Vec::new()),
             multiplier_percent_events: RefCell::new(Vec::new()),
+            multiplier_scale_events: RefCell::new(Vec::new()),
             extra_ball_events: RefCell::new(0),
             super_mode_events: RefCell::new(0),
             drain_y: 1.0,
@@ -2092,6 +2096,10 @@ impl PhysicsWorld {
     }
 
     /// Whether balls light the group's rollovers (original: `setIgnoreBall`).
+    fn group_ignores_ball(&self, id: &str) -> bool {
+        self.rollover_group(id).map_or(false, |g| g.ignore_ball)
+    }
+
     fn set_group_ignore_ball(&mut self, id: &str, ignore: bool) {
         if let Some(g) = self.rollover_group_mut(id) { g.ignore_ball = ignore; }
     }
@@ -2128,6 +2136,12 @@ impl PhysicsWorld {
 
     pub fn drain_extra_ball_events(&self) -> u32 {
         std::mem::take(&mut *self.extra_ball_events.borrow_mut())
+    }
+
+    /// Multiplies the whole score multiplier by `percent / 100` (the game state
+    /// does the arithmetic, it owns the multiplier).
+    fn scale_multiplier_percent(&self, percent: u64) {
+        self.multiplier_scale_events.borrow_mut().push(percent);
     }
 
     /// Adds `percent` points to the score multiplier (1 = +0.01x).
@@ -2194,6 +2208,10 @@ impl PhysicsWorld {
             b.color_override = color;
             b.outer_override = color.map(|(r, g, bl)| (r / 2, g / 2, bl / 2));
         }
+    }
+
+    pub fn drain_multiplier_scale_events(&self) -> Vec<u64> {
+        self.multiplier_scale_events.borrow_mut().drain(..).collect()
     }
 
     pub fn drain_multiplier_percent_events(&self) -> Vec<i32> {
@@ -6068,5 +6086,188 @@ mod table_6_multiball_tests {
         all_five(&mut w);
         let msgs = messages(&w);
         assert!(msgs.iter().any(|m| m == "Multiball!"), "a second multiball, not a jackpot; got {msgs:?} balls {}", w.ball_count());
+    }
+}
+
+#[cfg(test)]
+mod table_4_lock_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    const COLORS: [&str; 6] = ["Blue", "Cyan", "Green", "Yellow", "Red", "Magenta"];
+
+    fn world4() -> PhysicsWorld {
+        let mut w = PhysicsWorld::from_table(&load_table(4).unwrap());
+        w.step(1.0 / 240.0, &InputState::default());
+        w
+    }
+
+    fn place(w: &mut PhysicsWorld, x: f32, y: f32) {
+        let body = w.bodies.get_mut(w.balls[0].body).unwrap();
+        body.set_translation(Vector::new(x, y), true);
+        body.set_linvel(Vector::new(0.0, 0.0), true);
+        body.set_gravity_scale(0.0, true);
+    }
+
+    fn step(w: &mut PhysicsWorld) { w.step(1.0 / 240.0, &InputState::default()); }
+
+    fn run_sim_seconds(w: &mut PhysicsWorld, secs: f32) {
+        let frame = 0.033;
+        for _ in 0..(secs / (frame * w.time_ratio())).ceil() as usize { w.step_frame(frame, &InputState::default()); }
+    }
+
+    fn messages(w: &PhysicsWorld) -> Vec<String> { w.drain_message_events().into_iter().map(|m| m.0).collect() }
+
+    /// Lights row `row` of every colour's column directly, the last one with a bumper hit.
+    fn fill_row(w: &mut PhysicsWorld, row: usize) {
+        for c in &COLORS[..5] { w.set_rollover(&format!("Rollovers.{c}"), row, true); }
+        let (bx, by, br) = {
+            let b = w.bumpers.iter().find(|b| b.shot_id.as_deref() == Some("Bumper.Magenta")).unwrap();
+            (b.position[0], b.position[1], b.radius)
+        };
+        let y = by + br + w.ball_radius + 0.01;
+        place(w, bx, y);
+        for _ in 0..16 { step(w); place(w, bx, y); }
+    }
+
+    fn enter_lock(w: &mut PhysicsWorld, i: usize) {
+        let (x, y) = w.rollover_center(&format!("LockedBallRollover{}", i + 1), 0).unwrap();
+        place(w, x, y);
+        step(w);
+    }
+
+    fn visible(w: &PhysicsWorld, id: &str) -> bool { w.rollover_group(id).unwrap().visible }
+
+    #[test]
+    fn locks_start_hidden_and_a_full_row_makes_the_first_ready() {
+        let mut w = world4();
+        for i in 1..=3 {
+            assert!(!visible(&w, &format!("LockedBallRollover{i}")));
+            assert!(w.group_ignores_ball(&format!("LockedBallRollover{i}")));
+        }
+        assert_eq!(w.wall_retracted("LockedBallKicker1"), Some(false));
+        assert_eq!(w.wall_retracted("LockedBallKicker2"), Some(true));
+        assert_eq!(w.wall_retracted("LockedBallKicker3"), Some(true));
+
+        fill_row(&mut w, 0);
+        assert!(messages(&w).iter().any(|m| m == "Ball Lock Ready"));
+        assert!(visible(&w, "LockedBallRollover1"));
+        assert!(!w.group_ignores_ball("LockedBallRollover1"));
+        assert!(w.group_ignores_ball("LockedBallRollover2"), "only the next lock");
+    }
+
+    #[test]
+    fn a_ball_in_the_lock_is_removed_and_the_next_row_is_used() {
+        let mut w = world4();
+        fill_row(&mut w, 0);
+        messages(&w);
+        enter_lock(&mut w, 0);
+        assert!(messages(&w).iter().any(|m| m == "Ball 1 Locked"));
+        assert!(w.take_relaunch_needed(), "no ball left on the field, a fresh one waits");
+        assert_eq!(w.wall_retracted("LockedBallKicker2"), Some(false), "the next lock's kicker comes out");
+
+        // The next bumper hit lights row 2 (index 1), not row 1.
+        let (bx, by, br) = {
+            let b = w.bumpers.iter().find(|b| b.shot_id.as_deref() == Some("Bumper.Red")).unwrap();
+            (b.position[0], b.position[1], b.radius)
+        };
+        let y = by + br + w.ball_radius + 0.01;
+        place(&mut w, bx, y);
+        for _ in 0..16 { step(&mut w); place(&mut w, bx, y); }
+        assert!(w.rollover_lit("Rollovers.Red", 1));
+    }
+
+    /// Fills rows and locks until the multiball starts.
+    fn start_multiball(w: &mut PhysicsWorld) {
+        for row in 0..3 {
+            fill_row(w, row);
+            enter_lock(w, row);
+        }
+    }
+
+    #[test]
+    fn the_third_lock_is_the_multiball() {
+        let mut w = world4();
+        start_multiball(&mut w);
+        let msgs = messages(&w);
+        assert!(msgs.iter().any(|m| m == "Multiball Ready"), "got {msgs:?}");
+        assert!(msgs.iter().any(|m| m == "Multiball!"), "got {msgs:?}");
+        assert_eq!(w.wall_retracted("LockedBallKicker2"), Some(false));
+
+        run_sim_seconds(&mut w, 1.2);
+        assert_eq!(w.ball_count(), 2, "one ball at 1 s");
+        assert_eq!(w.wall_retracted("LockedBallKicker2"), Some(true), "the lock kickers go");
+        assert_eq!(w.wall_retracted("LockedBallKicker3"), Some(true));
+        run_sim_seconds(&mut w, 2.6);
+        assert_eq!(w.ball_count(), 3, "another at 3.5 s");
+        for i in 1..=3 { assert!(!visible(&w, &format!("LockedBallRollover{i}"))); }
+        // The status lights are open to the balls now.
+        assert!(!w.group_ignores_ball("Rollovers.Blue"));
+    }
+
+    fn light_everything(w: &mut PhysicsWorld) {
+        for c in COLORS { for k in 0..3 { w.set_rollover(&format!("Rollovers.{c}"), k, true); } }
+    }
+
+    /// Lights all 18 status lights, the last by a ball.
+    fn jackpot_shot(w: &mut PhysicsWorld) {
+        light_everything(w);
+        w.set_rollover("Rollovers.Magenta", 2, false);
+        let (x, y) = w.rollover_center("Rollovers.Magenta", 2).unwrap();
+        place(w, x, y);
+        step(w);
+    }
+
+    #[test]
+    fn lighting_every_status_light_in_multiball_pays_a_growing_jackpot() {
+        let mut w = world4();
+        start_multiball(&mut w);
+        run_sim_seconds(&mut w, 4.0);
+        assert_eq!(w.ball_count(), 3);
+        messages(&w);
+        w.drain_score_events();
+        w.drain_multiplier_scale_events();
+
+        jackpot_shot(&mut w);
+        assert!(messages(&w).iter().any(|m| m == "Jackpot!"));
+        assert!(w.drain_score_events().contains(&25_000));
+        assert_eq!(w.drain_multiplier_scale_events(), vec![125]);
+        for c in COLORS { for k in 0..3 { assert!(!w.rollover_lit(&format!("Rollovers.{c}"), k)); } }
+
+        jackpot_shot(&mut w);
+        assert!(w.drain_score_events().contains(&30_000), "5,000 more each time");
+        assert_eq!(w.drain_multiplier_scale_events(), vec![130]);
+    }
+
+    #[test]
+    fn the_multiball_ends_at_one_ball_and_the_locks_start_over() {
+        let mut w = world4();
+        start_multiball(&mut w);
+        run_sim_seconds(&mut w, 4.0);
+        assert_eq!(w.ball_count(), 3);
+        w.game_time += 100.0; // no multiball saver
+        for i in (1..3).rev() {
+            let body = w.bodies.get_mut(w.balls[i].body).unwrap();
+            body.set_translation(Vector::new(5.0, -2.0), true);
+        }
+        run_sim_seconds(&mut w, 0.5);
+        assert_eq!(w.ball_count(), 1);
+        run_sim_seconds(&mut w, 0.5);
+        assert!(w.group_ignores_ball("Rollovers.Blue"), "status lights closed again");
+        messages(&w);
+        fill_row(&mut w, 0);
+        assert!(messages(&w).iter().any(|m| m == "Ball Lock Ready"), "back to the first lock");
+    }
+
+    #[test]
+    fn the_jackpot_scales_the_whole_multiplier() {
+        use crate::game::GameState;
+        let mut g = GameState::new(3);
+        g.multiplier = 2;
+        g.bonus_percent = 40;
+        g.scale_multiplier(125);
+        assert_eq!(g.multiplier_percent(), 300, "2.40 x 1.25 = 3.00");
+        g.scale_multiplier(130);
+        assert_eq!(g.multiplier_percent(), 390);
     }
 }

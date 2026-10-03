@@ -110,6 +110,9 @@ impl GameState {
         for pct in physics.drain_multiplier_percent_events() {
             self.bonus_percent = self.bonus_percent.saturating_add_signed(pct);
         }
+        for factor in physics.drain_multiplier_scale_events() {
+            self.scale_multiplier(factor);
+        }
         for delta in physics.drain_multiplier_events() {
             self.apply_multiplier_delta(delta);
             if delta > 0 {
@@ -139,6 +142,15 @@ impl GameState {
         self.multiplier = 1;
         self.bonus_percent = 0;
         self.super_mode_ticks = 0;
+    }
+
+    /// Multiplies the whole multiplier by `percent / 100`, rounding down like the
+    /// original's `(long) (multiplier * (100 + jackpot))`; the whole-number part
+    /// stays and the percent part takes the difference.
+    pub fn scale_multiplier(&mut self, percent: u64) {
+        let total = (self.multiplier * 100 + self.bonus_percent) as u64;
+        let scaled = (total * percent / 100).min(u32::MAX as u64) as u32;
+        self.bonus_percent = scaled.saturating_sub(self.multiplier * 100);
     }
 
     /// Adjusts the multiplier by `delta`, clamped to [1, MAX_MULTIPLIER] —
