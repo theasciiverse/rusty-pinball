@@ -226,6 +226,9 @@ struct MovingWallInfo {
 enum ScriptEvent {
     BumperHit { id: String, ball: usize },
     DropBankCleared { id: String, ball: usize },
+    /// One drop target fell (before the bank-cleared event, if it was the last).
+    DropTargetHit { id: String, ball: usize },
+    SpinnerActivated { id: String, ball: usize },
     RolloverGroupCompleted { id: String, ball: usize },
     /// A ball is inside a sensor; `previous` is the sensor it was in before.
     Sensor { id: String, ball: usize, previous: Option<String> },
@@ -537,6 +540,9 @@ pub struct PhysicsWorld {
     // Set when the last ball was removed without a ball loss (a lock); the
     // game must wait for a relaunch without costing a ball.
     relaunch_needed: bool,
+    // Which flippers the player held on the last step (table 8's skill shot asks).
+    left_held: bool,
+    right_held: bool,
 }
 
 impl PhysicsWorld {
@@ -572,6 +578,17 @@ impl PhysicsWorld {
         for (elem_idx, elem) in table.elements.iter().enumerate() {
             match elem {
                 ElementDef::WallElement(w) => {
+                    // A wall the script controls is built even if the table marks it
+                    // `disabled` (that means "starts retracted"); the script retracts it.
+                    let scripted_disabled = w.disabled == Some(true)
+                        && w.id.as_deref().map_or(false, |id| scripted_wall_ids.contains(&id));
+                    let enabled_copy;
+                    let w = if scripted_disabled {
+                        enabled_copy = WallDef { disabled: None, ..w.clone() };
+                        &enabled_copy
+                    } else {
+                        w
+                    };
                     let label = label_for(elem_idx, &w.id);
                     let wall_col = Self::add_wall(w, &mut bodies, &mut colliders, &mut wall_segs, w.layer, Some(label.clone()), parse_color(&w.color));
                     if w.ignore_ball == Some(true) {
@@ -809,6 +826,8 @@ impl PhysicsWorld {
             gate_cleared: false,
             gate_ball,
             relaunch_needed: false,
+            left_held: false,
+            right_held: false,
             script,
             scheduled: Vec::new(),
             script_events: Vec::new(),
@@ -1251,6 +1270,8 @@ impl PhysicsWorld {
     pub fn take_relaunch_needed(&mut self) -> bool { std::mem::take(&mut self.relaunch_needed) }
 
     pub fn step(&mut self, dt: f32, input: &InputState) {
+        self.left_held = input.left_flipper;
+        self.right_held = input.right_flipper;
         // Deferred collider disable for retractWhenHit walls.
         // We set retract_pending in the previous sub-step so that the kick
         // impulse has one full integration step to move the ball away before
@@ -1525,10 +1546,15 @@ impl PhysicsWorld {
                 if let Some(col) = self.colliders.get_mut(ch) {
                     col.set_collision_groups(InteractionGroups::none());
                 }
+                if let Some(id) = self.drop_target_groups[gi].shot_id.clone() {
+                    self.script_events.push(ScriptEvent::DropTargetHit { id, ball: bi });
+                }
 
                 let all_clear = self.drop_target_groups[gi].targets.iter().all(|t| !t.active);
                 if all_clear {
-                    self.score_events.borrow_mut().push(DROP_CLEAR_BONUS);
+                    // Our own clear bonus; the original pays only per target, so a
+                    // table with a script (the original's rules) does not get it.
+                    if self.script.is_none() { self.score_events.borrow_mut().push(DROP_CLEAR_BONUS); }
                     if let Some(pts) = Self::record_shot_opt(&mut self.letter_groups, &mut self.jackpot, &self.drop_target_groups[gi].shot_id) {
                         self.score_events.borrow_mut().push(pts);
                     }
@@ -1651,10 +1677,10 @@ impl PhysicsWorld {
         // on/off at a decaying frequency, scoring once per cycle, until the
         // frequency decays below min_cycles_per_second and it goes idle.
         {
-            let ball_pv: Vec<(Vector, Vector)> = balls_now.iter().map(|b| (b.1, b.2)).collect();
+            let ball_pv: Vec<(usize, Vector, Vector)> = balls_now.clone();
             for sp in &mut self.spinners {
                 if sp.status == SpinnerStatus::Inactive {
-                    for &(pos, vel) in &ball_pv {
+                    for &(bi, pos, vel) in &ball_pv {
                         if sp.status != SpinnerStatus::Inactive { break; }
                         let dx = pos.x - sp.position[0];
                         let dy = pos.y - sp.position[1];
@@ -1667,6 +1693,9 @@ impl PhysicsWorld {
                                 sp.status = SpinnerStatus::ActiveInvisible;
                                 if let Some(pts) = Self::record_shot_opt(&mut self.letter_groups, &mut self.jackpot, &sp.shot_id) {
                                     self.score_events.borrow_mut().push(pts);
+                                }
+                                if let Some(id) = sp.shot_id.clone() {
+                                    self.script_events.push(ScriptEvent::SpinnerActivated { id, ball: bi });
                                 }
                             }
                         }
@@ -1822,6 +1851,8 @@ impl PhysicsWorld {
                 match ev {
                     ScriptEvent::BumperHit { id, ball } => script.bumper_hit(self, ball, &id),
                     ScriptEvent::DropBankCleared { id, ball } => script.drop_bank_cleared(self, ball, &id),
+                    ScriptEvent::DropTargetHit { id, ball } => script.drop_target_hit(self, ball, &id),
+                    ScriptEvent::SpinnerActivated { id, ball } => script.spinner_activated(self, ball, &id),
                     ScriptEvent::RolloverGroupCompleted { id, ball } => script.rollover_group_completed(self, ball, &id),
                     ScriptEvent::Sensor { id, ball, previous } => script.sensor(self, ball, &id, previous.as_deref()),
                     ScriptEvent::Scheduled(token) => script.scheduled(self, token),
@@ -1930,6 +1961,52 @@ impl PhysicsWorld {
         if let Some(mw) = self.moving_walls.iter().find(|m| m.id == id) { return Some(!mw.active); }
         if id == LAUNCH_BARRIER_ID { return self.launch_barrier.as_ref().map(|b| !b.active); }
         None
+    }
+
+    fn left_flipper_held(&self) -> bool { self.left_held }
+
+    /// How many rollovers of the group are lit.
+    fn lit_count(&self, id: &str) -> usize {
+        self.rollover_group(id).map_or(0, |g| g.rollovers.iter().filter(|r| r.lit).count())
+    }
+
+    fn drop_target_group(&self, id: &str) -> Option<&DropTargetGroupInfo> {
+        self.drop_target_groups.iter().find(|g| g.shot_id.as_deref() == Some(id))
+    }
+
+    fn drop_target_count(&self, id: &str) -> usize {
+        self.drop_target_group(id).map_or(0, |g| g.targets.len())
+    }
+
+    /// True if target `index` of the bank is down.
+    fn drop_target_down(&self, id: &str, index: usize) -> bool {
+        self.drop_target_group(id).and_then(|g| g.targets.get(index)).map_or(false, |t| !t.active)
+    }
+
+    /// Knocks a target down or puts it back up.
+    fn set_drop_target_down(&mut self, id: &str, index: usize, down: bool) {
+        let Some(g) = self.drop_target_groups.iter_mut().find(|g| g.shot_id.as_deref() == Some(id)) else { return };
+        let Some(t) = g.targets.get_mut(index) else { return };
+        t.active = !down;
+        let groups = if down { InteractionGroups::none() } else { InteractionGroups::all() };
+        let collider = t.collider;
+        if let Some(col) = self.colliders.get_mut(collider) { col.set_collision_groups(groups); }
+    }
+
+    /// Puts every target of the bank back up (original: `makeAllTargetsVisible`).
+    fn make_targets_up(&mut self, id: &str) {
+        for i in 0..self.drop_target_count(id) { self.set_drop_target_down(id, i, false); }
+        if let Some(g) = self.drop_target_groups.iter_mut().find(|g| g.shot_id.as_deref() == Some(id)) {
+            g.reset_timer = None;
+        }
+    }
+
+    fn spinner_score(&self, id: &str) -> u64 {
+        self.spinners.iter().find(|s| s.shot_id.as_deref() == Some(id)).map_or(0, |s| s.score)
+    }
+
+    fn set_spinner_score(&mut self, id: &str, score: u64) {
+        if let Some(s) = self.spinners.iter_mut().find(|s| s.shot_id.as_deref() == Some(id)) { s.score = score; }
     }
 
     /// Shows or hides a whole rollover group.
@@ -2194,8 +2271,8 @@ impl PhysicsWorld {
     /// for the new ball.
     pub fn park_ball(&mut self) {
         self.place_parked_ball();
-        // Pending multiball launches belong to the ball that was just lost.
-        self.scheduled.clear();
+        // Scheduled actions are NOT cleared: as in the original, they fire whatever
+        // happens to the ball (table 8 schedules its rack light show at ball loss).
         // New ball: the launch barrier opens again (original ballLost/gameStarted).
         if let Some(barrier) = &mut self.launch_barrier {
             barrier.active = false;
@@ -3469,7 +3546,7 @@ mod rotating_triangle_tests {
             let w = PhysicsWorld::from_table(&load_table(n).unwrap());
             assert!(w.rotating_triangles.is_empty(), "table {n}");
             let ids: Vec<&str> = w.moving_walls.iter().map(|m| m.id.as_str()).collect();
-            let expected: &[&str] = if n == 4 { &["TopRampBlocker"] } else { &[] };
+            let expected: &[&str] = match n { 4 => &["TopRampBlocker"], 8 => &["LaunchGate"], _ => &[] };
             assert_eq!(ids, expected, "table {n}");
         }
     }
@@ -3976,15 +4053,15 @@ mod script_tests {
         assert!(!messages(&world).iter().any(|m| m == "Multiball!"));
     }
 
-    /// Pending multiball launches belong to the ball that was lost.
+    /// Scheduled actions fire whatever happens to the ball, as in the original
+    /// (table 8 schedules its rack light show at ball loss).
     #[test]
-    fn a_new_ball_cancels_pending_multiball_launches() {
+    fn pending_timers_survive_a_new_ball() {
         let (_, mut world) = world_for(1);
-        world.schedule(1000, 1);
-        world.schedule(3500, 1);
+        world.schedule(1000, 1); // Classic: launch another ball if fewer than three
         world.park_ball();
-        run_sim_seconds(&mut world, 5.0);
-        assert_eq!(world.ball_count(), 1);
+        run_sim_seconds(&mut world, 2.0);
+        assert_eq!(world.ball_count(), 2, "the timer still fired");
     }
 }
 
@@ -4978,5 +5055,251 @@ mod table_3_tests {
         assert_eq!(w.drain_multiplier_events(), vec![1]);
         clear_bank(&mut w, "DropTargetLeftSave");
         assert!(w.drain_message_events().iter().any(|m| m.0 == "Left Save Enabled"));
+    }
+}
+
+#[cfg(test)]
+mod table_8_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    fn world8() -> PhysicsWorld { PhysicsWorld::from_table(&load_table(8).unwrap()) }
+
+    fn place(w: &mut PhysicsWorld, x: f32, y: f32) {
+        let body = w.bodies.get_mut(w.balls[0].body).unwrap();
+        body.set_translation(Vector::new(x, y), true);
+        body.set_linvel(Vector::new(0.0, 0.0), true);
+        body.set_gravity_scale(0.0, true);
+    }
+
+    fn step(w: &mut PhysicsWorld) { w.step(1.0 / 240.0, &InputState::default()); }
+
+    fn run_sim_seconds(w: &mut PhysicsWorld, secs: f32) {
+        let frame = 0.033;
+        for _ in 0..(secs / (frame * w.time_ratio())).ceil() as usize { w.step_frame(frame, &InputState::default()); }
+    }
+
+    fn messages(w: &PhysicsWorld) -> Vec<String> { w.drain_message_events().into_iter().map(|m| m.0).collect() }
+
+    /// A world a couple of seconds in: the opening light show has finished.
+    fn ready_world() -> PhysicsWorld {
+        let mut w = world8();
+        run_sim_seconds(&mut w, 2.0);
+        place(&mut w, 1.0, 1.0);
+        w.drain_score_events();
+        messages(&w);
+        w
+    }
+
+    fn hit_target(w: &mut PhysicsWorld, group: &str, i: usize) {
+        let t = &w.drop_target_group(group).unwrap().targets[i];
+        let (mx, my) = ((t.x1 + t.x2) / 2.0, (t.y1 + t.y2) / 2.0);
+        place(w, mx, my);
+        step(w);
+        place(w, 1.0, 1.0);
+    }
+
+    fn lit(w: &PhysicsWorld, id: &str) -> Vec<bool> { w.rollover_group(id).unwrap().rollovers.iter().map(|r| r.lit).collect() }
+
+    fn through(w: &mut PhysicsWorld, id: &str, left_held: bool) {
+        let s = w.sensors.iter().find(|s| s.id == id).unwrap();
+        let (x, y) = ((s.rect[0] + s.rect[2]) / 2.0, (s.rect[1] + s.rect[3]) / 2.0);
+        place(w, x, y);
+        let mut input = InputState::default();
+        input.left_flipper = left_held;
+        w.step(1.0 / 240.0, &input);
+        place(w, 1.0, 1.0);
+    }
+
+    #[test]
+    fn the_table_starts_set_up_and_the_rack_lights_up_in_a_show() {
+        let mut w = world8();
+        assert_eq!(w.wall_retracted("LaunchGate"), Some(true), "the launch gate starts retracted");
+        assert_eq!(lit(&w, "LeftOrbitValueInserts"), vec![true, false, false]);
+        assert_eq!(lit(&w, "EightBallValueInserts"), vec![true, false, false]);
+        assert_eq!(w.spinner_score("LeftOrbitSpinner"), 500);
+        for hidden in ["BonusCollectSaucer", "LeftOutlane", "RightOutlane"] {
+            assert!(!w.rollover_group(hidden).unwrap().visible, "{hidden} starts hidden");
+        }
+        assert!(lit(&w, "RightBankInserts").iter().all(|&l| !l), "the show has not started");
+        run_sim_seconds(&mut w, 2.0);
+        assert!(lit(&w, "RightBankInserts").iter().all(|&l| l), "all seven rack lights are on after the show");
+    }
+
+    #[test]
+    fn each_sunk_ball_moves_its_light_from_the_bank_row_to_the_bonus_row() {
+        let mut w = ready_world();
+        hit_target(&mut w, "RightBankTargets", 0);
+        assert!(!lit(&w, "RightBankInserts")[6] && lit(&w, "BonusInserts")[6], "target 0 uses the mirrored slot 6");
+        hit_target(&mut w, "RightBankTargets", 2);
+        assert!(!lit(&w, "RightBankInserts")[4] && lit(&w, "BonusInserts")[4]);
+        assert_eq!(lit(&w, "BonusInserts").iter().filter(|&&l| l).count(), 2);
+        assert!(w.drain_score_events().iter().filter(|&&p| p == 2000).count() == 2, "2000 per target, no invented clear bonus");
+    }
+
+    #[test]
+    fn inline_targets_raise_the_end_of_ball_bonus_multiplier_to_five() {
+        let mut w = ready_world();
+        w.set_rollover("BonusInserts", 0, true);
+        w.set_rollover("BonusInserts", 1, true); // two sunk balls = 14000
+        for i in 0..4 { hit_target(&mut w, "InlineTargets", i); }
+        assert_eq!(lit(&w, "BonusMultiplierInserts"), vec![true; 4]);
+        w.drain_score_events();
+        w.ball_lost();
+        assert_eq!(w.drain_score_events(), vec![14_000 * 5], "x5 after four inline targets");
+        assert!(messages(&w).iter().any(|m| m == "Bonus: 70,000"));
+    }
+
+    #[test]
+    fn the_lane_rollovers_raise_the_spinner_and_the_eight_ball_value_three_times_at_most() {
+        let mut w = ready_world();
+        let complete = |w: &mut PhysicsWorld| {
+            let n = w.rollover_count("LaneRollovers");
+            for i in 0..n - 1 { w.set_rollover("LaneRollovers", i, true); }
+            let (x, y) = w.rollover_center("LaneRollovers", n - 1).unwrap();
+            place(w, x, y);
+            step(w);
+            place(w, 1.0, 1.0);
+        };
+        complete(&mut w);
+        assert!(messages(&w).iter().any(|m| m == "Lanes Completed"));
+        assert_eq!((w.spinner_score("LeftOrbitSpinner"), lit(&w, "LeftOrbitValueInserts")), (1000, vec![true, true, false]));
+        complete(&mut w);
+        assert_eq!(w.spinner_score("LeftOrbitSpinner"), 1500);
+        complete(&mut w);
+        assert_eq!(w.spinner_score("LeftOrbitSpinner"), 1500, "capped at 1500 a spin");
+        // Two real raises (20000 + 40000) make the pocket worth 60,000.
+        w.drain_score_events();
+        hit_target(&mut w, "EightBallTarget", 0);
+        assert!(messages(&w).iter().any(|m| m == "Corner Pocket: 60,000"));
+    }
+
+    #[test]
+    fn an_eight_ball_shot_before_the_bank_is_done_is_a_corner_pocket() {
+        let mut w = ready_world();
+        hit_target(&mut w, "EightBallTarget", 0);
+        assert_eq!(w.drain_score_events(), vec![20_000]);
+        assert!(messages(&w).iter().any(|m| m == "Corner Pocket: 20,000"));
+        assert!(!w.drop_target_down("EightBallTarget", 0), "the target is straight back up");
+    }
+
+    #[test]
+    fn finishing_the_bank_then_sinking_the_eight_ball_collects_the_whole_rack() {
+        let mut w = ready_world();
+        for i in 0..6 { w.set_drop_target_down("RightBankTargets", i, true); }
+        hit_target(&mut w, "RightBankTargets", 6);
+        assert!(messages(&w).iter().any(|m| m == "Shoot the Eight Ball!"));
+        assert!(w.rollover_lit("EightBallInsert", 0));
+
+        w.drain_score_events();
+        hit_target(&mut w, "EightBallTarget", 0);
+        assert!(messages(&w).iter().any(|m| m == "Bonus Collect Lit"));
+        assert!(lit(&w, "BonusInserts").iter().all(|&l| l), "all eight balls count");
+        assert!(w.drain_score_events().contains(&20_000), "plus the eight-ball value");
+        assert!(w.rollover_group("BonusCollectSaucer").unwrap().visible, "the collect saucer is shown");
+
+        // End of ball: one rack (56000) plus eight balls (56000) = 112,000.
+        w.ball_lost();
+        assert!(messages(&w).iter().any(|m| m == "Bonus: 112,000"));
+        w.park_ball();
+        run_sim_seconds(&mut w, 2.0);
+        assert!(lit(&w, "BonusInserts").iter().all(|&l| !l), "a completed rack starts over");
+        assert!(lit(&w, "RightBankInserts").iter().all(|&l| l) && !w.drop_target_down("RightBankTargets", 3), "light show and bank back up, even though a ball was lost");
+    }
+
+    #[test]
+    fn holding_the_left_flipper_at_launch_arms_the_breakshot() {
+        let mut w = ready_world();
+        through(&mut w, "LaunchGateRetract", true);
+        assert_eq!(w.wall_retracted("LeftGate"), Some(true), "the left gate opens");
+        hit_target(&mut w, "EightBallTarget", 0);
+        assert!(messages(&w).iter().any(|m| m == "Breakshot!"));
+        assert!(lit(&w, "BonusInserts").iter().all(|&l| l));
+    }
+
+    #[test]
+    fn the_breakshot_is_lost_once_the_ball_reaches_the_flippers() {
+        let mut w = ready_world();
+        through(&mut w, "LaunchGateRetract", true);
+        through(&mut w, "EndSkillShot", false);
+        hit_target(&mut w, "EightBallTarget", 0);
+        assert!(messages(&w).iter().any(|m| m.starts_with("Corner Pocket")));
+    }
+
+    #[test]
+    fn without_the_flipper_held_there_is_no_breakshot() {
+        let mut w = ready_world();
+        through(&mut w, "LaunchGateRetract", false);
+        assert_eq!(w.wall_retracted("LeftGate"), Some(false), "the left gate stays shut");
+        hit_target(&mut w, "EightBallTarget", 0);
+        assert!(messages(&w).iter().any(|m| m.starts_with("Corner Pocket")));
+    }
+
+    #[test]
+    fn the_gates_open_on_their_sensors_and_close_again_on_timers() {
+        let mut w = ready_world();
+        assert_eq!(w.wall_retracted("LaunchGate"), Some(true));
+        through(&mut w, "LaunchGateRetract", false);
+        run_sim_seconds(&mut w, 1.3);
+        assert_eq!(w.wall_retracted("LaunchGate"), Some(false), "the lane closes a second after the ball passes");
+
+        assert_eq!(w.wall_retracted("RightGate"), Some(false));
+        through(&mut w, "RightGateRetract", false);
+        assert_eq!(w.wall_retracted("RightGate"), Some(true));
+        run_sim_seconds(&mut w, 1.3);
+        assert_eq!(w.wall_retracted("RightGate"), Some(false));
+
+        // The left orbit spinner opens the left gate for two seconds.
+        let (sx, sy) = { let sp = &w.spinners[0]; (sp.position[0], sp.position[1]) };
+        place(&mut w, sx, sy);
+        w.bodies.get_mut(w.balls[0].body).unwrap().set_linvel(Vector::new(0.0, 12.0), true);
+        step(&mut w);
+        place(&mut w, 1.0, 1.0);
+        assert_eq!(w.wall_retracted("LeftGate"), Some(true));
+        run_sim_seconds(&mut w, 1.0);
+        assert_eq!(w.wall_retracted("LeftGate"), Some(true), "still open before the 2 s are up");
+        run_sim_seconds(&mut w, 1.5);
+        assert_eq!(w.wall_retracted("LeftGate"), Some(false));
+    }
+
+    #[test]
+    fn the_end_of_ball_bonus_is_scored_and_the_table_resets_except_the_sunk_balls() {
+        let mut w = ready_world();
+        for i in 0..3 { w.set_rollover("BonusInserts", i, true); }
+        hit_target(&mut w, "InlineTargets", 0);
+        w.set_spinner_score("LeftOrbitSpinner", 1500);
+        w.drain_score_events();
+        w.ball_lost();
+        assert_eq!(w.drain_score_events(), vec![21_000 * 2], "three balls at x2");
+        assert!(messages(&w).iter().any(|m| m == "Bonus: 42,000"));
+        assert_eq!(w.spinner_score("LeftOrbitSpinner"), 500, "back to 500");
+        assert!(!w.drop_target_down("InlineTargets", 0), "the inline targets come back");
+        assert_eq!(lit(&w, "BonusInserts").iter().filter(|&&l| l).count(), 3, "balls 1 to 7 stay sunk between balls");
+    }
+
+    #[test]
+    fn the_outlanes_scratch_and_the_saucer_pays_the_bonus() {
+        let mut w = ready_world();
+        let (x, y) = w.rollover_center("LeftOutlane", 0).unwrap();
+        place(&mut w, x, y);
+        step(&mut w);
+        assert!(messages(&w).iter().any(|m| m == "Scratch!"));
+        place(&mut w, 1.0, 1.0);
+        w.set_rollover("BonusInserts", 0, true);
+        let (x, y) = w.rollover_center("BonusCollectSaucer", 0).unwrap();
+        place(&mut w, x, y);
+        w.drain_score_events();
+        step(&mut w);
+        assert_eq!(w.drain_score_events(), vec![7_000]);
+        assert!(messages(&w).iter().any(|m| m == "Bonus Collected: 7,000"));
+    }
+
+    #[test]
+    fn numbers_get_commas() {
+        assert_eq!(scripts::with_commas(0), "0");
+        assert_eq!(scripts::with_commas(999), "999");
+        assert_eq!(scripts::with_commas(1_000), "1,000");
+        assert_eq!(scripts::with_commas(112_000), "112,000");
+        assert_eq!(scripts::with_commas(1_234_567), "1,234,567");
     }
 }

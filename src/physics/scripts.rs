@@ -33,6 +33,9 @@ pub(super) trait TableScript {
     fn ball_lost(&mut self, _w: &mut PhysicsWorld) {}
     fn bumper_hit(&mut self, _w: &mut PhysicsWorld, _ball: usize, _id: &str) {}
     fn drop_bank_cleared(&mut self, _w: &mut PhysicsWorld, _ball: usize, _id: &str) {}
+    /// One target of a bank was hit (the original's `processCollision` for drop targets).
+    fn drop_target_hit(&mut self, _w: &mut PhysicsWorld, _ball: usize, _id: &str) {}
+    fn spinner_activated(&mut self, _w: &mut PhysicsWorld, _ball: usize, _id: &str) {}
     /// A ball lit the last rollover of a group (not called for script-lit groups).
     fn rollover_group_completed(&mut self, _w: &mut PhysicsWorld, _ball: usize, _id: &str) {}
     /// A ball is inside the sensor `id` (called every step while it is). `previous`
@@ -50,6 +53,7 @@ pub(super) fn script_for(table: &TableDef) -> Option<Box<dyn TableScript>> {
         Some("Field4Delegate") => Some(Box::new(CompoundInterest { bumper_multiplier_increase: 1 })),
         Some("Field5Delegate") => Some(Box::new(EyeOfHorus { ramp_bonus: [0; 4] })),
         Some("Field6Delegate") => Some(Box::new(Orbiters::new(clock_seed()))),
+        Some("Field8Delegate") => Some(Box::new(PoolParty::new())),
         _ => None,
     }
 }
@@ -772,3 +776,247 @@ impl TableScript for Ringmaster {
 
 #[cfg(test)]
 pub(super) fn temperature_palette_for_test() -> Vec<(u8, u8, u8)> { temperature_palette() }
+
+// ---------------------------------------------------------------------------
+// Table 8: Pool Party (Field8Delegate)
+//
+// Sink the pool balls (the right-hand bank) and then the 8-ball. Each sunk
+// ball lights a bonus insert worth 7000 at the end of the ball; a full rack is
+// worth 56000 more every ball after. The inline targets raise the end-of-ball
+// bonus multiplier, the lane rollovers raise the spinner and the 8-ball value,
+// and holding the left flipper while launching gives one shot at the 8-ball
+// (the "breakshot"). Three gates open and close on timers. No multiball here.
+// ---------------------------------------------------------------------------
+
+const TOKEN_LAUNCH_GATE_CLOSE: u32 = 10;
+const TOKEN_LEFT_GATE_CLOSE: u32 = 11;
+const TOKEN_RIGHT_GATE_CLOSE: u32 = 12;
+const TOKEN_RIGHT_BANK_UP: u32 = 13;
+/// 20 + i lights insert i of the right bank during the light show.
+const TOKEN_LIGHT_SHOW: u32 = 20;
+
+const BALL_BONUS: u64 = 7_000;
+const RACK_BONUS: u64 = 56_000;
+const BASE_EIGHT_BALL_VALUE: u64 = 20_000;
+
+/// 20000 as "20,000".
+pub(super) fn with_commas(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 { out.push(','); }
+        out.push(ch);
+    }
+    out
+}
+
+struct PoolParty {
+    racks_completed: u64,
+    bonus_multiplier: u64,
+    eight_ball_value: u64,
+    right_bank_completed: bool,
+    skill_shot_active: bool,
+}
+
+impl PoolParty {
+    fn new() -> Self {
+        PoolParty { racks_completed: 0, bonus_multiplier: 1, eight_ball_value: BASE_EIGHT_BALL_VALUE, right_bank_completed: false, skill_shot_active: false }
+    }
+
+    fn reset_variables(&mut self, first_ball: bool) {
+        if first_ball { self.racks_completed = 0; }
+        self.bonus_multiplier = 1;
+        self.eight_ball_value = BASE_EIGHT_BALL_VALUE;
+        self.right_bank_completed = false;
+        self.skill_shot_active = false;
+    }
+
+    /// The right bank's inserts light one by one and the bank comes back up.
+    fn right_bank_light_show(w: &mut PhysicsWorld) {
+        for i in 0..7 {
+            w.schedule(500 + 100 * i as u32, TOKEN_LIGHT_SHOW + i as u32);
+        }
+        w.schedule(1200, TOKEN_RIGHT_BANK_UP);
+    }
+
+    fn reset_elements(&mut self, w: &mut PhysicsWorld, first_ball: bool) {
+        // The sunk balls carry over from ball to ball unless the bank was completed.
+        if self.right_bank_completed || first_ball {
+            w.set_all_rollovers("BonusInserts", false);
+            self.right_bank_completed = false;
+            Self::right_bank_light_show(w);
+        }
+        w.set_all_rollovers("LaneRollovers", false);
+        w.set_all_rollovers("BonusCollectSaucer", false);
+        w.set_rollovers_visible("BonusCollectSaucer", false);
+        w.set_rollovers_visible("LeftOutlane", false);
+        w.set_rollovers_visible("RightOutlane", false);
+
+        w.set_all_rollovers("EightBallInsert", false);
+        w.set_all_rollovers("BonusMultiplierInserts", false);
+        w.set_all_rollovers("LeftOrbitValueInserts", false);
+        w.activate_first_unlit_rollover("LeftOrbitValueInserts");
+        w.set_all_rollovers("EightBallValueInserts", false);
+        w.activate_first_unlit_rollover("EightBallValueInserts");
+
+        w.make_targets_up("EightBallTarget");
+        w.make_targets_up("InlineTargets");
+        w.set_spinner_score("LeftOrbitSpinner", 500);
+    }
+
+    /// The end-of-ball bonus: 7000 per sunk ball, plus 56000 per rack, times the multiplier.
+    fn bonus_total(&self, w: &PhysicsWorld) -> u64 {
+        (self.racks_completed * RACK_BONUS + w.lit_count("BonusInserts") as u64 * BALL_BONUS) * self.bonus_multiplier
+    }
+
+    /// Sinks the whole rack: the eight-ball shot at the breakshot or with the bank done.
+    fn collect_rack(&mut self, w: &mut PhysicsWorld) {
+        w.set_all_rollovers("BonusInserts", true);
+        w.set_all_rollovers("RightBankInserts", false);
+        let mut knocked_down = 0u64;
+        for i in 0..7 {
+            if !w.drop_target_down("RightBankTargets", i) {
+                knocked_down += 1;
+                w.set_drop_target_down("RightBankTargets", i, true);
+            }
+        }
+        w.add_score(3000 * knocked_down);
+        w.add_score(self.eight_ball_value);
+        self.skill_shot_active = false;
+        self.right_bank_completed = true;
+        w.set_rollovers_visible("BonusCollectSaucer", true);
+        self.racks_completed += 1;
+    }
+}
+
+impl TableScript for PoolParty {
+    fn handles_rollovers(&self) -> bool { true }
+
+    fn scripted_walls(&self) -> &'static [&'static str] { &["LaunchGate"] }
+
+    fn game_started(&mut self, w: &mut PhysicsWorld) {
+        // The launch gate starts retracted (the table marks it disabled).
+        w.set_wall_retracted("LaunchGate", true);
+        self.reset_elements(w, true);
+        self.reset_variables(true);
+    }
+
+    fn ball_lost(&mut self, w: &mut PhysicsWorld) {
+        let bonus = self.bonus_total(w);
+        w.add_score(bonus);
+        w.show_message(&format!("Bonus: {}", with_commas(bonus)), 3000);
+        self.reset_elements(w, false);
+        self.reset_variables(false);
+    }
+
+    fn drop_target_hit(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
+        match id {
+            // Each sunk ball moves its light from the bank's row to the bonus row (mirrored).
+            "RightBankTargets" => {
+                for i in 0..7 {
+                    if w.drop_target_down("RightBankTargets", i) {
+                        w.set_rollover("RightBankInserts", 6 - i, false);
+                        w.set_rollover("BonusInserts", 6 - i, true);
+                    }
+                }
+            }
+            // The inline targets raise the end-of-ball bonus multiplier, up to 5.
+            "InlineTargets" => {
+                if self.bonus_multiplier != 5 { self.bonus_multiplier += 1; }
+                w.activate_first_unlit_rollover("BonusMultiplierInserts");
+            }
+            _ => {}
+        }
+    }
+
+    fn drop_bank_cleared(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
+        match id {
+            "EightBallTarget" => {
+                if self.right_bank_completed {
+                    self.collect_rack(w);
+                    w.show_message("Bonus Collect Lit", 3000);
+                } else if self.skill_shot_active {
+                    self.collect_rack(w);
+                    w.show_message("Breakshot!", 3000);
+                } else {
+                    // A plain corner pocket: the target comes straight back up.
+                    w.make_targets_up("EightBallTarget");
+                    w.add_score(self.eight_ball_value);
+                    w.show_message(&format!("Corner Pocket: {}", with_commas(self.eight_ball_value)), 3000);
+                }
+            }
+            "RightBankTargets" if !self.right_bank_completed => {
+                self.right_bank_completed = true;
+                w.set_rollover("EightBallInsert", 0, true);
+                w.show_message("Shoot the Eight Ball!", 3000);
+            }
+            _ => {}
+        }
+    }
+
+    fn rollover_group_completed(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
+        match id {
+            "LaneRollovers" => {
+                w.show_message("Lanes Completed", 3000);
+                w.set_all_rollovers("LaneRollovers", false);
+                // Each completion raises the spinner and the eight-ball value, up to 1500 a spin.
+                let spin = w.spinner_score("LeftOrbitSpinner");
+                if spin < 1500 {
+                    w.set_spinner_score("LeftOrbitSpinner", spin + 500);
+                    w.activate_first_unlit_rollover("LeftOrbitValueInserts");
+                    self.eight_ball_value += 20_000;
+                    w.activate_first_unlit_rollover("EightBallValueInserts");
+                }
+            }
+            "BonusCollectSaucer" => {
+                let bonus = self.bonus_total(w);
+                w.add_score(bonus);
+                w.show_message(&format!("Bonus Collected: {}", with_commas(bonus)), 3000);
+            }
+            "LeftOutlane" | "RightOutlane" => w.show_message("Scratch!", 3000),
+            _ => {}
+        }
+    }
+
+    fn spinner_activated(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
+        if id == "LeftOrbitSpinner" {
+            // The left orbit's gate opens for two seconds.
+            w.set_wall_retracted("LeftGate", true);
+            w.schedule(2000, TOKEN_LEFT_GATE_CLOSE);
+        }
+    }
+
+    fn sensor(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str, _previous: Option<&str>) {
+        match id {
+            "LaunchGateRetract" => {
+                w.set_wall_retracted("LaunchGate", true);
+                w.schedule(1000, TOKEN_LAUNCH_GATE_CLOSE);
+                // Holding the left flipper as the ball is launched arms the breakshot.
+                if w.left_flipper_held() {
+                    self.skill_shot_active = true;
+                    w.set_wall_retracted("LeftGate", true);
+                    w.schedule(2000, TOKEN_LEFT_GATE_CLOSE);
+                }
+            }
+            "RightGateRetract" => {
+                w.set_wall_retracted("RightGate", true);
+                w.schedule(1000, TOKEN_RIGHT_GATE_CLOSE);
+            }
+            "EndSkillShot" => self.skill_shot_active = false,
+            _ => {}
+        }
+    }
+
+    fn scheduled(&mut self, w: &mut PhysicsWorld, token: u32) {
+        match token {
+            TOKEN_LAUNCH_GATE_CLOSE => w.set_wall_retracted("LaunchGate", false),
+            TOKEN_LEFT_GATE_CLOSE => w.set_wall_retracted("LeftGate", false),
+            TOKEN_RIGHT_GATE_CLOSE => w.set_wall_retracted("RightGate", false),
+            TOKEN_RIGHT_BANK_UP => w.make_targets_up("RightBankTargets"),
+            t if (TOKEN_LIGHT_SHOW..TOKEN_LIGHT_SHOW + 7).contains(&t) => {
+                w.set_rollover("RightBankInserts", (t - TOKEN_LIGHT_SHOW) as usize, true);
+            }
+            _ => {}
+        }
+    }
+}

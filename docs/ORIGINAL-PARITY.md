@@ -92,7 +92,7 @@ Round 1 leaves out only what needs more than one ball: ball locks, multiball lau
 | 6 | Orbiting planets, planet gravity, planet colors and activation, ramp detectors | DONE (all five planets on starts multiball, round 2) |
 | 4 | Status grid lit by bumpers, percent multiplier, ramp walls | DONE (locks, multiball, jackpot: round 2; the grid only lights row 1 until locks exist) |
 | 3 | Bumper bonus, heat meter, indicator rings | DONE (multiball and its flashing rings: round 2) |
-| 8 | Insert lights, rack bonus, gates | TODO |
+| 8 | Insert lights, rack bonus, gates, skill shot | DONE (whole table; decorative billiard-ball circles are still not drawn) |
 | 7 | Star-map field, constellations | TODO |
 
 ### Round 2: multiball for all tables
