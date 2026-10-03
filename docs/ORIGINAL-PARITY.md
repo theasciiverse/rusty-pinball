@@ -117,6 +117,7 @@ Landed on `rapier-0.36` (all with tests):
 - Flipper-cycled rollovers step once per press, in the original's direction; Left/Right Shift work the flippers.
 - Table 2 orbiting bumpers; table 5 rotating triangle (`src/physics/movers.rs`).
 - Table scripts, scheduled actions, game messages, and working multiball on tables 1 and 2 (`scripts.rs`).
+- Round 1 (centre pieces) complete for tables 2 to 8, see the tracker above. Mercy ball (20 s) and multiball saver (30 s). Rollovers hit when the ball's centre is inside the radius, as in the original.
 - Multi-ball core in the physics world (see C2): extra balls, silent drain while others remain, ball lock removal without loss, every element reacting to every ball, all balls drawn.
 - Launch barrier by sensors (tables 1, 2, 3, 5, 6, 7); drop banks reset after their `reset` delay (none = stays down);
   ball savers re-armed by clearing the matching bank, **not** on every new ball.

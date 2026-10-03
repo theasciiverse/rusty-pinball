@@ -1656,7 +1656,9 @@ impl PhysicsWorld {
                             if rv.lit { continue; }
                             let dx = bp.x - rv.x;
                             let dy = bp.y - rv.y;
-                            if dx * dx + dy * dy <= (rv.radius + self.ball_radius).powi(2) {
+                            // The ball's centre must be within the rollover's radius, as in the original
+                            // (and the editor); adding the ball's radius made them twice as easy to hit.
+                            if dx * dx + dy * dy <= rv.radius * rv.radius {
                                 rv.lit = true;
                                 rv.reset_timer = (rv.reset_seconds > 0.0).then_some(rv.reset_seconds);
                                 newly_lit = Some(bi);
@@ -5726,5 +5728,33 @@ mod ball_saver_rule_tests {
         assert!(w.multiball_start_time.is_none(), "single ball again");
         w.launch_extra_ball();
         assert!(w.multiball_start_time.is_some(), "a new multiball starts a new window");
+    }
+}
+
+#[cfg(test)]
+mod rollover_radius_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    /// The ball's centre decides, not its edge.
+    #[test]
+    fn a_rollover_needs_the_balls_centre_inside_its_radius() {
+        let mut w = PhysicsWorld::from_table(&load_table(4).unwrap());
+        let id = w.rollover_groups.iter().find(|g| !g.ignore_ball && g.shot_id.is_some()).and_then(|g| g.shot_id.clone()).unwrap();
+        let (x, y) = w.rollover_center(&id, 0).unwrap();
+        let r = w.rollover_radius(&id, 0).unwrap();
+        let place = |w: &mut PhysicsWorld, px: f32, py: f32| {
+            let body = w.bodies.get_mut(w.balls[0].body).unwrap();
+            body.set_translation(Vector::new(px, py), true);
+            body.set_linvel(Vector::new(0.0, 0.0), true);
+            body.set_gravity_scale(0.0, true);
+        };
+        // Just outside the radius, but with the ball's edge well inside it.
+        place(&mut w, x + r + 0.1, y);
+        w.step(1.0 / 240.0, &InputState::default());
+        assert!(!w.rollover_lit(&id, 0), "centre outside the radius: not lit");
+        place(&mut w, x + r - 0.05, y);
+        w.step(1.0 / 240.0, &InputState::default());
+        assert!(w.rollover_lit(&id, 0), "centre inside the radius: lit");
     }
 }
