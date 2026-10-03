@@ -3987,14 +3987,18 @@ mod script_building_block_tests {
 
     #[test]
     fn a_moved_rollover_is_lit_where_it_is_now() {
-        let mut world = PhysicsWorld::from_table(&load_table(6).unwrap());
-        world.set_rollover_center("Planet1", 0, 4.0, 22.0);
-        assert_eq!(world.rollover_center("Planet1", 0), Some((4.0, 22.0)));
+        // Table 4 has no script, so its rollovers are the generic ones.
+        let mut world = PhysicsWorld::from_table(&load_table(4).unwrap());
+        let id = world.rollover_groups.iter()
+            .find(|g| !g.ignore_ball && g.shot_id.is_some())
+            .and_then(|g| g.shot_id.clone()).unwrap();
+        world.set_rollover_center(&id, 0, 4.0, 22.0);
+        assert_eq!(world.rollover_center(&id, 0), Some((4.0, 22.0)));
         place(&mut world, 4.0, 22.0);
         world.step(1.0 / 240.0, &InputState::default());
-        assert!(world.rollover_lit("Planet1", 0), "the ball lit it at its new position");
-        world.set_rollover_color("Planet1", 0, Some((1, 2, 3)));
-        assert_eq!(world.snapshot().rollover_groups.iter().flat_map(|g| g.rollovers.iter()).any(|r| r.color == Some((1, 2, 3))), true);
+        assert!(world.rollover_lit(&id, 0), "the ball lit it at its new position");
+        world.set_rollover_color(&id, 0, Some((1, 2, 3)));
+        assert!(world.snapshot().rollover_groups.iter().flat_map(|g| g.rollovers.iter()).any(|r| r.color == Some((1, 2, 3))));
     }
 
     #[test]
