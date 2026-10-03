@@ -152,7 +152,7 @@ impl FieldRenderer {
         for kw in &snap.kick_walls {
             draw_line(&mut pixels, &mut grid,
                 to_cx(kw.x1), to_cy(kw.y1), to_cx(kw.x2), to_cy(kw.y2),
-                COL_KICK_WALL);
+                kw.color.map(rgb).unwrap_or(COL_KICK_WALL));
             if let Some(text) = &kw.label {
                 label_at(&mut labels, to_cx(kw.x1), to_cy(kw.y1), text);
             }
@@ -168,8 +168,13 @@ impl FieldRenderer {
         }
 
         for b in &snap.bumpers {
-            let outer_color = if b.lit { COL_BUMPER_LIT } else { b.outer_color.or(b.color).map(rgb).unwrap_or(COL_BUMPER) };
-            let inner_color = if b.lit { COL_BUMPER_LIT } else { b.color.map(rgb).unwrap_or(COL_BUMPER) };
+            // A hit flashes the bumper in the inverse of its colour, as in the original.
+            let flash = |c: Option<(u8, u8, u8)>| match c {
+                Some((r, g, b)) => Color::Rgb(255 - r, 255 - g, 255 - b),
+                None => COL_BUMPER_LIT,
+            };
+            let outer_color = if b.lit { flash(b.outer_color.or(b.color)) } else { b.outer_color.or(b.color).map(rgb).unwrap_or(COL_BUMPER) };
+            let inner_color = if b.lit { flash(b.color) } else { b.color.map(rgb).unwrap_or(COL_BUMPER) };
             let cx = to_cx(b.x);
             let cy = to_cy(b.y);
             if let Some(outer) = b.outer_radius {

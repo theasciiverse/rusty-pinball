@@ -19,6 +19,19 @@ use crate::{
 };
 
 const FRAME_MILLIS:  u64 = 33;
+/// A launch (or restart) press this soon after a ball was lost is ignored, as the original
+/// ignores touches for 750 ms, so a ball lost while mashing the key does not launch the next.
+const END_BALL_DELAY: Duration = Duration::from_millis(750);
+
+/// A ball was lost when the game state left `Playing` in its own sync.
+fn ball_lost_by_sync(before: Phase, after_sync: Phase) -> bool {
+    before == Phase::Playing && after_sync != Phase::Playing
+}
+
+/// True while a press should still be ignored after a ball was lost at `lost_at`.
+fn launch_locked(lost_at: Option<Instant>, now: Instant) -> bool {
+    lost_at.map_or(false, |t| now.saturating_duration_since(t) < END_BALL_DELAY)
+}
 
 enum Screen {
     Menu,
@@ -41,6 +54,7 @@ pub struct App {
     screen:        Screen,
     paused:        bool,
     debug_ids:     bool,
+    ball_lost_at:  Option<Instant>,
 }
 
 impl App {
@@ -75,6 +89,7 @@ impl App {
             screen:        Screen::Menu,
             paused:        false,
             debug_ids:     false,
+            ball_lost_at:  None,
         };
         if let Some(a) = &mut app.audio {
             a.set_enabled(app.sound_enabled);
@@ -184,6 +199,7 @@ impl App {
         // taking any other borrows from self.
         if k.kind == KeyEventKind::Press && k.code == KeyCode::Char(' ') {
             let is_game_over = matches!(&self.screen, Screen::Playing { game, .. } if game.phase == Phase::GameOver);
+            if is_game_over && launch_locked(self.ball_lost_at, Instant::now()) { return; }
             if is_game_over {
                 let table_n = match &self.screen {
                     Screen::Playing { table_idx, .. } => *table_idx,
@@ -198,12 +214,14 @@ impl App {
             }
         }
 
+        let lost_at = self.ball_lost_at;
         let Screen::Playing { game, physics, input, .. } = &mut self.screen else { return };
 
         input.handle_key(k);
 
         if k.kind == KeyEventKind::Press && k.code == KeyCode::Char(' ') {
             match game.phase {
+                Phase::WaitingToLaunch | Phase::BallLost if launch_locked(lost_at, Instant::now()) => {}
                 Phase::WaitingToLaunch | Phase::BallLost => {
                     // The launch sound comes with the world's launch event.
                     physics.launch_ball();
@@ -252,6 +270,10 @@ impl App {
             physics.step_frame(FRAME_MILLIS as f32 / 1000.0, input);
             let prev_phase = game.phase;
             game.sync(physics);
+            // Only the sync ends a ball. A ball lock or a ball that fell back into the
+            // shooter lane below also leave `Playing`, but are not a lost ball (the
+            // table's `ball_lost` rules, such as table 8's bonus, must not run for them).
+            let drained = ball_lost_by_sync(prev_phase, game.phase);
 
             // A ball lock removed the last ball without it being lost: wait for
             // a relaunch, and do not cost a ball.
@@ -279,7 +301,6 @@ impl App {
                 PhysicsSound::Launch => SoundTrigger::BallLaunch,
             }).collect();
             if game.take_message_sound() { events.push(SoundTrigger::Message); }
-            let drained = prev_phase == Phase::Playing && game.phase != Phase::Playing;
             if drained {
                 physics.ball_lost();
                 physics.park_ball();
@@ -290,6 +311,8 @@ impl App {
         } else {
             return;
         };
+
+        if ball_drained { self.ball_lost_at = Some(Instant::now()); }
 
         if self.sound_enabled {
             if let Some(audio) = &mut self.audio {
@@ -347,5 +370,27 @@ impl Drop for App {
         );
         let _ = disable_raw_mode();
         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_sync_leaving_play_is_a_lost_ball() {
+        assert!(ball_lost_by_sync(Phase::Playing, Phase::BallLost));
+        assert!(ball_lost_by_sync(Phase::Playing, Phase::GameOver));
+        assert!(!ball_lost_by_sync(Phase::Playing, Phase::Playing));
+        assert!(!ball_lost_by_sync(Phase::WaitingToLaunch, Phase::WaitingToLaunch));
+    }
+
+    #[test]
+    fn a_press_just_after_a_ball_is_lost_is_ignored_for_three_quarters_of_a_second() {
+        let lost = Instant::now();
+        assert!(launch_locked(Some(lost), lost + Duration::from_millis(100)));
+        assert!(launch_locked(Some(lost), lost + Duration::from_millis(749)));
+        assert!(!launch_locked(Some(lost), lost + Duration::from_millis(750)));
+        assert!(!launch_locked(None, lost), "no ball lost yet");
     }
 }

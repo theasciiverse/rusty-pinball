@@ -228,6 +228,7 @@ struct BumperInfo {
 // Slingshot / kicker wall: a WallElement with a non-zero kick value.
 struct KickWallInfo {
     layer: u8,
+    color: Option<(u8, u8, u8)>,
     x1: f32, y1: f32,
     x2: f32, y2: f32,
     kick_force: f32,
@@ -752,6 +753,7 @@ impl PhysicsWorld {
                             };
                             kick_walls.push(KickWallInfo {
                                 layer: w.layer.unwrap_or(0),
+                                color: parse_color(&w.color),
                                 x1, y1, x2, y2,
                                 kick_force: kick,
                                 score: w.score.unwrap_or(0),
@@ -2767,7 +2769,7 @@ impl PhysicsWorld {
 
         let kick_walls = self.kick_walls.iter()
             .filter(|kw| kw.active && kw.follows.is_none() && on(kw.layer))
-            .map(|kw| WallSnapshot { x1: kw.x1, y1: kw.y1, x2: kw.x2, y2: kw.y2, layer: None, label: Some(kw.label.clone()), color: None, inactive: None })
+            .map(|kw| WallSnapshot { x1: kw.x1, y1: kw.y1, x2: kw.x2, y2: kw.y2, layer: None, label: Some(kw.label.clone()), color: kw.color, inactive: None })
             .collect();
 
         let drop_targets: Vec<WallSnapshot> = self.drop_target_groups.iter().filter(|g| shown(g.layer, g.inactive))
@@ -7180,5 +7182,30 @@ mod engine_rule_tests {
         w.drain_sound_events();
         touch(&mut w, x, y);
         assert!(sounds(&w).0 >= 1, "the script dings");
+    }
+
+    #[test]
+    fn slingshots_and_savers_are_drawn_in_the_tables_own_colours() {
+        let w = world(1);
+        let snap = w.snapshot();
+        assert!(snap.kick_walls.iter().any(|k| k.color == Some((0, 255, 0))), "the ball savers are green");
+        assert!(snap.kick_walls.iter().any(|k| k.color == Some((0, 0, 255))), "the slingshots are blue");
+    }
+
+    #[test]
+    fn a_hit_bumper_flashes_in_the_inverse_of_its_colour() {
+        let mut w = world(1);
+        let i = w.bumpers.iter().position(|b| b.color.is_some()).expect("a coloured bumper");
+        let (r, g, b) = w.bumpers[i].color.unwrap();
+        let (x, y) = (w.bumpers[i].position[0], w.bumpers[i].position[1] + w.bumpers[i].radius + w.ball_radius + 0.01);
+        let body = w.bodies.get_mut(w.balls[0].body).unwrap();
+        body.set_translation(Vector::new(x, y), true);
+        body.set_linvel(Vector::new(0.0, 0.0), true);
+        body.set_gravity_scale(0.0, true);
+        w.step(1.0 / 240.0, &InputState::default());
+        let snap = w.snapshot();
+        assert!(snap.bumpers.iter().any(|s| s.lit), "the bumper is lit");
+        let frame = crate::renderer::FieldRenderer::new().render(&snap, 0.0, 100, 70, false);
+        assert!(frame.colors.contains(&ratatui::style::Color::Rgb(255 - r, 255 - g, 255 - b)), "drawn inverted");
     }
 }
