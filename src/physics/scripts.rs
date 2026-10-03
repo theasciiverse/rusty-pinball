@@ -47,6 +47,7 @@ pub(super) fn script_for(table: &TableDef) -> Option<Box<dyn TableScript>> {
         Some("Field1Delegate") => Some(Box::new(Classic)),
         Some("Field2Delegate") => Some(Box::new(RoundAndRound)),
         Some("Field4Delegate") => Some(Box::new(CompoundInterest { bumper_multiplier_increase: 1 })),
+        Some("Field5Delegate") => Some(Box::new(EyeOfHorus { ramp_bonus: [0; 4] })),
         Some("Field6Delegate") => Some(Box::new(Orbiters::new(clock_seed()))),
         _ => None,
     }
@@ -466,6 +467,143 @@ impl TableScript for CompoundInterest {
             "AfterRampKickerSensor" => {
                 w.set_wall_retracted("TopRampBlocker", false);
                 w.set_wall_retracted("RightRampKicker", false);
+            }
+            _ => {}
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Table 5: Eye of Horus (Field5Delegate; the rotating triangle is in movers.rs)
+//
+// Four ramps each give the ball a colour. The centre diagram has three lights
+// per colour that only a ball of that colour can light (they appear while such
+// a ball is on the field), and a line joins two neighbouring lit lights. Each
+// ramp's drop bank raises that colour's ramp bonus. Lighting every line makes
+// multiball ready, and the extra ball, the pyramid and the multiball itself are
+// round 2; the extra-ball area is here.
+// ---------------------------------------------------------------------------
+
+const COLOR_NAMES: [&str; 4] = ["Blue", "Red", "Yellow", "Green"];
+const BALL_COLORS_5: [Rgb; 4] = [(0x66, 0x88, 0xEE), (0xEE, 0x88, 0x88), (0xCC, 0xCC, 0x77), (0x77, 0xDD, 0x77)];
+const WALL_COLORS_5: [Rgb; 4] = [(0x00, 0x66, 0xFF), (0xCC, 0x00, 0x00), (0xCC, 0xCC, 0x00), (0x00, 0xCC, 0x00)];
+const DISABLED_COLORS_5: [Rgb; 4] = [(0x00, 0x33, 0x66), (0x66, 0x00, 0x00), (0x66, 0x66, 0x00), (0x00, 0x66, 0x00)];
+const RAMP_BASE_SCORE_5: u64 = 5000;
+
+struct EyeOfHorus {
+    /// Percent added to each colour's ramp score (10 per cleared ramp bank).
+    ramp_bonus: [u32; 4],
+}
+
+impl EyeOfHorus {
+    fn center_rollover(color: usize, n: usize) -> String { format!("CenterRollover_{}_{}", COLOR_NAMES[color], n + 1) }
+
+    fn center_line(color: usize, n: usize) -> String {
+        format!("CenterLine_{}_{}_{}", COLOR_NAMES[color], n + 1, (n + 1) % 3 + 1)
+    }
+
+    fn all_lit_for_color(w: &PhysicsWorld, color: usize) -> bool {
+        (0..3).all(|n| w.rollovers_all_lit(&Self::center_rollover(color, n)))
+    }
+
+    /// A ramp counts when the ball came through its other detector first. It
+    /// gives the ball the ramp's colour unless a ball already has it or the
+    /// colour is complete, and scores 5000 plus the colour's bonus (doubled with
+    /// more than one ball in play).
+    fn check_ramp(&self, w: &mut PhysicsWorld, ball: usize, previous: Option<&str>, required: &str, color: usize) {
+        if previous != Some(required) { return; }
+        if !w.any_ball_has_color(BALL_COLORS_5[color]) && !Self::all_lit_for_color(w, color) {
+            w.set_ball_color(ball, Some(BALL_COLORS_5[color]));
+        }
+        let mut percent = 100 + self.ramp_bonus[color] as u64;
+        if w.ball_count() > 1 { percent *= 2; }
+        w.add_score(RAMP_BASE_SCORE_5 / 100 * percent);
+    }
+
+    /// Back at the extra-ball exit: if the extra ball was won, light it out and
+    /// put the four coloured barriers back.
+    fn reset_extra_ball(&self, w: &mut PhysicsWorld) {
+        if w.rollovers_all_lit("ExtraBallRollover") {
+            w.set_all_rollovers("ExtraBallRollover", false);
+            for name in COLOR_NAMES {
+                w.set_wall_retracted(&format!("ExtraBallBarrier_{name}"), false);
+            }
+        }
+    }
+}
+
+impl TableScript for EyeOfHorus {
+    fn handles_rollovers(&self) -> bool { true }
+
+    fn tick(&mut self, w: &mut PhysicsWorld, _dt: f32) {
+        // The centre lights answer only to a ball of their colour, and show only
+        // while such a ball is on the field (dim if already lit).
+        for color in 0..4 {
+            let has = w.any_ball_has_color(BALL_COLORS_5[color]);
+            for n in 0..3 {
+                let id = Self::center_rollover(color, n);
+                w.set_group_ignore_ball(&id, !has);
+                if has {
+                    w.set_rollovers_visible(&id, true);
+                    w.set_rollover_color(&id, 0, Some(WALL_COLORS_5[color]));
+                } else {
+                    let lit = w.rollovers_all_lit(&id);
+                    w.set_rollovers_visible(&id, lit);
+                    if lit { w.set_rollover_color(&id, 0, Some(DISABLED_COLORS_5[color])); }
+                }
+            }
+            // A line joins each pair of neighbouring lit lights.
+            for n in 0..3 {
+                let both = w.rollovers_all_lit(&Self::center_rollover(color, n))
+                    && w.rollovers_all_lit(&Self::center_rollover(color, (n + 1) % 3));
+                w.set_decor_visible(&Self::center_line(color, n), both);
+            }
+        }
+    }
+
+    fn game_started(&mut self, w: &mut PhysicsWorld) {
+        // The diagram starts hidden; the barriers start in place.
+        for color in 0..4 {
+            for n in 0..3 {
+                w.set_rollovers_visible(&Self::center_rollover(color, n), false);
+                w.set_decor_visible(&Self::center_line(color, n), false);
+            }
+        }
+        for name in COLOR_NAMES {
+            w.set_wall_retracted(&format!("ExtraBallBarrier_{name}"), false);
+        }
+    }
+
+    fn sensor(&mut self, w: &mut PhysicsWorld, ball: usize, id: &str, previous: Option<&str>) {
+        match id {
+            "RampSensor_OuterLeftTop" => self.check_ramp(w, ball, previous, "RampSensor_OuterRightTop", 3),
+            "RampSensor_OuterRightTop" => self.check_ramp(w, ball, previous, "RampSensor_OuterLeftTop", 0),
+            "RampSensor_LeftTop" => self.check_ramp(w, ball, previous, "RampSensor_LeftMiddle", 1),
+            "RampSensor_RightTop" => self.check_ramp(w, ball, previous, "RampSensor_RightMiddle", 2),
+            "Sensor_ExtraBallExit" => self.reset_extra_ball(w),
+            _ => {}
+        }
+    }
+
+    fn drop_bank_cleared(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
+        announce_saver(w, "DropTargetLeftSave", "DropTargetRightSave", id);
+        for (color, name) in COLOR_NAMES.iter().enumerate() {
+            if id == format!("DropTargets_{name}Ramp") {
+                self.ramp_bonus[color] += 10;
+                w.show_message(&format!("{name} ramp +{}%", self.ramp_bonus[color]), 1500);
+            }
+        }
+    }
+
+    fn rollover_group_completed(&mut self, w: &mut PhysicsWorld, _ball: usize, id: &str) {
+        match id {
+            "FlipperRollovers" => {
+                w.set_all_rollovers(id, false);
+                w.increment_multiplier();
+            }
+            "ExtraBallRollover" => {
+                w.add_extra_ball();
+                w.show_message("Extra Ball!", 3000);
             }
             _ => {}
         }

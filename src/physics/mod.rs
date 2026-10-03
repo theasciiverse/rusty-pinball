@@ -237,6 +237,15 @@ struct SensorInfo {
     from_layer: Option<u8>,
 }
 
+/// A line that is drawn but has no body (`ignoreBall` walls such as table 5's
+/// centre diagram). Scripts show and hide them.
+struct DecorLineInfo {
+    id: String,
+    x1: f32, y1: f32, x2: f32, y2: f32,
+    color: Option<(u8, u8, u8)>,
+    visible: bool,
+}
+
 /// One ball in play. `balls[0]` is the "primary" ball, the one parked in the
 /// shooter lane between balls; extra balls exist only during multiball.
 struct BallState {
@@ -288,6 +297,8 @@ struct RolloverGroupInfo {
     shot_id:          Option<String>,
     // 0 = completing this group doesn't touch the multiplier.
     multiplier_step:  u32,
+    // A hidden group is not drawn (scripts show and hide groups as the original does).
+    visible:          bool,
 }
 
 struct LayerSensorInfo {
@@ -464,6 +475,7 @@ pub struct PhysicsWorld {
     rotating_groups:    Vec<movers::RotatingGroup>,
     launch_barrier:     Option<LaunchBarrierInfo>,
     moving_walls:       Vec<MovingWallInfo>,
+    decor_lines:        Vec<DecorLineInfo>,
     rotating_triangles: Vec<movers::RotatingTriangle>,
     kick_walls:         Vec<KickWallInfo>,
     drop_target_groups: Vec<DropTargetGroupInfo>,
@@ -485,6 +497,8 @@ pub struct PhysicsWorld {
     // Signed multiplier deltas (currently only ever positive) from
     // multiplier-step rollover groups completing.
     multiplier_events: RefCell<Vec<i32>>,
+    // Extra balls a table script awarded this step (table 5).
+    extra_ball_events: RefCell<u32>,
     // Percent points a table script adds to the multiplier (table 4's bumpers).
     multiplier_percent_events: RefCell<Vec<i32>>,
     // Count of "start (or restart) the timed super mode" triggers this step.
@@ -533,6 +547,7 @@ impl PhysicsWorld {
         let mut sensors: Vec<SensorInfo> = Vec::new();
         let mut launch_barrier: Option<LaunchBarrierInfo> = None;
         let mut moving_walls: Vec<MovingWallInfo> = Vec::new();
+        let mut decor_lines: Vec<DecorLineInfo> = Vec::new();
         let (mut barrier_close_rect, mut barrier_open_rect) = (None, None);
 
         // Gravity points downward in rapier (negative y)
@@ -549,6 +564,14 @@ impl PhysicsWorld {
                 ElementDef::WallElement(w) => {
                     let label = label_for(elem_idx, &w.id);
                     let wall_col = Self::add_wall(w, &mut bodies, &mut colliders, &mut wall_segs, w.layer, Some(label.clone()), parse_color(&w.color));
+                    if w.ignore_ball == Some(true) {
+                        if let Some([x1, y1, x2, y2]) = w.position {
+                            decor_lines.push(DecorLineInfo {
+                                id: w.id.clone().unwrap_or_else(|| label.clone()),
+                                x1, y1, x2, y2, color: parse_color(&w.color), visible: true,
+                            });
+                        }
+                    }
                     let mut moving_index: Option<usize> = None;
                     if let (Some(id), Some(col), Some([x1, y1, x2, y2])) = (w.id.as_deref(), wall_col, w.position) {
                         if id.starts_with("TriangleWall") || scripted_wall_ids.contains(&id) {
@@ -746,6 +769,7 @@ impl PhysicsWorld {
             rotating_groups: movers::build_rotating_groups(table, &bumpers_info),
             rotating_triangles: movers::build_rotating_triangles(table, &moving_walls),
             moving_walls,
+            decor_lines,
             launch_barrier,
             bumpers: bumpers_info,
             kick_walls,
@@ -761,6 +785,7 @@ impl PhysicsWorld {
             sound_events: RefCell::new(Vec::new()),
             multiplier_events: RefCell::new(Vec::new()),
             multiplier_percent_events: RefCell::new(Vec::new()),
+            extra_ball_events: RefCell::new(0),
             super_mode_events: RefCell::new(0),
             drain_y: 1.0,
             field_width:  table.width,
@@ -1072,6 +1097,7 @@ impl PhysicsWorld {
             label,
             shot_id: r.id.clone(),
             multiplier_step: r.multiplier_step.unwrap_or(0),
+            visible: true,
         }
     }
 
@@ -1879,6 +1905,30 @@ impl PhysicsWorld {
         None
     }
 
+    /// Shows or hides a whole rollover group.
+    fn set_rollovers_visible(&mut self, id: &str, visible: bool) {
+        if let Some(g) = self.rollover_group_mut(id) { g.visible = visible; }
+    }
+
+    /// Whether balls light the group's rollovers (original: `setIgnoreBall`).
+    fn set_group_ignore_ball(&mut self, id: &str, ignore: bool) {
+        if let Some(g) = self.rollover_group_mut(id) { g.ignore_ball = ignore; }
+    }
+
+    /// Shows or hides a drawn-only line (an `ignoreBall` wall).
+    fn set_decor_visible(&mut self, id: &str, visible: bool) {
+        if let Some(d) = self.decor_lines.iter_mut().find(|d| d.id == id) { d.visible = visible; }
+    }
+
+    /// Awards an extra ball (the game state adds it to the balls left).
+    fn add_extra_ball(&self) {
+        *self.extra_ball_events.borrow_mut() += 1;
+    }
+
+    pub fn drain_extra_ball_events(&self) -> u32 {
+        std::mem::take(&mut *self.extra_ball_events.borrow_mut())
+    }
+
     /// Adds `percent` points to the score multiplier (1 = +0.01x).
     fn add_multiplier_percent(&self, percent: i32) {
         self.multiplier_percent_events.borrow_mut().push(percent);
@@ -2252,7 +2302,7 @@ impl PhysicsWorld {
                 None
             };
             RolloverGroupSnapshot {
-                rollovers: g.rollovers.iter().enumerate().map(|(i, rv)| RolloverSnapshot {
+                rollovers: g.rollovers.iter().enumerate().filter(|_| g.visible).map(|(i, rv)| RolloverSnapshot {
                     x: rv.x, y: rv.y, radius: rv.radius,
                     lit: flash_override.unwrap_or(rv.lit),
                     label: format!("{}.{}", g.label, i),
@@ -2277,7 +2327,8 @@ impl PhysicsWorld {
 
         FieldSnapshot {
             balls,
-            walls: self.wall_segments.iter().cloned().chain(self.moving_walls.iter().filter(|w| w.active).map(|w| WallSnapshot { x1: w.x1, y1: w.y1, x2: w.x2, y2: w.y2, layer: None, label: Some(w.id.clone()), color: w.color }))
+            walls: self.wall_segments.iter().cloned().chain(self.decor_lines.iter().filter(|d| d.visible).map(|d| WallSnapshot { x1: d.x1, y1: d.y1, x2: d.x2, y2: d.y2, layer: None, label: Some(d.id.clone()), color: d.color }))
+                .chain(self.moving_walls.iter().filter(|w| w.active).map(|w| WallSnapshot { x1: w.x1, y1: w.y1, x2: w.x2, y2: w.y2, layer: None, label: Some(w.id.clone()), color: w.color }))
                 .chain(self.launch_barrier.iter().filter(|b| b.active).map(|b| WallSnapshot { x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2, layer: None, label: None, color: b.color })).collect(),
             kick_walls,
             bumpers,
@@ -4531,5 +4582,192 @@ mod table_5_triangle_kick_tests {
         assert_eq!(snap.walls.iter().filter(|s| s.label.as_deref().map_or(false, |l| l.contains("TriangleWall"))).count(), 2);
         world.set_wall_retracted("TriangleWall2", false);
         assert_eq!(world.snapshot().walls.iter().filter(|s| s.label.as_deref().map_or(false, |l| l.contains("TriangleWall"))).count(), 3);
+    }
+}
+
+#[cfg(test)]
+mod table_5_center_tests {
+    use super::*;
+    use crate::game::GameState;
+    use crate::table::load_table;
+
+    const BLUE: (u8, u8, u8) = (0x66, 0x88, 0xEE);
+    const RED: (u8, u8, u8) = (0xEE, 0x88, 0x88);
+
+    fn world5() -> PhysicsWorld { PhysicsWorld::from_table(&load_table(5).unwrap()) }
+
+    fn place(w: &mut PhysicsWorld, x: f32, y: f32) {
+        let body = w.bodies.get_mut(w.balls[0].body).unwrap();
+        body.set_translation(Vector::new(x, y), true);
+        body.set_linvel(Vector::new(0.0, 0.0), true);
+        body.set_gravity_scale(0.0, true);
+    }
+
+    fn step(w: &mut PhysicsWorld) { w.step(1.0 / 240.0, &InputState::default()); }
+    fn messages(w: &PhysicsWorld) -> Vec<String> { w.drain_message_events().into_iter().map(|m| m.0).collect() }
+
+    fn through(w: &mut PhysicsWorld, id: &str) {
+        let s = w.sensors.iter().find(|s| s.id == id).unwrap_or_else(|| panic!("no sensor {id}"));
+        let (x, y) = ((s.rect[0] + s.rect[2]) / 2.0, (s.rect[1] + s.rect[3]) / 2.0);
+        w.balls[0].layer = s.from_layer.unwrap_or(w.balls[0].layer);
+        place(w, x, y);
+        step(w);
+    }
+
+    fn on(w: &mut PhysicsWorld, group: &str) {
+        let (x, y) = w.rollover_center(group, 0).unwrap();
+        place(w, x, y);
+        step(w);
+        step(w); // the first step lets the script unlock the lights, the second lights it
+    }
+
+    fn visible_lines(w: &PhysicsWorld) -> Vec<String> {
+        w.snapshot().walls.iter().filter_map(|s| s.label.clone()).filter(|l| l.starts_with("CenterLine")).collect()
+    }
+
+    fn ramp_awards(w: &PhysicsWorld) -> Vec<u64> { w.drain_score_events().into_iter().filter(|&p| p >= 5000).collect() }
+
+    #[test]
+    fn the_centre_diagram_starts_hidden_and_inert() {
+        let w = world5();
+        for color in ["Blue", "Red", "Yellow", "Green"] {
+            for n in 1..=3 {
+                let id = format!("CenterRollover_{color}_{n}");
+                let g = w.rollover_group(&id).unwrap();
+                assert!(!g.visible && g.ignore_ball, "{id} starts hidden and ignoring the ball");
+            }
+        }
+        assert!(visible_lines(&w).is_empty());
+        assert!(w.snapshot().rollover_groups.iter().all(|g| g.rollovers.iter().all(|r| !r.label.contains("CenterRollover"))));
+    }
+
+    #[test]
+    fn a_ramp_in_order_colours_the_ball_scores_and_reveals_that_colours_lights() {
+        let mut w = world5();
+        w.drain_score_events();
+        through(&mut w, "RampSensor_OuterLeftTop");
+        through(&mut w, "RampSensor_OuterRightTop"); // left then right: blue (right then left is green)
+        assert_eq!(w.ball_color(0), Some(BLUE));
+        assert_eq!(ramp_awards(&w), vec![5000]);
+        step(&mut w);
+        for n in 1..=3 {
+            let g = w.rollover_group(&format!("CenterRollover_Blue_{n}")).unwrap();
+            assert!(g.visible && !g.ignore_ball, "blue light {n} shows and answers to the ball");
+            assert!(w.rollover_group(&format!("CenterRollover_Red_{n}")).unwrap().ignore_ball, "red stays out");
+        }
+    }
+
+    #[test]
+    fn a_ramp_taken_the_wrong_way_does_nothing() {
+        let mut w = world5();
+        w.drain_score_events();
+        through(&mut w, "RampSensor_OuterLeftTop");
+        assert_eq!(w.ball_color(0), None);
+        assert!(ramp_awards(&w).is_empty());
+    }
+
+    #[test]
+    fn only_a_ball_of_the_colour_lights_a_light_and_neighbours_get_a_line() {
+        let mut w = world5();
+        w.set_ball_color(0, Some(RED));
+        step(&mut w);
+        on(&mut w, "CenterRollover_Blue_1");
+        assert!(!w.rollover_lit("CenterRollover_Blue_1", 0), "a red ball cannot light a blue light");
+
+        w.set_ball_color(0, Some(BLUE));
+        on(&mut w, "CenterRollover_Blue_1");
+        assert!(w.rollover_lit("CenterRollover_Blue_1", 0));
+        assert!(visible_lines(&w).is_empty(), "one lit light has no line");
+        on(&mut w, "CenterRollover_Blue_2");
+        assert_eq!(visible_lines(&w), vec!["CenterLine_Blue_1_2".to_string()]);
+        on(&mut w, "CenterRollover_Blue_3");
+        let mut lines = visible_lines(&w);
+        lines.sort();
+        assert_eq!(lines, vec!["CenterLine_Blue_1_2", "CenterLine_Blue_2_3", "CenterLine_Blue_3_1"], "a whole triangle");
+    }
+
+    #[test]
+    fn lit_lights_stay_dim_after_the_ball_is_lost_and_unlit_ones_hide() {
+        let mut w = world5();
+        w.set_ball_color(0, Some(BLUE));
+        step(&mut w);
+        on(&mut w, "CenterRollover_Blue_1");
+        w.park_ball();
+        step(&mut w);
+        let lit = w.rollover_group("CenterRollover_Blue_1").unwrap();
+        assert!(lit.visible && lit.ignore_ball, "a lit light stays, dimmed, and ignores the ball");
+        assert!(!w.rollover_group("CenterRollover_Blue_2").unwrap().visible, "unlit ones hide");
+        assert_eq!(w.rollover_group("CenterRollover_Blue_1").unwrap().rollovers[0].color, Some((0x00, 0x33, 0x66)));
+    }
+
+    #[test]
+    fn clearing_a_ramp_bank_raises_that_colours_ramp_score() {
+        let mut w = world5();
+        let gi = w.drop_target_groups.iter().position(|g| g.shot_id.as_deref() == Some("DropTargets_BlueRamp")).unwrap();
+        let last = w.drop_target_groups[gi].targets.len() - 1;
+        for ti in 0..last {
+            w.drop_target_groups[gi].targets[ti].active = false;
+            let ch = w.drop_target_groups[gi].targets[ti].collider;
+            w.colliders.get_mut(ch).unwrap().set_collision_groups(InteractionGroups::none());
+        }
+        let t = &w.drop_target_groups[gi].targets[last];
+        let (mx, my) = ((t.x1 + t.x2) / 2.0, (t.y1 + t.y2) / 2.0);
+        place(&mut w, mx, my);
+        step(&mut w);
+        assert!(messages(&w).iter().any(|m| m == "Blue ramp +10%"));
+
+        w.drain_score_events();
+        place(&mut w, 1.0, 1.0);
+        through(&mut w, "RampSensor_OuterLeftTop");
+        through(&mut w, "RampSensor_OuterRightTop");
+        assert_eq!(ramp_awards(&w), vec![5500], "+10% on blue");
+        through(&mut w, "RampSensor_LeftMiddle");
+        through(&mut w, "RampSensor_LeftTop"); // red, no bonus
+        assert!(ramp_awards(&w).contains(&5000), "red is unchanged");
+    }
+
+    #[test]
+    fn a_finished_colour_no_longer_colours_the_ball() {
+        let mut w = world5();
+        for n in 1..=3 { w.set_all_rollovers(&format!("CenterRollover_Blue_{n}"), true); }
+        through(&mut w, "RampSensor_OuterLeftTop");
+        through(&mut w, "RampSensor_OuterRightTop");
+        assert_eq!(w.ball_color(0), None);
+    }
+
+    #[test]
+    fn the_extra_ball_area_awards_a_ball_and_the_exit_puts_the_barriers_back() {
+        let mut w = world5();
+        let mut game = GameState::new(3);
+        w.set_wall_retracted("ExtraBallBarrier_Blue", true);
+        w.set_wall_retracted("ExtraBallBarrier_Red", true);
+        on(&mut w, "ExtraBallRollover");
+        game.sync(&w);
+        assert_eq!(game.balls_remaining, 4, "an extra ball");
+        assert!(messages(&w).iter().any(|m| m == "Extra Ball!") || game.message.as_ref().map_or(false, |m| m.0 == "Extra Ball!"));
+
+        through(&mut w, "Sensor_ExtraBallExit");
+        assert!(!w.rollover_lit("ExtraBallRollover", 0), "the extra-ball light goes out");
+        assert_eq!(w.wall_retracted("ExtraBallBarrier_Blue"), Some(false));
+        assert_eq!(w.wall_retracted("ExtraBallBarrier_Red"), Some(false), "all four barriers are back");
+    }
+
+    #[test]
+    fn leaving_the_extra_ball_area_without_winning_it_leaves_the_barriers_alone() {
+        let mut w = world5();
+        w.set_wall_retracted("ExtraBallBarrier_Blue", true);
+        through(&mut w, "Sensor_ExtraBallExit");
+        assert_eq!(w.wall_retracted("ExtraBallBarrier_Blue"), Some(true));
+    }
+
+    #[test]
+    fn the_flipper_lanes_raise_the_multiplier() {
+        let mut w = world5();
+        let n = w.rollover_count("FlipperRollovers");
+        for i in 0..n - 1 { w.set_rollover("FlipperRollovers", i, true); }
+        let (x, y) = w.rollover_center("FlipperRollovers", n - 1).unwrap();
+        place(&mut w, x, y);
+        step(&mut w);
+        assert_eq!(w.drain_multiplier_events(), vec![1]);
     }
 }

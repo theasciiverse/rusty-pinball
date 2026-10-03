@@ -197,5 +197,7 @@ fn ball_indicator(remaining: u8) -> String {
     const MAX: u8 = 3;
     const FULL: &str = "●";
     const EMPTY: &str = "○";
-    (0..MAX).map(|i| if i < remaining { FULL } else { EMPTY }).collect::<Vec<_>>().join(" ")
+    let dots = (0..MAX).map(|i| if i < remaining { FULL } else { EMPTY }).collect::<Vec<_>>().join(" ");
+    // More than three balls left (an extra ball was won): show the surplus.
+    if remaining > MAX { format!("{dots} +{}", remaining - MAX) } else { dots }
 }

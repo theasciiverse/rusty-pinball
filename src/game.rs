@@ -103,6 +103,10 @@ impl GameState {
         }
 
         self.tick_message();
+        // An extra ball is one more ball to play, in place of the one in play.
+        for _ in 0..physics.drain_extra_ball_events() {
+            self.balls_remaining = self.balls_remaining.saturating_add(1);
+        }
         for pct in physics.drain_multiplier_percent_events() {
             self.bonus_percent = self.bonus_percent.saturating_add_signed(pct);
         }
@@ -160,6 +164,19 @@ mod tests {
         game.show_message("first", 3000);
         game.show_message("second", 3000);
         assert_eq!(game.message.as_ref().map(|m| m.0.as_str()), Some("second"));
+    }
+
+    #[test]
+    fn an_extra_ball_adds_a_ball_to_play() {
+        let mut game = GameState::new(3);
+        game.balls_remaining = game.balls_remaining.saturating_add(1);
+        game.phase = Phase::Playing;
+        game.ball_drained();
+        game.phase = Phase::Playing;
+        game.ball_drained();
+        game.phase = Phase::Playing;
+        game.ball_drained();
+        assert_eq!((game.phase, game.balls_remaining), (Phase::BallLost, 1), "four balls in all, so three drains leave one");
     }
 
     #[test]

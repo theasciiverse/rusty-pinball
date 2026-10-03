@@ -88,7 +88,7 @@ Round 1 leaves out only what needs more than one ball: ball locks, multiball lau
 | Table | Centre pieces and moving parts | Status |
 |---|---|---|
 | 2 | Orbiting bumpers | DONE |
-| 5 | Rotating triangle | DONE. Colored-ball diagram, ramps, extra-ball barriers: TODO |
+| 5 | Rotating triangle, colored-ball diagram and lines, ramp colors and bonuses, extra-ball area | DONE (pyramid, multiball, multiball triangle reversal: round 2) |
 | 6 | Orbiting planets, planet gravity, planet colors and activation, ramp detectors | DONE (all five planets on starts multiball, round 2) |
 | 4 | Status grid lit by bumpers, percent multiplier, ramp walls | DONE (locks, multiball, jackpot: round 2; the grid only lights row 1 until locks exist) |
 | 3 | Bumper bonus, indicator rings | TODO |
@@ -198,15 +198,15 @@ The centre 6x3 grid is the multiball status display, not something the ball ligh
 
 | Behavior | Status |
 |---|---|
-| Rotating triangle (3 walls, side 2, centre (10, 18.86), 1 rad/s; -2 in multiball) | DONE at normal speed; the multiball speed change MISSING |
+| Rotating triangle (3 walls, side 2, centre (10, 18.86), 1 rad/s; -2 in multiball) | DONE at normal speed (kick follows the walls); the multiball speed change is round 2 |
 | `TriangleCenter` rollover: when multiball is READY, hitting a triangle wall retracts it, and the centre rollover then starts multiball | MISSING |
-| Four ball colors (blue, red, yellow, green). Ramps assign the ball's color (sensor pairs `RampSensor_*` with direction check); a multiball launches balls in unused colors | MISSING (C2, C6, C7) |
-| 12 centre lights (4 colors x 3) that only a ball of that color can light; 12 connecting lines (`CenterLine_*`) drawn when both end lights are lit | MISSING (lights inert, lines now hidden bodiless walls) |
+| Four ball colors (blue, red, yellow, green). Ramps assign the ball's color (sensor pairs `RampSensor_*` with direction check); a multiball launches balls in unused colors | DONE except the multiball launch colors (round 2) |
+| 12 centre lights (4 colors x 3) that only a ball of that color can light; 12 connecting lines (`CenterLine_*`) drawn when both end lights are lit | DONE |
 | All 12 lines drawn: multiball becomes READY ("shoot the pyramid"); during multiball it pays a jackpot of 50 000 x count and resets the diagram | MISSING |
-| Ramp score 5000, +10% per color from its drop bank ("`DropTargets_<Color>Ramp`"), doubled when more than one ball is in play | MISSING |
-| Extra ball: `ExtraBallRollover` and four `ExtraBallBarrier_*` walls; award an extra ball | MISSING (C12) |
+| Ramp score 5000, +10% per color from its drop bank ("`DropTargets_<Color>Ramp`"), doubled when more than one ball is in play | DONE |
+| Extra ball: `ExtraBallRollover` and four `ExtraBallBarrier_*` walls; award an extra ball | DONE (the original also shows "Shoot Again" when the extra ball is used) |
 | Multiball sequence: triangle walls restored, speed -2, savers restored, balls at +1000, +4000, +7000, +10000 ms, ACTIVE after the last; ends when one ball remains | MISSING |
-| `FlipperRollovers` completion: multiplier +1 | PARTIAL (see table 1) |
+| `FlipperRollovers` completion: multiplier +1 | DONE |
 | Launch barrier, ball savers, save banks | DONE |
 | Ball radius 0.4, launch speed 20.99 with tiny jitter | DATA ok |
 
