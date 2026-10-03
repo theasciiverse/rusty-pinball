@@ -221,6 +221,13 @@ struct LaunchBarrierInfo {
 
 const LAUNCH_BARRIER_ID: &str = "LaunchBarrier";
 
+/// Losing the only ball within this much game time (sim seconds) of its launch
+/// relaunches it once ("Ball Saved"); the original's `mercyBallDuration`, 20000 ms.
+const MERCY_BALL_SECONDS: f32 = 20.0;
+/// During multiball a lost ball is replaced within this long of the multiball
+/// starting; the original's `multiballSaverDuration`, 30000 ms.
+const MULTIBALL_SAVER_SECONDS: f32 = 30.0;
+
 /// A wall a table script moves or retracts while playing (table 5's rotating
 /// triangle). Drawn from its live position; not part of the static wall list.
 struct MovingWallInfo {
@@ -554,6 +561,13 @@ pub struct PhysicsWorld {
     // Which flippers the player held on the last step (table 8's skill shot asks).
     left_held: bool,
     right_held: bool,
+    // Game time (sim seconds since the world was built) for the ball savers.
+    game_time: f32,
+    // When the player launched the ball in play, and whether its mercy ball is spent.
+    ball_start_time: Option<f32>,
+    used_mercy_ball: bool,
+    // When the current multiball began (None with a single ball).
+    multiball_start_time: Option<f32>,
 }
 
 impl PhysicsWorld {
@@ -852,6 +866,10 @@ impl PhysicsWorld {
             relaunch_needed: false,
             left_held: false,
             right_held: false,
+            game_time: 0.0,
+            ball_start_time: None,
+            used_mercy_ball: false,
+            multiball_start_time: None,
             script,
             scheduled: Vec::new(),
             script_events: Vec::new(),
@@ -1247,6 +1265,7 @@ impl PhysicsWorld {
             self.gate_ball = Some(ball.body);
             self.balls.push(ball);
         }
+        if self.balls.len() <= 1 { self.ball_start_time = Some(self.game_time); }
     }
 
     /// Adds another ball to the field, launched up the shooter lane like the
@@ -1260,6 +1279,7 @@ impl PhysicsWorld {
         }
         self.gate_ball = Some(ball.body);
         self.balls.push(ball);
+        if self.multiball_start_time.is_none() { self.multiball_start_time = Some(self.game_time); }
     }
 
     /// Number of balls on the field (including one parked in the lane).
@@ -1296,6 +1316,7 @@ impl PhysicsWorld {
     pub fn step(&mut self, dt: f32, input: &InputState) {
         self.left_held = input.left_flipper;
         self.right_held = input.right_flipper;
+        self.game_time += dt;
         // Deferred collider disable for retractWhenHit walls.
         // We set retract_pending in the previous sub-step so that the kick
         // impulse has one full integration step to move the ball away before
@@ -1835,13 +1856,34 @@ impl PhysicsWorld {
         // Multiball: a ball that drains while others are still in play is just
         // removed. The last ball draining is the normal ball-lost event, which
         // the game state reads through `is_ball_drained`.
+        let mut replaced_this_step = false;
         let mut i = 0;
         while self.balls.len() > 1 && i < self.balls.len() {
             if self.drained_at(i) {
                 let ball = self.balls.remove(i);
                 self.remove_body(ball.body);
+                // Early in a multiball a lost ball is replaced, once per step even if
+                // two are lost together.
+                let within_saver = self.multiball_start_time.map_or(false, |t| self.game_time - t <= MULTIBALL_SAVER_SECONDS);
+                if within_saver && !replaced_this_step {
+                    replaced_this_step = true;
+                    self.show_message("Ball Saved", 1000);
+                    self.launch_extra_ball();
+                }
             } else {
                 i += 1;
+            }
+        }
+        if self.balls.len() == 1 { self.multiball_start_time = None; }
+
+        // Mercy ball: the only ball lost soon after its launch comes straight back, once.
+        if self.balls.len() == 1 && !self.used_mercy_ball && self.drained_at(0) {
+            if let Some(start) = self.ball_start_time {
+                if self.game_time - start <= MERCY_BALL_SECONDS {
+                    self.used_mercy_ball = true;
+                    self.show_message("Ball Saved", 1500);
+                    self.launch_ball();
+                }
             }
         }
 
@@ -1952,6 +1994,7 @@ impl PhysicsWorld {
 
     /// The ball in play was lost (call before `park_ball`): tells the table script.
     pub fn ball_lost(&mut self) {
+        self.used_mercy_ball = false;
         if let Some(mut script) = self.script.take() {
             script.ball_lost(self);
             self.script = Some(script);
@@ -3767,6 +3810,7 @@ mod multiball_tests {
         let mut world = PhysicsWorld::from_table(&table);
         world.launch_ball();
         world.launch_extra_ball();
+        world.game_time += 100.0; // past the mercy ball and multiball saver windows
         let input = InputState::default();
 
         place(&mut world, 1, 9.0, -2.0, 0.0, -1.0); // below the drain line
@@ -3787,6 +3831,7 @@ mod multiball_tests {
         world.launch_ball();
         world.launch_extra_ball();
         world.launch_extra_ball();
+        world.game_time += 100.0; // past the savers' windows
         for i in 0..3 { place(&mut world, i, 5.0 + i as f32, -2.0, 0.0, -1.0); }
         world.step_frame(0.033, &InputState::default());
         assert_eq!(world.ball_count(), 1);
@@ -4137,6 +4182,7 @@ mod multiball_game_flow_tests {
         let mut game = GameState::new(table.num_balls());
         game.phase = Phase::Playing;
         world.launch_ball();
+        world.game_time += 100.0; // no mercy ball or multiball saver in this test
         let input = InputState::default();
 
         // Start a multiball the way the table does: all lights lit, shoot the ramp.
@@ -4156,6 +4202,7 @@ mod multiball_game_flow_tests {
 
         for _ in 0..80 { world.step_frame(0.033, &input); game.sync(&world); } // out past 3.5 s of game time
         assert_eq!(world.ball_count(), 3);
+        world.game_time += 100.0; // the multiball saver window has passed
 
         sink(&mut world, 2);
         world.step_frame(0.033, &input);
@@ -5570,5 +5617,114 @@ mod table_7_tests {
         place(&mut w, x, y);
         step(&mut w);
         assert_eq!(w.drain_multiplier_events(), vec![1]);
+    }
+}
+
+#[cfg(test)]
+mod ball_saver_rule_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    fn world1() -> PhysicsWorld { PhysicsWorld::from_table(&load_table(1).unwrap()) }
+
+    fn sink(w: &mut PhysicsWorld, i: usize) {
+        let body = w.bodies.get_mut(w.balls[i].body).unwrap();
+        body.set_translation(Vector::new(5.0 + i as f32, -2.0), true);
+        body.set_linvel(Vector::new(0.0, -1.0), true);
+    }
+
+    fn step(w: &mut PhysicsWorld) { w.step(1.0 / 240.0, &InputState::default()); }
+
+    fn messages(w: &PhysicsWorld) -> Vec<String> { w.drain_message_events().into_iter().map(|m| m.0).collect() }
+
+    #[test]
+    fn losing_the_only_ball_soon_after_launch_relaunches_it_once() {
+        let mut w = world1();
+        w.launch_ball();
+        w.game_time += 5.0;
+        sink(&mut w, 0);
+        step(&mut w);
+        assert!(!w.is_ball_drained(), "the ball was saved");
+        assert!(messages(&w).iter().any(|m| m == "Ball Saved"));
+        let v = w.bodies.get(w.balls[0].body).unwrap().linvel();
+        assert!(v.y > 5.0, "it is back in the lane, going up: {v:?}");
+
+        w.game_time += 2.0;
+        sink(&mut w, 0);
+        step(&mut w);
+        assert!(w.is_ball_drained(), "only one mercy ball per ball");
+    }
+
+    #[test]
+    fn a_ball_that_survived_twenty_seconds_is_not_saved() {
+        let mut w = world1();
+        w.launch_ball();
+        w.game_time += 25.0;
+        sink(&mut w, 0);
+        step(&mut w);
+        assert!(w.is_ball_drained());
+        assert!(!messages(&w).iter().any(|m| m == "Ball Saved"));
+    }
+
+    #[test]
+    fn a_new_ball_gets_its_own_mercy_ball() {
+        let mut w = world1();
+        w.launch_ball();
+        sink(&mut w, 0);
+        step(&mut w); // saved
+        w.game_time += 30.0;
+        sink(&mut w, 0);
+        step(&mut w);
+        assert!(w.is_ball_drained(), "the second loss is real");
+        w.ball_lost();
+        w.park_ball();
+        w.launch_ball();
+        sink(&mut w, 0);
+        step(&mut w);
+        assert!(!w.is_ball_drained(), "the next ball has a mercy ball again");
+    }
+
+    #[test]
+    fn early_in_a_multiball_a_lost_ball_is_replaced_but_not_later() {
+        let mut w = world1();
+        w.launch_ball();
+        w.game_time += 25.0; // the first ball is past its own mercy window
+        w.launch_extra_ball();
+        sink(&mut w, 1);
+        step(&mut w);
+        assert_eq!(w.ball_count(), 2, "a replacement came straight back");
+        assert!(messages(&w).iter().any(|m| m == "Ball Saved"));
+
+        w.game_time += 40.0; // 30 seconds after the multiball began
+        sink(&mut w, 1);
+        step(&mut w);
+        assert_eq!(w.ball_count(), 1, "no more replacements");
+    }
+
+    #[test]
+    fn two_balls_lost_together_get_one_replacement() {
+        let mut w = world1();
+        w.launch_ball();
+        w.game_time += 25.0;
+        w.launch_extra_ball();
+        w.launch_extra_ball();
+        sink(&mut w, 1);
+        sink(&mut w, 2);
+        step(&mut w);
+        assert_eq!(w.ball_count(), 2, "three balls, two lost, one given back");
+    }
+
+    #[test]
+    fn going_back_to_one_ball_ends_the_multiball_saver() {
+        let mut w = world1();
+        w.launch_ball();
+        w.game_time += 25.0;
+        w.launch_extra_ball();
+        w.game_time += 40.0;
+        sink(&mut w, 1);
+        step(&mut w);
+        assert!(w.multiball_start_time.is_none(), "single ball again");
+        w.launch_extra_ball();
+        assert!(w.multiball_start_time.is_some(), "a new multiball starts a new window");
     }
 }
