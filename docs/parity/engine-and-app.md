@@ -14,8 +14,8 @@
 > - Friction: now split by surface (see the master document); rows about the contact model are out of date.
 >
 
-Original root: `asciiverse/references/Vector-Pinball/app/src/main/java/com/dozingcatsoftware/` (abbreviated `VP/` = `vectorpinball/`, `B/` = `bouncy/`).
-Rust root: `asciiverse/games/rusty-pinball/src` (abbreviated `RS/`).
+Original root: `../../references/Vector-Pinball/app/src/main/java/com/dozingcatsoftware/` (abbreviated `VP/` = `vectorpinball/`, `B/` = `bouncy/`).
+Rust root: `src` (abbreviated `RS/`).
 Statuses were determined by reading and grepping the Rust source. Three claims were also confirmed by running throwaway tests in a COPY of the repo under the scratchpad (repos untouched): the extra-ball count (4 launches with numballs=3), and the zero drop targets on tables 3 to 8 wallStart groups. Everything else is read/grep only.
 
 Context that explains many gaps: the Rust port has NO delegate mechanism. There is no `Field.Delegate` dispatch (gameStarted, ballLost, gameEnded, tick, processCollision, flippersActivated, allDropTargetsInGroupHit, allRolloversInGroupActivated, spinnerActivated, ballInSensorRange, isFieldActive). Table logic is hard coded in `RS/physics/mod.rs` by element id (`saver_for_drop_bank`, `LAUNCH_BARRIER_ID`, `"TriangleWall*"`) and `RS/physics/movers.rs` (Field2Delegate bumpers, Field5Delegate triangle). The physics world also holds exactly ONE ball (`ball_handle: Option<RigidBodyHandle>`), so every multi-ball feature is structurally absent.

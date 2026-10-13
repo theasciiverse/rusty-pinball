@@ -12,7 +12,7 @@
 > - Launch barrier on table 7 (row 7.21) is implemented.
 >
 
-Java paths are relative to `.../vectorpinball/` (F7 = `fields/Field7Delegate.java`, F8 = `fields/Field8Delegate.java`, Stars = `fields/Stars.java`, StarData = `fields/StarData.java`). Rust paths are relative to `asciiverse/games/rusty-pinball/` (PW = `src/physics/mod.rs`, DEF = `src/table/definition.rs`, GS = `src/game.rs`, REN = `src/renderer/mod.rs`, DMD = `src/ui/dmd.rs`).
+Java paths are relative to `.../vectorpinball/` (F7 = `fields/Field7Delegate.java`, F8 = `fields/Field8Delegate.java`, Stars = `fields/Stars.java`, StarData = `fields/StarData.java`). Rust paths are relative to the repository root (PW = `src/physics/mod.rs`, DEF = `src/table/definition.rs`, GS = `src/game.rs`, REN = `src/renderer/mod.rs`, DMD = `src/ui/dmd.rs`).
 
 Status vocabulary: IMPLEMENTED / PARTIAL / MISSING (checked by reading the Rust source).
 

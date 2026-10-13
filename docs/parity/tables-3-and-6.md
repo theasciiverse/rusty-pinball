@@ -12,7 +12,7 @@
 > - Launch barrier (rows 3.16, 6.14) and saver restore by bank (3.14, 6.15) are implemented.
 >
 
-Original paths: delegates in `.../vectorpinball/fields/Field3Delegate.java` (F3) and `Field6Delegate.java` (F6); JSON in `app/src/main/assets/tables/`. Rust paths are under `asciiverse/games/rusty-pinball/src` (`physics/mod.rs` = PW, `physics/movers.rs`, `game.rs`, `ui/dmd.rs`, `renderer/mod.rs`).
+Original paths: delegates in `.../vectorpinball/fields/Field3Delegate.java` (F3) and `Field6Delegate.java` (F6); JSON in `app/src/main/assets/tables/`. Rust paths are under `src` (`physics/mod.rs` = PW, `physics/movers.rs`, `game.rs`, `ui/dmd.rs`, `renderer/mod.rs`).
 
 Global facts verified in the Rust port (relevant to every row below):
 - No delegate logic exists for Field3Delegate or Field6Delegate. `delegate` is only inspected in `movers.rs` (Field2Delegate rotating bumpers, Field5Delegate rotating triangle). Everything below that is delegate behavior is therefore MISSING unless noted.
