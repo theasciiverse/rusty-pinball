@@ -90,10 +90,10 @@ listed in [docs/ORIGINAL-PARITY.md](docs/ORIGINAL-PARITY.md); every change is in
 
 ## License
 
-Rusty Pinball is released under the [GNU General Public License v2.0](LICENSE).
+Rusty Pinball is released under the [GNU General Public License v3.0](LICENCE.txt).
 
 Tables 1-8 in `assets/tables/` are derived from
 [Vector Pinball](https://github.com/dozingcat/VectorPinball) by Brian Nenninger,
-also licensed under GPL-2.0. Table 9 (Party Land) is an original layout built
+also licensed under GPL-3.0. Table 9 (Party Land) is an original layout built
 in Vector Pinball's JSON format, recreating the shot layout of Digital
 Illusions CE's *Pinball Fantasies* (1992) table of the same name.
