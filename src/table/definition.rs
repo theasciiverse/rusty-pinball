@@ -177,21 +177,6 @@ pub struct TableDef {
     pub launch_dead_zone: Option<[f32; 4]>,
 
     pub elements: Vec<ElementDef>,
-
-    /// Not part of Vector-Pinball's format: an Asciiverse-original extension
-    /// (currently only table 9 / Party Land) that spells a word by lighting
-    /// one letter per named shot in `shots`, awarding `score` bonus points
-    /// when all letters are lit, then resetting for replay.
-    #[serde(rename = "letterAwards", default)]
-    pub letter_awards: Vec<LetterAwardDef>,
-
-    /// Not part of Vector-Pinball's format: an Asciiverse-original extension
-    /// (currently only table 9 / Party Land). Lights once every word in
-    /// `letter_awards` has been completed at least once since the ball
-    /// started; the next hit on `shot` then collects `score` and un-lights
-    /// it. Requires `letter_awards` to be non-empty to ever light.
-    #[serde(default)]
-    pub jackpot: Option<JackpotDef>,
 }
 
 /// Matches the ratio the original Vector Pinball tables use (2.25 to 2.3).
@@ -209,23 +194,6 @@ impl TableDef {
     pub fn gravity_magnitude(&self) -> f32 { self.gravity.unwrap_or(4.0) }
     pub fn time_ratio(&self) -> f32 { self.target_time_ratio.unwrap_or(DEFAULT_TIME_RATIO) }
     pub fn num_balls(&self) -> u8 { self.numballs.unwrap_or(3) }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct JackpotDef {
-    /// Element `id` of the shot that collects the jackpot once lit.
-    pub shot: String,
-    pub score: u64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct LetterAwardDef {
-    pub word: String,
-    /// Element `id`s, in letter order; hitting the shot with a given id
-    /// lights the corresponding letter, in any order.
-    pub shots: Vec<String>,
-    #[serde(default)]
-    pub score: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -400,22 +368,6 @@ pub struct BumperDef {
 
     pub score: Option<u64>,
 
-    /// Not part of Vector-Pinball's format: an Asciiverse-original extension
-    /// (currently only Party Land's Ghoul Skull) for an "advance the award"
-    /// bumper. When present, each hit awards `award_ladder[rung]` instead of
-    /// the flat `score` above, then advances `rung` (capping at the last
-    /// entry, where it holds for the rest of the ball). Resets to the first
-    /// rung on every new ball.
-    #[serde(rename = "awardLadder", default)]
-    pub award_ladder: Option<Vec<u64>>,
-
-    /// Not part of Vector-Pinball's format: an Asciiverse-original extension
-    /// (currently only Ghoul Skull). Only meaningful alongside `awardLadder`:
-    /// the first hit that reaches the ladder's last rung (once per ball)
-    /// starts a timed super mode.
-    #[serde(rename = "triggersSuperMode", default)]
-    pub triggers_super_mode: bool,
-
     /// Physics layer (none = layer 0, where the ball starts). Table 7's mini
     /// table is on layer 1.
     #[serde(default, deserialize_with = "de_layer_opt")]
@@ -484,13 +436,6 @@ pub struct RolloverGroupDef {
 
     #[serde(default, deserialize_with = "de_numstr_opt")]
     pub reset: Option<f32>,
-
-    /// Not part of Vector-Pinball's format: an Asciiverse-original extension
-    /// (currently only Party Land's Puke Rollovers) that raises the game's
-    /// score multiplier by this amount each time the group is completed
-    /// (all rollovers lit), on top of the group's normal completion bonus.
-    #[serde(rename = "multiplierStep", default)]
-    pub multiplier_step: Option<u32>,
 
     #[serde(default, deserialize_with = "de_layer_opt")]
     pub layer: Option<u8>,

@@ -8,12 +8,12 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use crate::{game::GameState, physics::FieldSnapshot};
+use crate::game::GameState;
 
 const DOT: &str = "·";
 const DOT_COLOR: Color = Color::Rgb(80, 55, 20);
 
-pub fn draw_dmd(frame: &mut Frame, area: Rect, game: &GameState, snap: &FieldSnapshot) {
+pub fn draw_dmd(frame: &mut Frame, area: Rect, game: &GameState) {
     let dot_style   = Style::default().fg(DOT_COLOR);
     let score_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
     let hi_style    = Style::default().fg(Color::Cyan);
@@ -48,8 +48,8 @@ pub fn draw_dmd(frame: &mut Frame, area: Rect, game: &GameState, snap: &FieldSna
     ], cols[0].width, inner.height, dot_style);
     frame.render_widget(Paragraph::new(left_lines), cols[0]);
 
-    // ── Centre column: ball indicators, plus letter-award progress (table 9) ──
-    let mut centre_raw = vec![
+    // ── Centre column: ball indicators ──
+    let centre_raw = vec![
         Line::from(vec![
             Span::styled("BALLS  ", label_style),
             Span::styled(
@@ -58,25 +58,12 @@ pub fn draw_dmd(frame: &mut Frame, area: Rect, game: &GameState, snap: &FieldSna
             ),
         ]),
     ];
-    if !snap.letter_groups.is_empty() {
-        centre_raw.push(letter_awards_line(snap));
-    }
-    if let Some(line) = award_ladder_line(snap) {
-        centre_raw.push(line);
-    }
-    if let Some(lit) = snap.jackpot_lit {
-        centre_raw.push(jackpot_line(lit));
-    }
     let centre_lines = dot_pad_lines(centre_raw, cols[1].width, inner.height, dot_style);
     frame.render_widget(Paragraph::new(centre_lines), cols[1]);
 
     // ── Right column: status right-justified row 0, hint right-justified last row ──
     let status_span = match game.phase {
         crate::game::Phase::WaitingToLaunch => Span::styled("PRESS SPACE", Style::default().fg(Color::Green)),
-        crate::game::Phase::Playing if game.super_mode_ticks > 0 => Span::styled(
-            format!("SUPER {}s", game.super_mode_seconds_remaining()),
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-        ),
         crate::game::Phase::Playing         => Span::styled(game.multiplier_text().replacen('x', "×", 1), score_style),
         crate::game::Phase::BallLost        => Span::styled("BALL LOST  SPACE", Style::default().fg(Color::Red)),
         crate::game::Phase::GameOver        => Span::styled("GAME OVER  SPACE", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
@@ -135,55 +122,6 @@ fn dot_pad_lines<'a>(lines: Vec<Line<'a>>, width: u16, height: u16, dot_style: S
         out.push(Line::from(Span::styled(DOT.repeat(w), dot_style)));
     }
     out
-}
-
-/// One line of space-separated words, each letter dim when unlit, bright
-/// yellow when lit, bright magenta (fully lit / mid-celebration) when the
-/// word is flashing complete.
-fn letter_awards_line(snap: &FieldSnapshot) -> Line<'static> {
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    for (gi, group) in snap.letter_groups.iter().enumerate() {
-        if gi > 0 {
-            spans.push(Span::raw("  "));
-        }
-        for (ch, &lit) in group.word.chars().zip(group.lit.iter()) {
-            let style = if group.flashing {
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
-            } else if lit {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            spans.push(Span::styled(ch.to_string(), style));
-        }
-    }
-    Line::from(spans)
-}
-
-/// "AWARD  35,000" for the first bumper carrying an award ladder (there's
-/// only ever one on a table today, but this doesn't assume it), bright
-/// yellow while lit (just hit; the value shown is already the *next* rung).
-fn award_ladder_line(snap: &FieldSnapshot) -> Option<Line<'static>> {
-    let bump = snap.bumpers.iter().find(|b| b.next_award.is_some())?;
-    let value_style = if bump.lit {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::LightYellow)
-    };
-    Some(Line::from(vec![
-        Span::styled("AWARD  ", Style::default().fg(Color::DarkGray)),
-        Span::styled(format_score(bump.next_award.unwrap()), value_style),
-    ]))
-}
-
-/// "JACKPOT" dim when unearned, bright magenta and bold once lit.
-fn jackpot_line(lit: bool) -> Line<'static> {
-    let style = if lit {
-        Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    Line::from(Span::styled("JACKPOT", style))
 }
 
 fn format_score(s: u64) -> String {

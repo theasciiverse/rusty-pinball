@@ -3,10 +3,6 @@ use crate::physics::{PhysicsWorld, ScorePopup};
 // `sync()` runs once per rendered frame (app.rs's FRAME_MILLIS = 33ms), not
 // once per physics substep, so "ticks" here means "sync calls", at ~30 Hz.
 const SYNC_HZ: u32 = 30;
-const SUPER_MODE_SECONDS: u32 = 15;
-const SUPER_MODE_TICKS: u32 = SUPER_MODE_SECONDS * SYNC_HZ;
-/// Stacks multiplicatively with the base multiplier while super mode is active.
-const SUPER_MODE_FACTOR: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -46,8 +42,6 @@ pub struct GameState {
     /// Percent added on top of the whole-number multiplier by table scripts (table 4
     /// adds 1% per bumper hit); 137 here with `multiplier` 1 is a x2.37 multiplier.
     pub bonus_percent: u32,
-    /// Ticks (sync calls) left in the timed super mode; 0 = inactive.
-    pub super_mode_ticks: u32,
     /// The message being shown to the player and the ticks (sync calls, ~30 Hz,
     /// so real time like the original) it has left. One at a time; a new one
     /// replaces it.
@@ -71,7 +65,6 @@ impl GameState {
             phase: Phase::WaitingToLaunch,
             multiplier: 1,
             bonus_percent: 0,
-            super_mode_ticks: 0,
             message: None,
             pending_message: None,
             message_sound_due: false,
@@ -116,19 +109,10 @@ impl GameState {
         }
     }
 
-    /// The base multiplier, doubled while super mode is active.
-    pub fn effective_multiplier(&self) -> u32 {
-        if self.super_mode_ticks > 0 { self.multiplier * SUPER_MODE_FACTOR } else { self.multiplier }
-    }
-
-    pub fn super_mode_seconds_remaining(&self) -> u32 {
-        self.super_mode_ticks.div_ceil(SYNC_HZ)
-    }
-
-    /// The whole multiplier in percent (100 = x1), with super mode doubling and
-    /// any bonus percent from table scripts.
+    /// The whole multiplier in percent (100 = x1), with any bonus percent from
+    /// table scripts.
     pub fn multiplier_percent(&self) -> u32 {
-        (self.multiplier * 100 + self.bonus_percent) * if self.super_mode_ticks > 0 { SUPER_MODE_FACTOR } else { 1 }
+        self.multiplier * 100 + self.bonus_percent
     }
 
     /// "x3" for a whole multiplier, "x1.37" when a script has added a percentage.
@@ -210,13 +194,6 @@ impl GameState {
         for (text, ms) in physics.drain_message_events() {
             self.show_message(text, ms);
         }
-
-        for _ in 0..physics.drain_super_mode_events() {
-            self.super_mode_ticks = SUPER_MODE_TICKS;
-        }
-        if self.super_mode_ticks > 0 {
-            self.super_mode_ticks -= 1;
-        }
     }
 
     /// The ball in play drained. `balls_remaining` counts the ball in play
@@ -226,7 +203,7 @@ impl GameState {
     /// The multiplier follows the original's default: halved and rounded down,
     /// never below 1. If a script raised it within the last 7.5 seconds of game
     /// time (`preserve_increase`), that increase is taken off first and put
-    /// back after, so it counts for the next ball. Super mode is per ball.
+    /// back after, so it counts for the next ball.
     pub fn ball_drained(&mut self, preserve_increase: bool) {
         let had_extra_ball = self.extra_balls > 0;
         if !self.unlimited_balls {
@@ -240,7 +217,6 @@ impl GameState {
         if preserve_increase { next += 1; }
         self.multiplier = next;
         self.bonus_percent = 0;
-        self.super_mode_ticks = 0;
 
         if had_extra_ball {
             self.extra_balls -= 1;
@@ -316,8 +292,7 @@ mod tests {
 
         game.multiplier = 3;
         assert_eq!(game.multiplier_text(), "x3.37");
-        game.super_mode_ticks = 1;
-        assert_eq!(game.multiplier_percent(), 674, "super mode doubles the whole thing");
+        assert_eq!(game.multiplier_percent(), 337);
 
         game.ball_drained(false);
         assert_eq!((game.multiplier, game.bonus_percent), (1, 0));
@@ -339,12 +314,11 @@ mod tests {
     }
 
     #[test]
-    fn a_ball_drain_halves_the_multiplier_rounding_down_and_ends_super_mode() {
+    fn a_ball_drain_halves_the_multiplier_rounding_down() {
         let mut game = GameState::new(3);
         game.multiplier = 5;
-        game.super_mode_ticks = 100;
         game.ball_drained(false);
-        assert_eq!((game.multiplier, game.super_mode_ticks), (2, 0), "5 halves to 2");
+        assert_eq!(game.multiplier, 2, "5 halves to 2");
         game.ball_drained(false);
         assert_eq!(game.multiplier, 1, "2 halves to 1");
         game.ball_drained(false);
@@ -409,34 +383,6 @@ mod tests {
         game.apply_multiplier_delta(2); // now ×3
         game.add_score(1_000);
         assert_eq!(game.score, 3_000);
-    }
-
-    #[test]
-    fn super_mode_doubles_the_effective_multiplier_while_active() {
-        let mut game = GameState::new(3);
-        game.apply_multiplier_delta(1); // base ×2
-        assert_eq!(game.effective_multiplier(), 2, "no super mode yet");
-
-        game.super_mode_ticks = SUPER_MODE_TICKS;
-        assert_eq!(game.effective_multiplier(), 4, "super mode doubles the base multiplier");
-        game.add_score(1_000);
-        assert_eq!(game.score, 4_000);
-
-        game.super_mode_ticks = 0;
-        assert_eq!(game.effective_multiplier(), 2, "back to base once inactive");
-    }
-
-    #[test]
-    fn super_mode_seconds_remaining_rounds_up() {
-        let mut game = GameState::new(3);
-        game.super_mode_ticks = SUPER_MODE_TICKS;
-        assert_eq!(game.super_mode_seconds_remaining(), SUPER_MODE_SECONDS);
-
-        game.super_mode_ticks = 1;
-        assert_eq!(game.super_mode_seconds_remaining(), 1, "1 tick left should still show 1s, not 0s");
-
-        game.super_mode_ticks = 0;
-        assert_eq!(game.super_mode_seconds_remaining(), 0);
     }
 
     #[test]

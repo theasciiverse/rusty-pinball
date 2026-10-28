@@ -12,6 +12,7 @@
 > - `ignoreBall` on walls, arcs and paths: verified (table 5 centre lines, table 7 guides, table 8 pieces), FIXED (commit `da9595b`); they are now bodiless and hidden until table scripts can show them.
 > - Launch barrier, drop bank reset delay, ball saver re-arm by bank, rotating bumpers (table 2) and rotating triangle (table 5): implemented after the audit started; rows below that say MISSING for these are out of date.
 > - Friction: now split by surface (see the master document); rows about the contact model are out of date.
+> - Table 9 (Party Land) and the Asciiverse-only extensions it used (`multiplierStep`, `letterAwards`, `jackpot`, `awardLadder`, `triggersSuperMode` and super mode) were removed on 2026-10-13; rows below that mention them describe code that no longer exists.
 >
 
 Original root: `../../references/Vector-Pinball/app/src/main/java/com/dozingcatsoftware/` (abbreviated `VP/` = `vectorpinball/`, `B/` = `bouncy/`).
@@ -249,7 +250,7 @@ Counts after each setter are the number of call sites in the original Field1..8 
 
 | # | Feature | What the original does | Orig ref | Status in Rust |
 |---|---|---|---|---|
-| 1 | Table select | Prev/next buttons (and flipper keys) cycle tables 1..N, wrap-around; last table is remembered (`initialLevel`) | B/BouncyActivity.java:861-873,428-456,762-774 | PARTIAL: menu list of 9 tables (`ui/menu.rs`); selection not remembered between runs; table 9 is Rust-only. |
+| 1 | Table select | Prev/next buttons (and flipper keys) cycle tables 1..N, wrap-around; last table is remembered (`initialLevel`) | B/BouncyActivity.java:861-873,428-456,762-774 | PARTIAL: menu list of 8 tables (`ui/menu.rs`); selection not remembered between runs. |
 | 2 | Start / resume / end / quit | Start Game, Resume Game, End Game, Quit buttons; touch anywhere starts a game, launches a ball, works flippers; 1000 ms start guard after a game ends | BouncyActivity.java:120-122,777-831 | PARTIAL: Space launches/restarts; Esc/Q abandons to menu; no resume from menu; no post game-over 1 s guard. |
 | 3 | High scores | Top 5 per table (comma separated string `highScores.N`), plus `lastScore.N`; saved when the game ENDS (only if it beats lowest or fewer than 5); not for unlimited balls; High scores panel (list, "No scores for this table", last score); idle ScoreView cycles "Touch to start" / last score / each high score every 3500 ms | BouncyActivity.java:106-112,641-668,684-760,890-915; B/ScoreView.java:41-47,186-245 | PARTIAL: one high score per table in `persist.rs` (`high_scores: [u64; 9]`, XDG config `rusty-pinball/state.json`), updated and saved on every ball loss (`app.rs tick`), shown in menu and DMD (`HI SCORE`). No top 5, no last score, no cycling display, no high score screen. |
 | 4 | Preferences screen | sound, music, haptic (default false), independentFlippers (true), zoom (true), gameSpeed slow/normal/fast, showBallTrails (true), showScoreAnimations (true), useOpenGL (true), lineWidth, showFPS (false) | res/xml/preferences.xml; BouncyActivity.java:578-625 | PARTIAL: only a single Sound toggle in the menu (`ToggleSound`) which also gates music (`AudioManager::set_enabled`). No separate music toggle, game speed, trails, score animations, zoom, FPS, line width. Haptic, independentFlippers, OpenGL, line width are NOT APPLICABLE to a terminal. |

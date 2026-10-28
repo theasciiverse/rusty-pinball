@@ -4,11 +4,11 @@ A terminal pinball game written in Rust, rendered entirely in braille-pixel vect
 
 ## Inspiration
 
-Rusty Pinball is inspired by [Vector Pinball](https://github.com/dozingcat/VectorPinball) by Brian Nenninger, an open-source Android pinball game with a clean physics-driven design and eight great tables. Tables 1-8's layouts and game logic in Rusty Pinball are derived from Vector Pinball's JSON table definitions; table 9 is an original layout authored in the same format.
+Rusty Pinball is inspired by [Vector Pinball](https://github.com/dozingcat/VectorPinball) by Brian Nenninger, an open-source Android pinball game with a clean physics-driven design and eight great tables. Tables 1-8's layouts and game logic in Rusty Pinball are derived from Vector Pinball's JSON table definitions.
 
 ## Features
 
-- Nine playable tables (Classic, Round and Round, Ringmaster, Party Land, and more)
+- Eight playable tables (Classic, Round and Round, Ringmaster, Pool Party, and more)
 - Real-time 2D physics via [Rapier](https://rapier.rs/)
 - Braille vector graphics rendered with [drawille](https://github.com/asciimoo/drawille)
 - Dot-matrix display (DMD) showing score, hi-score, and ball count
@@ -86,7 +86,6 @@ listed in [docs/ORIGINAL-PARITY.md](docs/ORIGINAL-PARITY.md); every change is in
 | 6 | Orbiters |
 | 7 | Ad Astra |
 | 8 | Pool Party |
-| 9 | Party Land |
 
 ## License
 
@@ -94,6 +93,4 @@ Rusty Pinball is released under the [GNU General Public License v3.0](LICENCE.tx
 
 Tables 1-8 in `assets/tables/` are derived from
 [Vector Pinball](https://github.com/dozingcat/VectorPinball) by Brian Nenninger,
-also licensed under GPL-3.0. Table 9 (Party Land) is an original layout built
-in Vector Pinball's JSON format, recreating the shot layout of Digital
-Illusions CE's *Pinball Fantasies* (1992) table of the same name.
+also licensed under GPL-3.0.

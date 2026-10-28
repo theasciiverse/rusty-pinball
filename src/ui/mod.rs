@@ -49,7 +49,7 @@ pub fn draw(
     if view.score_animations { snap.popups = game.popup_snapshots(); }
     if !view.ball_trails { for b in &mut snap.balls { b.trail.clear(); } }
     draw_play_area(frame, chunks[0], &snap, renderer, camera_y, debug_ids);
-    dmd::draw_dmd(frame, chunks[1], game, &snap);
+    dmd::draw_dmd(frame, chunks[1], game);
 
     if paused {
         draw_pause_overlay(frame, area);

@@ -4,6 +4,9 @@ All notable changes to Rusty Pinball are documented here.
 
 ## [Unreleased]
 
+### Removed
+- Table 9, Party Land (2026-10-13). Its layout is to be redone from scratch. The engine extensions that only it used are removed with it: the table-JSON fields `letterAwards`, `jackpot`, a bumper's `awardLadder` and `triggersSuperMode`, a rollover group's `multiplierStep`, the timed super mode, and their DMD readouts (letter progress, award value, jackpot light, SUPER countdown)
+
 ### Added
 - Menu options from the original: score animations and ball trails can be switched off, and unlimited balls plays with no ball limit (the game never ends, the score shows a `*`, no high score is recorded; the DMD shows a row of five balls). All are remembered between runs, and a saved state from before them loads with animations and trails on and unlimited balls off
 - Smaller parity changes. A press of the launch key within 750 ms of a lost ball (or of the game ending) is ignored, as the original ignores touches then. A hit bumper flashes in the inverse of its colour (it was always yellow), and slingshots and ball savers are drawn in the table's own colours (blue and green; they were one fixed colour)

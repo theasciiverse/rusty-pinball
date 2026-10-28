@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-pub const TABLE_NAMES: [&str; 9] = [
+pub const TABLE_NAMES: [&str; 8] = [
     "Classic",
     "Round and Round",
     "Ringmaster",
@@ -15,7 +15,6 @@ pub const TABLE_NAMES: [&str; 9] = [
     "Orbiters",
     "Ad Astra",
     "Pool Party",
-    "Party Land",
 ];
 
 const ITEM_SOUND:      usize = TABLE_NAMES.len();

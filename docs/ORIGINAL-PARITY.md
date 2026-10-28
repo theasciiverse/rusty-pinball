@@ -1,7 +1,7 @@
 # Original parity: rusty-pinball vs Vector Pinball
 
 Rusty Pinball ports the table layouts of [Vector Pinball](https://github.com/dozingcat/Vector-Pinball) (tables 1 to 8)
-and adds one table of its own (table 9, Party Land). This document is the checklist of what the original does
+(an own table 9, Party Land, was removed on 2026-10-13). This document is the checklist of what the original does
 that we do not yet do, so nothing gets forgotten. It exists because we kept finding unported behavior one piece at
 a time (rotating bumpers on table 2, the table 5 triangle, the table 4 lights); an audit on 2026-10-02 went through
 the whole original and this is the result.
@@ -10,7 +10,7 @@ Status as of the table-scripts commit on branch `rapier-0.36` (audit baseline: `
 
 - Detailed notes with original file and line references: [`parity/engine-and-app.md`](parity/engine-and-app.md),
   [`parity/tables-3-and-6.md`](parity/tables-3-and-6.md), [`parity/tables-7-and-8.md`](parity/tables-7-and-8.md).
-  Tables 1, 2, 4, 5 and 9 are covered here.
+  Tables 1, 2, 4 and 5 are covered here.
 - Original source: `references/Vector-Pinball` in the Asciiverse checkout (`app/src/main/java/com/dozingcatsoftware/`;
   table logic is in `vectorpinball/fields/Field1Delegate.java` to `Field8Delegate.java`, JSON in `app/src/main/assets/tables/`).
 
@@ -40,7 +40,7 @@ These were the building blocks; the status column is current.
 | C7 | Per-ball state | Runtime ball colours, per-ball forces | DONE (colours, forces; the secondary colour spin dot is not drawn) |
 | C8 | Full layer model | Layers as separate collision worlds | DONE except the 250 ms fade (an element with no layer is layer 0; a ball only touches and triggers elements of its own layer; pieces of an idle layer are drawn faintly in `inactiveLayerColor`, lifted to a minimum brightness so a terminal shows them, and hidden when the table gives none) |
 | C9 | Shape renderer | `setShapes`: coloured circles and lines each frame (table 7 star map) | DONE |
-| C10 | Multiplier and rollover rules | Fractional unbounded multiplier, carry-over rules, original rollover scoring | DONE for tables with a script (table 9 keeps its own completion bonus) |
+| C10 | Multiplier and rollover rules | Fractional unbounded multiplier, carry-over rules, original rollover scoring | DONE (every table has a script) |
 | C11 | Score animations | Floating score text at the ball, coloured by value | DONE |
 | C12 | Ball and game flow | Extra ball, mercy ball, multiball saver, stuck-ball bump, unlimited balls, "Ball N" | DONE |
 | C13 | Audio parity | Rollover, message and start sounds, non-repeating dings, score-driven music | DONE (unverified by ear) |
@@ -48,7 +48,7 @@ These were the building blocks; the status column is current.
 
 ### Which table needs what
 
-`X` = needed for that table's rules; `(x)` = nice to have. Table 9 is our own design and needs none of these.
+`X` = needed for that table's rules; `(x)` = nice to have.
 
 | Table | C1 | C2 | C3 | C4 | C5 | C6 | C7 | C8 | C9 | C10 | C11 | C12 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -164,7 +164,7 @@ shrinking towards the tail); unlimited balls and menu switches for score animati
 **Still open, roughly in order of how much a player would notice:**
 
 - One high score per table (original keeps the top 5 plus last score); settings are sound (music and effects together), score animations, ball trails and unlimited balls (the original also has separate music, game speed and zoom).
-- Tables without a script (only table 9, our own) still get the invented drop-bank clear bonus (2000) and rollover completion bonus.
+- A table without a script would still get the invented drop-bank clear bonus (2000) and rollover completion bonus; no table is without one since table 9 was removed.
 - Inactive layers switch to their faint colour at once; the original fades between the two over 250 ms.
 - No 750 ms input lockout after a ball loss; no variable plunger (`plunger_ticks` exists but is unused).
 - **Documented exception:** tables 6 and 7 use `ballradius` 0.46 (original 0.5 and 0.49), set in commit `81c7c1a` so the ball does not stick at the
@@ -174,7 +174,7 @@ shrinking towards the tail); unlimited balls and menu switches for score animati
 
 ## 7. Per-table notes
 
-Tables 3 and 6, and 7 and 8, are in the detail files. Tables 1, 2, 4, 5 and 9 follow.
+Tables 3 and 6, and 7 and 8, are in the detail files. Tables 1, 2, 4 and 5 follow.
 
 ### Table 1: Classic (`Field1Delegate`)
 
@@ -234,12 +234,6 @@ The centre 6x3 grid is the multiball status display, not something the ball ligh
 | `FlipperRollovers` completion: multiplier +1 | DONE |
 | Launch barrier, ball savers, save banks | DONE |
 | Ball radius 0.4, launch speed 20.99 with tiny jitter | DATA ok |
-
-### Table 9: Party Land (Asciiverse original)
-
-Not a port, so it has no original to match. Implemented (our own design): letter awards (MAD, CRAZY, PARTY), Ghoul Skull award ladder,
-jackpot, timed super mode, puke-rollover multiplier. Open: it still has no ball savers, its drop bank pays the generic clear bonus, and its
-top-left corner needed a closing wall (added). It is being redrawn from the Pinball Fantasies reference in the editor.
 
 ## 8. How to keep this current
 
