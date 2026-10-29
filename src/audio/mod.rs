@@ -88,7 +88,8 @@ pub struct AudioManager {
     drum:      Option<Player>,
     pad:       Option<Player>,
     schedule:  MusicSchedule,
-    enabled:   bool,
+    effects:   bool,
+    music:     bool,
     last_ding: usize,
     seed:      u32,
 }
@@ -105,7 +106,8 @@ impl AudioManager {
             drum: None,
             pad: None,
             schedule: MusicSchedule::new(),
-            enabled: true,
+            effects: true,
+            music: true,
             last_ding: usize::MAX,
             seed: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -114,16 +116,20 @@ impl AudioManager {
         })
     }
 
-    pub fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
+    /// Sound effects and music are switched apart, as in the original.
+    pub fn set_effects(&mut self, on: bool) { self.effects = on; }
+
+    pub fn set_music(&mut self, on: bool) {
+        self.music = on;
         for player in [&self.drum, &self.pad].into_iter().flatten() {
-            if enabled { player.play(); } else { player.pause(); }
+            if on { player.play(); } else { player.pause(); }
         }
     }
 
     fn random(&mut self) -> f32 { lcg(&mut self.seed) }
 
     fn effect(&self, bytes: &'static [u8], volume: f32, speed: f32) {
+        if !self.effects { return; }
         let Ok(decoder) = Decoder::new(Cursor::new(bytes)) else { return };
         let player = Player::connect_new(&self.mixer);
         player.append(decoder.speed(speed).amplify(volume));
@@ -156,7 +162,7 @@ impl AudioManager {
                 self.last_ding = ding;
                 self.effect(BUMPER_SOUNDS[ding], 0.5, 1.0);
                 let (drum, pad) = self.schedule.on_score();
-                if self.enabled {
+                if self.music {
                     if drum { Self::start_music(&self.mixer, &mut self.drum, DRUM_MUSIC, 0.5); }
                     if pad { Self::start_music(&self.mixer, &mut self.pad, PAD_MUSIC, 0.3); }
                 }

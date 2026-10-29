@@ -12,16 +12,50 @@ use crate::{
     audio::{AudioManager, SoundTrigger},
     game::{GameState, Phase},
     input::InputState,
-    persist,
+    persist::{self, SavedState},
     physics::PhysicsWorld,
     renderer::FieldRenderer,
-    ui::menu::{MenuState, MenuAction},
+    ui::{menu::{MenuState, MenuAction, TABLE_NAMES}, screens::{self, SETTINGS}},
 };
 
 const FRAME_MILLIS:  u64 = 33;
 /// A launch (or restart) press this soon after a ball was lost is ignored, as the original
 /// ignores touches for 750 ms, so a ball lost while mashing the key does not launch the next.
 const END_BALL_DELAY: Duration = Duration::from_millis(750);
+
+/// Frames (33 ms) Space may be held and still count as a tap: the table's own launch.
+const PLUNGER_TAP_FRAMES: u32 = 6;
+/// Frames of holding, after a tap's, that pull the plunger all the way back.
+const PLUNGER_PULL_FRAMES: u32 = 30;
+/// Launch strength, as a factor on the table's launch speed, from the first
+/// moment the plunger is held to the full pull. A tap launches at 1.0, as does
+/// half a pull. A soft shot may roll back into the lane, as on a real table.
+const PLUNGER_SOFTEST: f32 = 0.85;
+const PLUNGER_HARDEST: f32 = 1.15;
+/// How long each line of the after-game cycle shows, as in the original's score view.
+const IDLE_CYCLE: Duration = Duration::from_millis(3500);
+
+/// How far the plunger is pulled after `frames` held, 0..1 (0 while it is still a tap).
+fn plunger_pull(frames: u32) -> f32 {
+    (frames.saturating_sub(PLUNGER_TAP_FRAMES) as f32 / PLUNGER_PULL_FRAMES as f32).min(1.0)
+}
+
+/// The launch strength for Space released after `frames` held.
+fn plunger_strength(frames: u32) -> f32 {
+    if frames < PLUNGER_TAP_FRAMES { return 1.0; }
+    PLUNGER_SOFTEST + (PLUNGER_HARDEST - PLUNGER_SOFTEST) * plunger_pull(frames)
+}
+
+/// The lines the status cycles through after a game: game over, the last
+/// score, then each high score, as the original's score view does.
+fn idle_lines(last: u64, top: &[u64]) -> Vec<String> {
+    let mut out = vec![String::new()];
+    if last > 0 { out.push(format!("LAST SCORE {}", crate::ui::menu::format_score_col(last))); }
+    for (i, &s) in top.iter().enumerate() {
+        if s > 0 { out.push(format!("HIGH SCORE #{} {}", i + 1, crate::ui::menu::format_score_col(s))); }
+    }
+    out
+}
 
 /// A ball was lost when the game state left `Playing` in its own sync.
 fn ball_lost_by_sync(before: Phase, after_sync: Phase) -> bool {
@@ -35,34 +69,43 @@ fn launch_locked(lost_at: Option<Instant>, now: Instant) -> bool {
 
 enum Screen {
     Menu,
+    Settings { selected: usize },
+    Scores { table: usize },
+    /// The rules of `table` (0-based); `game` is the game it was opened from, if any.
+    Help { table: usize, scroll: u16, game: Option<Box<Screen>> },
     Playing {
         table_idx: u8,
         game:      GameState,
         physics:   PhysicsWorld,
         input:     InputState,
         camera_y:  f32,
+        /// Frames Space has been held for a launch, if it is.
+        plunger:   Option<u32>,
+        /// Whether this game's score has been recorded.
+        recorded:  bool,
+        game_over_at: Option<Instant>,
     },
 }
 
 pub struct App {
     terminal:      Terminal<CrosstermBackend<io::Stdout>>,
     audio:         Option<AudioManager>,
-    sound_enabled: bool,
-    score_animations: bool,
-    ball_trails:   bool,
-    unlimited_balls: bool,
-    high_scores:   [u64; 9],
+    saved:         SavedState,
     renderer:      FieldRenderer,
     menu:          MenuState,
     screen:        Screen,
     paused:        bool,
     debug_ids:     bool,
     ball_lost_at:  Option<Instant>,
+    /// The terminal reports key releases (the kitty keyboard protocol), so
+    /// Space can be held to pull the plunger.
+    release_keys:  bool,
 }
 
 impl App {
     pub fn new() -> Result<Self> {
         enable_raw_mode()?;
+        let release_keys = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen)?;
         // Request key-release events, and bare modifier keys (so Left/Right Shift
@@ -76,30 +119,19 @@ impl App {
         );
         let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
 
-        let saved = persist::load();
-        let audio = AudioManager::try_new();
-        if let Some(a) = &audio {
-            // prime the audio system with the saved preference
-            let _ = a; // set_enabled called below via the field
-        }
         let mut app = Self {
             terminal,
-            audio,
-            sound_enabled: saved.sound_enabled,
-            score_animations: saved.score_animations,
-            ball_trails:   saved.ball_trails,
-            unlimited_balls: saved.unlimited_balls,
-            high_scores:   saved.high_scores,
+            audio:         AudioManager::try_new(),
+            saved:         persist::load(),
             renderer:      FieldRenderer::new(),
             menu:          MenuState::new(),
             screen:        Screen::Menu,
             paused:        false,
             debug_ids:     false,
             ball_lost_at:  None,
+            release_keys,
         };
-        if let Some(a) = &mut app.audio {
-            a.set_enabled(app.sound_enabled);
-        }
+        app.apply_audio();
         Ok(app)
     }
 
@@ -129,6 +161,17 @@ impl App {
     fn handle_key(&mut self, k: KeyEvent) -> Result<bool> {
         let is_playing = matches!(&self.screen, Screen::Playing { .. });
 
+        // Help for the table in play: pauses the game behind it.
+        if is_playing && k.kind != KeyEventKind::Release
+            && matches!(k.code, KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::F(1))
+        {
+            let table = match &self.screen { Screen::Playing { table_idx, .. } => *table_idx as usize - 1, _ => 0 };
+            let game = std::mem::replace(&mut self.screen, Screen::Menu);
+            self.paused = true;
+            self.screen = Screen::Help { table, scroll: 0, game: Some(Box::new(game)) };
+            return Ok(false);
+        }
+
         // Pause toggle; P key while playing (not on GameOver screen).
         if is_playing && k.kind != KeyEventKind::Release
             && matches!(k.code, KeyCode::Char('p') | KeyCode::Char('P'))
@@ -154,6 +197,8 @@ impl App {
             if k.kind != KeyEventKind::Release
                 && (k.code == KeyCode::Esc || k.code == KeyCode::Char('q'))
             {
+                // Leaving a game ends it, and it counts, as the original's End Game.
+                self.record_game();
                 self.screen = Screen::Menu;
                 self.paused = false;
                 return Ok(false);
@@ -162,6 +207,10 @@ impl App {
 
         if matches!(&self.screen, Screen::Menu) {
             return self.handle_menu_key(k);
+        }
+        if matches!(&self.screen, Screen::Settings { .. } | Screen::Scores { .. } | Screen::Help { .. }) {
+            if k.kind != KeyEventKind::Release { self.handle_screen_key(k); }
+            return Ok(false);
         }
 
         self.handle_play_key(k);
@@ -181,25 +230,9 @@ impl App {
             KeyCode::Enter => {
                 match self.menu.select() {
                     MenuAction::StartTable(n) => self.start_table(n)?,
-                    MenuAction::ToggleSound   => {
-                        self.sound_enabled = !self.sound_enabled;
-                        if let Some(a) = &mut self.audio {
-                            a.set_enabled(self.sound_enabled);
-                        }
-                        self.save_state();
-                    }
-                    MenuAction::ToggleScoreAnimations => {
-                        self.score_animations = !self.score_animations;
-                        self.save_state();
-                    }
-                    MenuAction::ToggleBallTrails => {
-                        self.ball_trails = !self.ball_trails;
-                        self.save_state();
-                    }
-                    MenuAction::ToggleUnlimitedBalls => {
-                        self.unlimited_balls = !self.unlimited_balls;
-                        self.save_state();
-                    }
+                    MenuAction::Settings      => self.screen = Screen::Settings { selected: 0 },
+                    MenuAction::Scores        => self.screen = Screen::Scores { table: self.menu.table },
+                    MenuAction::Help          => self.screen = Screen::Help { table: self.menu.table, scroll: 0, game: None },
                     MenuAction::Exit          => return Ok(true),
                     MenuAction::None          => {}
                 }
@@ -207,6 +240,74 @@ impl App {
             _ => {}
         }
         Ok(false)
+    }
+
+    /// Keys on the Settings, High scores and Help screens.
+    fn handle_screen_key(&mut self, k: KeyEvent) {
+        let tables = TABLE_NAMES.len();
+        let back = matches!(k.code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q'));
+        match &mut self.screen {
+            Screen::Settings { selected } => {
+                let item = SETTINGS[*selected];
+                match k.code {
+                    _ if back => self.screen = Screen::Menu,
+                    KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
+                    KeyCode::Down | KeyCode::Char('j') => *selected = (*selected + 1).min(SETTINGS.len() - 1),
+                    KeyCode::Enter | KeyCode::Char(' ') if item == screens::Setting::Back => self.screen = Screen::Menu,
+                    KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Right | KeyCode::Char('l') => {
+                        item.change(&mut self.saved, false);
+                        self.apply_audio();
+                        self.save_state();
+                    }
+                    KeyCode::Left | KeyCode::Char('h') if item != screens::Setting::Back => {
+                        item.change(&mut self.saved, true);
+                        self.apply_audio();
+                        self.save_state();
+                    }
+                    _ => {}
+                }
+            }
+            Screen::Scores { table } => match k.code {
+                _ if back => self.screen = Screen::Menu,
+                KeyCode::Left | KeyCode::Char('h') => *table = (*table + tables - 1) % tables,
+                KeyCode::Right | KeyCode::Char('l') => *table = (*table + 1) % tables,
+                _ => {}
+            },
+            Screen::Help { table, scroll, game } => match k.code {
+                KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::F(1) | KeyCode::Enter if game.is_some() => {
+                    if let Some(g) = game.take() { self.screen = *g; }
+                }
+                _ if back => {
+                    self.screen = match game.take() { Some(g) => *g, None => Screen::Menu };
+                }
+                KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => *scroll += 1,
+                KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+                KeyCode::PageDown => *scroll += 10,
+                KeyCode::Left => { *table = (*table + tables - 1) % tables; *scroll = 0; }
+                KeyCode::Right => { *table = (*table + 1) % tables; *scroll = 0; }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn apply_audio(&mut self) {
+        if let Some(a) = &mut self.audio {
+            a.set_effects(self.saved.sound_enabled);
+            a.set_music(self.saved.music_enabled);
+        }
+    }
+
+    /// Records the game in play, once: its score as the last on its table, and
+    /// among the five best if it beats one. Not with unlimited balls.
+    fn record_game(&mut self) {
+        let Screen::Playing { table_idx, game, recorded, .. } = &mut self.screen else { return };
+        if *recorded || game.unlimited_balls || game.score == 0 { return; }
+        *recorded = true;
+        let slot = (*table_idx as usize).saturating_sub(1).min(8);
+        self.saved.record(slot, game.score);
+        self.save_state();
     }
 
     fn handle_play_key(&mut self, k: KeyEvent) {
@@ -230,23 +331,36 @@ impl App {
         }
 
         let lost_at = self.ball_lost_at;
-        let Screen::Playing { game, physics, input, .. } = &mut self.screen else { return };
+        let release_keys = self.release_keys;
+        let Screen::Playing { game, physics, input, plunger, .. } = &mut self.screen else { return };
 
         input.handle_key(k);
 
-        if k.kind == KeyEventKind::Press && k.code == KeyCode::Char(' ') {
-            match game.phase {
-                Phase::WaitingToLaunch | Phase::BallLost if launch_locked(lost_at, Instant::now()) => {}
-                Phase::WaitingToLaunch | Phase::BallLost => {
+        if k.code == KeyCode::Char(' ') {
+            let ready = matches!(game.phase, Phase::WaitingToLaunch | Phase::BallLost)
+                && !launch_locked(lost_at, Instant::now());
+            match k.kind {
+                // Where releases are reported Space pulls the plunger back and its
+                // release launches; elsewhere it launches as it is pressed.
+                KeyEventKind::Press if ready && release_keys => *plunger = Some(0),
+                KeyEventKind::Press if ready => {
                     // The launch sound comes with the world's launch event.
                     physics.launch_ball();
                     game.phase = Phase::Playing;
+                }
+                KeyEventKind::Release => {
+                    if let Some(frames) = plunger.take() {
+                        if matches!(game.phase, Phase::WaitingToLaunch | Phase::BallLost) {
+                            physics.launch_ball_with(plunger_strength(frames));
+                            game.phase = Phase::Playing;
+                        }
+                    }
                 }
                 _ => {}
             }
         }
 
-        if k.kind == KeyEventKind::Press && self.sound_enabled {
+        if k.kind == KeyEventKind::Press {
             let is_left  = matches!(k.code, KeyCode::Char('z') | KeyCode::Left
                 | KeyCode::Modifier(ModifierKeyCode::LeftShift));
             let is_right = matches!(k.code, KeyCode::Char('x') | KeyCode::Right
@@ -258,22 +372,17 @@ impl App {
     }
 
     fn save_state(&self) {
-        persist::save(&persist::SavedState {
-            sound_enabled:    self.sound_enabled,
-            score_animations: self.score_animations,
-            ball_trails:      self.ball_trails,
-            unlimited_balls:  self.unlimited_balls,
-            high_scores:      self.high_scores,
-        });
+        persist::save(&self.saved);
     }
 
     fn start_table(&mut self, n: u8) -> Result<()> {
         let table   = crate::table::load_table(n)?;
         let balls   = table.num_balls();
-        let physics = PhysicsWorld::from_table(&table);
+        let mut physics = PhysicsWorld::from_table(&table);
+        physics.set_game_speed(self.saved.game_speed.factor());
         let mut game = GameState::new(balls);
-        game.high_score = self.high_scores[(n as usize).saturating_sub(1).min(8)];
-        game.unlimited_balls = self.unlimited_balls;
+        game.high_score = self.saved.best((n as usize).saturating_sub(1).min(8));
+        game.unlimited_balls = self.saved.unlimited_balls;
         self.paused = false;
         self.screen = Screen::Playing {
             table_idx: n,
@@ -281,6 +390,9 @@ impl App {
             physics,
             input:     InputState::default(),
             camera_y:  0.0,
+            plunger:   None,
+            recorded:  false,
+            game_over_at: None,
         };
         Ok(())
     }
@@ -289,10 +401,11 @@ impl App {
         // Run physics and collect sound triggers in one borrow block, then
         // release the borrow before accessing self.audio.
         let (sound_events, ball_drained): (Vec<SoundTrigger>, bool) =
-            if let Screen::Playing { game, physics, input, camera_y, .. } = &mut self.screen
+            if let Screen::Playing { game, physics, input, camera_y, plunger, .. } = &mut self.screen
         {
             if self.paused { return; }
             input.tick();
+            if let Some(frames) = plunger { *frames += 1; }
             physics.step_frame(FRAME_MILLIS as f32 / 1000.0, input);
             let prev_phase = game.phase;
             game.sync(physics);
@@ -340,22 +453,20 @@ impl App {
 
         if ball_drained { self.ball_lost_at = Some(Instant::now()); }
 
-        if self.sound_enabled {
-            if let Some(audio) = &mut self.audio {
-                for ev in sound_events {
-                    audio.play(ev);
-                }
+        // The audio manager plays what its two switches allow, and keeps the
+        // music's schedule counting either way.
+        if let Some(audio) = &mut self.audio {
+            for ev in sound_events {
+                audio.play(ev);
             }
         }
 
-        // Persist new high score when a ball is lost.
+        // The game is over: record it, and start the after-game cycle.
         if ball_drained {
-            if let Screen::Playing { table_idx, game, .. } = &self.screen {
-                let slot = (*table_idx as usize).saturating_sub(1).min(8);
-                if game.high_score > self.high_scores[slot] {
-                    self.high_scores[slot] = game.high_score;
-                    self.save_state();
-                }
+            let over = matches!(&self.screen, Screen::Playing { game, .. } if game.phase == Phase::GameOver);
+            if over {
+                self.record_game();
+                if let Screen::Playing { game_over_at, .. } = &mut self.screen { *game_over_at = Some(Instant::now()); }
             }
         }
     }
@@ -364,27 +475,46 @@ impl App {
         match &self.screen {
             Screen::Menu => {
                 let menu          = &self.menu;
-                let settings = crate::ui::menu::MenuSettings {
-                    sound: self.sound_enabled,
-                    score_animations: self.score_animations,
-                    ball_trails: self.ball_trails,
-                    unlimited_balls: self.unlimited_balls,
-                };
-                let high_scores   = self.high_scores;
+                let high_scores: [u64; 9] = std::array::from_fn(|i| self.saved.best(i));
                 self.terminal.draw(|frame| {
-                    crate::ui::draw_menu(frame, menu, &settings, &high_scores);
+                    crate::ui::draw_menu(frame, menu, &high_scores);
                 })?;
             }
-            Screen::Playing { game, physics, camera_y, .. } => {
+            Screen::Settings { selected } => {
+                let (saved, selected) = (&self.saved, *selected);
+                self.terminal.draw(|frame| screens::draw_settings(frame, saved, selected))?;
+            }
+            Screen::Scores { table } => {
+                let (saved, table) = (&self.saved, *table);
+                self.terminal.draw(|frame| screens::draw_scores(frame, saved, table))?;
+            }
+            Screen::Help { table, scroll, game } => {
+                let (table, in_game, release_keys) = (*table, game.is_some(), self.release_keys);
+                let mut shown = *scroll;
+                self.terminal.draw(|frame| { shown = screens::draw_help(frame, table, shown, in_game, release_keys); })?;
+                if let Screen::Help { scroll, .. } = &mut self.screen { *scroll = shown; }
+            }
+            Screen::Playing { table_idx, game, physics, camera_y, plunger, game_over_at, .. } => {
                 let game      = game;
                 let physics   = physics;
                 let renderer  = &self.renderer;
                 let camera_y  = *camera_y;
                 let paused    = self.paused;
                 let debug_ids = self.debug_ids;
-                let view = crate::ui::ViewOptions { score_animations: self.score_animations, ball_trails: self.ball_trails };
+                let view = crate::ui::ViewOptions {
+                    score_animations: self.saved.score_animations,
+                    ball_trails: self.saved.ball_trails,
+                    whole_table: !self.saved.zoom,
+                };
+                let slot = (*table_idx as usize).saturating_sub(1).min(8);
+                let idle = game_over_at.map(|t| {
+                    let lines = idle_lines(self.saved.last_scores[slot], &self.saved.top_scores[slot]);
+                    let i = (t.elapsed().as_millis() / IDLE_CYCLE.as_millis()) as usize % lines.len();
+                    lines[i].clone()
+                }).filter(|l| !l.is_empty());
+                let extra = crate::ui::DmdExtra { plunger: plunger.map(plunger_pull), idle };
                 self.terminal.draw(|frame| {
-                    crate::ui::draw(frame, physics, game, renderer, camera_y, paused, debug_ids, view);
+                    crate::ui::draw(frame, physics, game, renderer, camera_y, paused, debug_ids, view, &extra);
                 })?;
             }
         }
@@ -405,6 +535,25 @@ impl Drop for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tap_launches_as_the_table_does_and_a_hold_pulls_from_soft_to_hard() {
+        assert_eq!(plunger_strength(0), 1.0);
+        assert_eq!(plunger_strength(PLUNGER_TAP_FRAMES - 1), 1.0);
+        assert_eq!(plunger_pull(PLUNGER_TAP_FRAMES - 1), 0.0, "the meter stays empty during a tap");
+        assert!((plunger_strength(PLUNGER_TAP_FRAMES) - PLUNGER_SOFTEST).abs() < 1e-6);
+        let mid = plunger_strength(PLUNGER_TAP_FRAMES + PLUNGER_PULL_FRAMES / 2);
+        assert!(mid > PLUNGER_SOFTEST && mid < PLUNGER_HARDEST);
+        assert!((plunger_strength(PLUNGER_TAP_FRAMES + PLUNGER_PULL_FRAMES) - PLUNGER_HARDEST).abs() < 1e-6);
+        assert!((plunger_strength(500) - PLUNGER_HARDEST).abs() < 1e-6, "held longer stays at the full pull");
+    }
+
+    #[test]
+    fn after_a_game_the_status_cycles_last_score_then_high_scores() {
+        let lines = idle_lines(1200, &[5000, 1200]);
+        assert_eq!(lines, vec!["".to_string(), "LAST SCORE 1,200".into(), "HIGH SCORE #1 5,000".into(), "HIGH SCORE #2 1,200".into()]);
+        assert_eq!(idle_lines(0, &[]), vec![String::new()], "only game over");
+    }
 
     #[test]
     fn only_the_sync_leaving_play_is_a_lost_ball() {

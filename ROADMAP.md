@@ -1,8 +1,8 @@
 # Roadmap
 
-Rusty Pinball is at 0.8.0 (2026-10-28): eight tables from Vector Pinball,
-each with its full rules. 1.0.0 is when the polish below is in; new tables
-come after 1.0. The detail behind each item is in
+Rusty Pinball is at 0.9.0 (2026-10-29): eight tables from Vector Pinball,
+each with its full rules, and the original's app features. 1.0.0 is when
+the last checks below are done; new tables come after 1.0. The detail behind each item is in
 [`docs/ORIGINAL-PARITY.md`](docs/ORIGINAL-PARITY.md).
 
 ## 0.8.0: built
@@ -14,19 +14,19 @@ come after 1.0. The detail behind each item is in
 - [x] Game messages on the DMD, the original's sounds and score-driven music
 - [x] Score animations and ball trails, both switchable
 
-## 0.9.0: the original's app features
+## 0.9.0: built
 
-- [ ] The top 5 high scores and the last score per table (one high score
-  per table now)
-- [ ] Settings as the original has them: music and effects apart, game
-  speed, zoom
-- [ ] A help screen
+- [x] The top 5 high scores and the last score per table, a High scores
+  screen, and the original's after-game cycle on the DMD
+- [x] Settings as the original has them: music and effects apart, game
+  speed, zoom (on follows the ball, off shows the whole table)
+- [x] A help screen with the controls and each table's rules, also in game (H)
+- [x] Inactive layers fade over a quarter second of game time, as in the original
+- [x] The plunger: hold Space to pull it back, where the terminal reports key releases
+- [x] The ball's spin dot, and its size from `ballradius`
 
 ## 1.0.0: the last details
 
-- [ ] Inactive layers fade over 250 ms, as in the original (they switch at once)
-- [ ] The variable plunger
-- [ ] The ball's secondary colour spin dot, and its size from `ballradius`
 - [ ] Sounds checked by ear against the original
 - [ ] Every table played through and tuned
 

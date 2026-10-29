@@ -10,23 +10,17 @@ const FLIPPER_HOLD_TICKS: u8 = 3;
 pub struct InputState {
     pub left_flipper:        bool,
     pub right_flipper:       bool,
-    pub plunger_held:        bool,
     /// True only on the first tick after the left flipper transitions to active.
     pub left_just_pressed:   bool,
     /// True only on the first tick after the right flipper transitions to active.
     pub right_just_pressed:  bool,
     left_ticks:              u8,
     right_ticks:             u8,
-    plunger_ticks:           u32,
 }
 
 impl InputState {
-    /// Returns the plunger charge in [0.0, 1.0]; peaks after ~1 second of holding.
-    pub fn plunger_charge(&self) -> f32 {
-        (self.plunger_ticks as f32 / 60.0).min(1.0)
-    }
-
-    /// Call once per game tick to advance plunger charging and decay flipper counters.
+    /// Call once per game tick to decay the flipper counters. (The plunger,
+    /// Space held before a launch, is the app's: it launches the ball.)
     pub fn tick(&mut self) {
         let prev_left  = self.left_flipper;
         let prev_right = self.right_flipper;
@@ -36,12 +30,6 @@ impl InputState {
         self.right_flipper = self.right_ticks > 0;
         self.left_just_pressed  = !prev_left  && self.left_flipper;
         self.right_just_pressed = !prev_right && self.right_flipper;
-
-        if self.plunger_held {
-            self.plunger_ticks = (self.plunger_ticks + 1).min(60);
-        } else {
-            self.plunger_ticks = 0;
-        }
     }
 
     /// Process a crossterm key event.  Returns true if the event was consumed.
@@ -60,11 +48,6 @@ impl InputState {
             | KeyCode::Modifier(ModifierKeyCode::RightShift) => {
                 if pressed  { self.right_ticks = FLIPPER_HOLD_TICKS; }
                 if released { self.right_ticks = 0; }
-                true
-            }
-            KeyCode::Char(' ') => {
-                if pressed  { self.plunger_held = true; }
-                if released { self.plunger_held = false; }
                 true
             }
             _ => false,

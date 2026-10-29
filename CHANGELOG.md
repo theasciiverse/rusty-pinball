@@ -2,7 +2,20 @@
 
 All notable changes to Rusty Pinball are documented here.
 
-## [Unreleased]
+## [0.9.0] - 2026-10-29
+
+### Added
+- The five best scores and the last score for every table, as in the original. A game is recorded when it ends, or when it is left for the menu (the original's End Game), and not with unlimited balls; a saved state with one best score per table keeps it as the first of the five. A High scores screen shows them per table (Left and Right change table), and after a game the DMD status cycles, every 3.5 seconds, through the last score and the high scores, as the original's score view does
+- Settings, a screen of their own off the menu: sound effects and music switch apart (the music's schedule keeps counting with it off, as in the original), game speed (slow, normal, fast: 0.85, 1 and 1.2 on the table's time ratio), zoom, score animations, ball trails and unlimited balls. Zoom on is the view as before, the table filling the width and following the ball; off shows the whole table, which suits a wide terminal
+- Help and table rules, from the menu and in game with H (the game pauses behind it): the controls, and each table's rules as the original's About screen gives them
+- The plunger. Where the terminal reports key releases (the kitty keyboard protocol), holding Space pulls it back, shown on the DMD, and letting go launches at 0.85 to 1.15 of the table's launch speed; a tap launches at the table's own speed. A soft shot can roll back into the lane, to be launched again. Elsewhere Space launches as it is pressed, as before
+- Layers fade between their faint and full colours over a quarter second of game time as a ball arrives or leaves, as in the original
+- The ball is drawn at the table's `ballradius`, with the original's spin dot turning with it, cut out of the ball as a gap since a braille cell has one colour
+
+### Changed
+- The main menu lists the tables, then Settings, High scores, Help and Exit
+
+## [0.8.0] - 2026-10-28
 
 ### Removed
 - Table 9, Party Land (2026-10-13). Its layout is to be redone from scratch. The engine extensions that only it used are removed with it: the table-JSON fields `letterAwards`, `jackpot`, a bumper's `awardLadder` and `triggersSuperMode`, a rollover group's `multiplierStep`, the timed super mode, and their DMD readouts (letter progress, award value, jackpot light, SUPER countdown)

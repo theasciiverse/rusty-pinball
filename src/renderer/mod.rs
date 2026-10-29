@@ -11,7 +11,7 @@
 /// this prevents off-screen elements from being clamped to the screen edge.
 
 use ratatui::style::Color;
-use crate::physics::{FieldSnapshot, RolloverSnapshot, Shape};
+use crate::physics::{blend, FieldSnapshot, RolloverSnapshot, Shape};
 
 // ── Palette ───────────────────────────────────────────────────────────────────
 
@@ -42,6 +42,20 @@ const COL_LAYER: [Color; 5] = [
 /// Converts a table-JSON RGB triple to a ratatui `Color`.
 fn rgb((r, g, b): (u8, u8, u8)) -> Color { Color::Rgb(r, g, b) }
 
+/// A colour as RGB, the named ones as xterm draws them, for a fade.
+fn rgb_of(c: Color) -> (u8, u8, u8) {
+    match c {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Gray => (229, 229, 229),
+        Color::Green => (0, 205, 0),
+        Color::Magenta => (205, 0, 205),
+        Color::Red => (205, 0, 0),
+        Color::Yellow => (205, 205, 0),
+        Color::Cyan => (0, 205, 205),
+        _ => (192, 192, 192),
+    }
+}
+
 /// A dimmed variant of an explicit element color, used for "unlit" rollover
 /// states; mirrors the ~31% brightness ratio between the built-in
 /// `COL_ROLLOVER_LIT` / `COL_ROLLOVER_UNLIT` pair.
@@ -67,6 +81,7 @@ impl FieldRenderer {
         &self,
         snap: &FieldSnapshot,
         camera_y: f32,
+        whole_table: bool,
         char_cols: u16,
         char_rows: u16,
         debug_ids: bool,
@@ -84,17 +99,23 @@ impl FieldRenderer {
         let mut grid   = ColorGrid::new(char_cols, char_rows);
         let mut labels: Vec<(i32, i32, String)> = Vec::new();
 
-        let field_w    = snap.field_width;
-        let viewport_h = field_w * (dot_h as f32 / dot_w as f32);
+        // Dots per table unit. Following the ball, the table fills the width and
+        // scrolls with `camera_y`; the whole table fits it in both directions,
+        // centred, and does not scroll (the original's zoom setting, off).
+        let (scale, off_x, off_y, camera_y) = if whole_table {
+            let s = (dot_w as f32 / snap.field_width).min(dot_h as f32 / snap.field_height);
+            (s, (dot_w as f32 - snap.field_width * s) / 2.0, (dot_h as f32 - snap.field_height * s) / 2.0, 0.0)
+        } else {
+            (dot_w as f32 / snap.field_width, 0.0, 0.0, camera_y)
+        };
+        // Table units to dots, for a radius in either direction (dots are square).
+        let field_w    = dot_w as f32 / scale;
+        let viewport_h = dot_h as f32 / scale;
 
         // Signed coordinate helpers; no clamping; out-of-bounds dots are
         // dropped inside set_pixel without affecting on-screen elements.
-        let to_cx = |gx: f32| -> i32 { ((gx / field_w) * dot_w as f32) as i32 };
-        let to_cy = |gy: f32| -> i32 {
-            let norm    = (gy - camera_y) / viewport_h;
-            let flipped = 1.0 - norm;
-            (flipped * dot_h as f32) as i32
-        };
+        let to_cx = |gx: f32| -> i32 { (off_x + gx * scale) as i32 };
+        let to_cy = |gy: f32| -> i32 { (dot_h as f32 - off_y - (gy - camera_y) * scale) as i32 };
         // Dot coords → char-cell coords (2 dots per column, 4 per row).
         let label_at = |labels: &mut Vec<(i32, i32, String)>, dot_x: i32, dot_y: i32, text: &str| {
             if debug_ids {
@@ -127,8 +148,8 @@ impl FieldRenderer {
             for (i, &(tx, ty)) in b.trail.iter().enumerate() {
                 let fraction = (i + 1) as f32 / (n + 1) as f32;
                 let shade = |v: u8| (v as f32 * 0.3 * fraction) as u8;
-                let rx = ((snap.field_width * 0.025 * fraction / field_w)    * dot_w as f32) as u32;
-                let ry = ((snap.field_width * 0.025 * fraction / viewport_h) * dot_h as f32) as u32;
+                let rx = ((snap.ball_radius * fraction / field_w)    * dot_w as f32) as u32;
+                let ry = ((snap.ball_radius * fraction / viewport_h) * dot_h as f32) as u32;
                 fill_ellipse(&mut pixels, &mut grid, to_cx(tx), to_cy(ty), rx.max(1), ry.max(1),
                     Color::Rgb(shade(br), shade(bg), shade(bb)));
             }
@@ -137,9 +158,17 @@ impl FieldRenderer {
         for w in &snap.walls {
             let color = match w.layer {
                 None    => w.color.map(rgb).unwrap_or(COL_WALL),
-                Some(n) if snap.occupied_layers & (1u32 << n.min(31)) != 0 => w.color.map(rgb).unwrap_or(COL_LAYER[n.min(4) as usize]),
-                // Another layer: the original's faint outline, if the table gives one.
-                Some(_) => match w.inactive { Some(c) => rgb(c), None => continue },
+                Some(n) => {
+                    let own = w.color.map(rgb).unwrap_or(COL_LAYER[n.min(4) as usize]);
+                    let f = if n == 0 { 1.0 } else { snap.layer_fade[n.min(31) as usize] };
+                    // Another layer: the original's faint outline, if the table gives one,
+                    // fading to the wall's own colour over a quarter of a second.
+                    match (f, w.inactive) {
+                        (f, _) if f >= 1.0 => own,
+                        (f, None) if f <= 0.0 => continue,
+                        (f, inactive) => rgb(blend(inactive.unwrap_or((0, 0, 0)), rgb_of(own), f)),
+                    }
+                }
             };
             draw_line(&mut pixels, &mut grid,
                 to_cx(w.x1), to_cy(w.y1), to_cx(w.x2), to_cy(w.y2),
@@ -221,12 +250,19 @@ impl FieldRenderer {
             label_at(&mut labels, to_cx(fl.x1), to_cy(fl.y1), &fl.label);
         }
 
-        // Every ball on the field (more than one during multiball).
+        // Every ball on the field (more than one during multiball), at the table's
+        // ball radius. The original's spin dot, a quarter of the radius at half the
+        // radius out, turning with the ball, is cut out of it: a braille cell has
+        // one colour, so a dot of another colour would not show.
         for b in &snap.balls {
-            let rx = ((snap.field_width * 0.025 / field_w)    * dot_w as f32) as u32;
-            let ry = ((snap.field_width * 0.025 / viewport_h) * dot_h as f32) as u32;
+            let r = snap.ball_radius * scale;
+            let (cx, cy) = (to_cx(b.x), to_cy(b.y));
             fill_ellipse(&mut pixels, &mut grid,
-                to_cx(b.x), to_cy(b.y), rx.max(1), ry.max(1), b.color.or(snap.ball_color).map(rgb).unwrap_or(COL_BALL));
+                cx, cy, (r as u32).max(1), (r as u32).max(1), b.color.or(snap.ball_color).map(rgb).unwrap_or(COL_BALL));
+            if r >= 3.0 {
+                let (sx, sy) = (b.x + snap.ball_radius / 2.0 * b.angle.cos(), b.y + snap.ball_radius / 2.0 * b.angle.sin());
+                clear_disc(&mut pixels, to_cx(sx), to_cy(sy), (r / 4.0).max(0.8));
+            }
         }
 
         // Build output.
@@ -407,6 +443,19 @@ fn draw_ellipse(
             draw_line(pixels, grid, px, py, x, y, color);
         }
         prev = Some((x, y));
+    }
+}
+
+/// Turns off the dots within `r` of a point (the ball's spin dot).
+fn clear_disc(pixels: &mut PixelBuf, cx: i32, cy: i32, r: f32) {
+    let ri = r.ceil() as i32;
+    for dy in -ri..=ri {
+        for dx in -ri..=ri {
+            if ((dx * dx + dy * dy) as f32) > r * r { continue; }
+            let (x, y) = (cx + dx, cy + dy);
+            if x < 0 || y < 0 || x as u32 >= pixels.width || y as u32 >= pixels.height { continue; }
+            pixels.data[(y as u32 * pixels.width + x as u32) as usize] = false;
+        }
     }
 }
 

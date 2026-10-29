@@ -9,11 +9,12 @@ use ratatui::{
 };
 
 use crate::game::GameState;
+use super::DmdExtra;
 
 const DOT: &str = "·";
 const DOT_COLOR: Color = Color::Rgb(80, 55, 20);
 
-pub fn draw_dmd(frame: &mut Frame, area: Rect, game: &GameState) {
+pub fn draw_dmd(frame: &mut Frame, area: Rect, game: &GameState, extra: &DmdExtra) {
     let dot_style   = Style::default().fg(DOT_COLOR);
     let score_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
     let hi_style    = Style::default().fg(Color::Cyan);
@@ -63,6 +64,10 @@ pub fn draw_dmd(frame: &mut Frame, area: Rect, game: &GameState) {
 
     // ── Right column: status right-justified row 0, hint right-justified last row ──
     let status_span = match game.phase {
+        crate::game::Phase::WaitingToLaunch | crate::game::Phase::BallLost if extra.plunger.is_some() =>
+            Span::styled(plunger_meter(extra.plunger.unwrap_or(0.0)), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        crate::game::Phase::GameOver if extra.idle.is_some() =>
+            Span::styled(extra.idle.clone().unwrap_or_default(), hi_style),
         crate::game::Phase::WaitingToLaunch => Span::styled("PRESS SPACE", Style::default().fg(Color::Green)),
         crate::game::Phase::Playing         => Span::styled(game.multiplier_text().replacen('x', "×", 1), score_style),
         crate::game::Phase::BallLost        => Span::styled("BALL LOST  SPACE", Style::default().fg(Color::Red)),
@@ -132,6 +137,12 @@ fn format_score(s: u64) -> String {
         out.push(ch);
     }
     out.chars().rev().collect()
+}
+
+/// The plunger pulled back: eight steps.
+fn plunger_meter(pull: f32) -> String {
+    let n = (pull.clamp(0.0, 1.0) * 8.0).round() as usize;
+    format!("PLUNGER {}{}", "▮".repeat(n), "▯".repeat(8 - n))
 }
 
 /// Unlimited play: a row of balls that dwindle in the original; here five that never run out.

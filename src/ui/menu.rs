@@ -17,56 +17,47 @@ pub const TABLE_NAMES: [&str; 8] = [
     "Pool Party",
 ];
 
-const ITEM_SOUND:      usize = TABLE_NAMES.len();
-const ITEM_ANIMATIONS: usize = TABLE_NAMES.len() + 1;
-const ITEM_TRAILS:     usize = TABLE_NAMES.len() + 2;
-const ITEM_UNLIMITED:  usize = TABLE_NAMES.len() + 3;
-const ITEM_EXIT:       usize = TABLE_NAMES.len() + 4;
-
-/// The options shown below the table list.
-#[derive(Clone, Copy)]
-pub struct MenuSettings {
-    pub sound: bool,
-    pub score_animations: bool,
-    pub ball_trails: bool,
-    pub unlimited_balls: bool,
-}
+const ITEM_SETTINGS: usize = TABLE_NAMES.len();
+const ITEM_SCORES:   usize = TABLE_NAMES.len() + 1;
+const ITEM_HELP:     usize = TABLE_NAMES.len() + 2;
+const ITEM_EXIT:     usize = TABLE_NAMES.len() + 3;
 
 pub struct MenuState {
     pub selected: usize,
+    /// The table last highlighted (0-based): the one High scores and Help open on.
+    pub table: usize,
 }
 
 pub enum MenuAction {
     None,
     StartTable(u8),
-    ToggleSound,
-    ToggleScoreAnimations,
-    ToggleBallTrails,
-    ToggleUnlimitedBalls,
+    Settings,
+    Scores,
+    Help,
     Exit,
 }
 
 impl MenuState {
-    pub fn new() -> Self { Self { selected: 0 } }
-    pub fn item_count() -> usize { TABLE_NAMES.len() + 5 }
+    pub fn new() -> Self { Self { selected: 0, table: 0 } }
+    pub fn item_count() -> usize { TABLE_NAMES.len() + 4 }
 
     pub fn move_up(&mut self) {
         if self.selected > 0 { self.selected -= 1; }
+        if self.selected < TABLE_NAMES.len() { self.table = self.selected; }
     }
     pub fn move_down(&mut self) {
         if self.selected < Self::item_count() - 1 { self.selected += 1; }
+        if self.selected < TABLE_NAMES.len() { self.table = self.selected; }
     }
     pub fn select(&self) -> MenuAction {
         if self.selected < TABLE_NAMES.len() {
             MenuAction::StartTable(self.selected as u8 + 1)
-        } else if self.selected == ITEM_SOUND {
-            MenuAction::ToggleSound
-        } else if self.selected == ITEM_ANIMATIONS {
-            MenuAction::ToggleScoreAnimations
-        } else if self.selected == ITEM_TRAILS {
-            MenuAction::ToggleBallTrails
-        } else if self.selected == ITEM_UNLIMITED {
-            MenuAction::ToggleUnlimitedBalls
+        } else if self.selected == ITEM_SETTINGS {
+            MenuAction::Settings
+        } else if self.selected == ITEM_SCORES {
+            MenuAction::Scores
+        } else if self.selected == ITEM_HELP {
+            MenuAction::Help
         } else {
             MenuAction::Exit
         }
@@ -95,7 +86,7 @@ const PINBALL: [&str; 6] = [
 
 // ── Public draw entry point ───────────────────────────────────────────────────
 
-pub fn draw_menu(frame: &mut Frame, area: Rect, state: &MenuState, settings: &MenuSettings, high_scores: &[u64; 9]) {
+pub fn draw_menu(frame: &mut Frame, area: Rect, state: &MenuState, high_scores: &[u64; 9]) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -105,12 +96,12 @@ pub fn draw_menu(frame: &mut Frame, area: Rect, state: &MenuState, settings: &Me
         .split(area);
 
     draw_title(frame, chunks[0]);
-    draw_list(frame, chunks[1], state, settings, high_scores);
+    draw_list(frame, chunks[1], state, high_scores);
 }
 
 // ── Title block ───────────────────────────────────────────────────────────────
 
-fn draw_title(frame: &mut Frame, area: Rect) {
+pub(crate) fn draw_title(frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .style(Style::default().fg(Color::Rgb(80, 60, 0)));
@@ -153,7 +144,7 @@ fn draw_title(frame: &mut Frame, area: Rect) {
 
 // ── Table / option list ───────────────────────────────────────────────────────
 
-fn draw_list(frame: &mut Frame, area: Rect, state: &MenuState, settings: &MenuSettings, high_scores: &[u64; 9]) {
+fn draw_list(frame: &mut Frame, area: Rect, state: &MenuState, high_scores: &[u64; 9]) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(" SELECT TABLE ", Style::default().fg(Color::Yellow)))
@@ -166,11 +157,6 @@ fn draw_list(frame: &mut Frame, area: Rect, state: &MenuState, settings: &MenuSe
     let dim       = Style::default().fg(Color::DarkGray);
     let score_col = Style::default().fg(Color::Rgb(200, 170, 60));
 
-    let on_off = |on: bool| if on { "[ ON ]" } else { "[OFF]" };
-    let sound_label      = format!("Sound: {}", on_off(settings.sound));
-    let animations_label = format!("Score animations: {}", on_off(settings.score_animations));
-    let trails_label     = format!("Ball trails: {}", on_off(settings.ball_trails));
-    let unlimited_label  = format!("Unlimited balls: {}", on_off(settings.unlimited_balls));
     let hint        = "↑↓  Navigate    Enter  Select";
 
     // Arrow column (3 chars) sits to the left of the content column (50 chars).
@@ -211,10 +197,9 @@ fn draw_list(frame: &mut Frame, area: Rect, state: &MenuState, settings: &MenuSe
 
     // Options / Exit
     for (idx, label) in [
-        (ITEM_SOUND, sound_label.as_str()),
-        (ITEM_ANIMATIONS, animations_label.as_str()),
-        (ITEM_TRAILS, trails_label.as_str()),
-        (ITEM_UNLIMITED, unlimited_label.as_str()),
+        (ITEM_SETTINGS, "Settings"),
+        (ITEM_SCORES, "High scores"),
+        (ITEM_HELP, "Help and table rules"),
         (ITEM_EXIT, "Exit"),
     ] {
         let is_sel = state.selected == idx;
@@ -256,7 +241,7 @@ fn draw_list(frame: &mut Frame, area: Rect, state: &MenuState, settings: &MenuSe
     frame.render_widget(Paragraph::new(content_lines), content_area);
 }
 
-fn format_score_col(score: u64) -> String {
+pub(crate) fn format_score_col(score: u64) -> String {
     if score == 0 {
         return "──────────".to_owned();
     }

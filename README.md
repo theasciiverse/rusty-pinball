@@ -49,21 +49,24 @@ Running inside **tmux** is recommended for the best display experience.
 | `Enter` | Select |
 | `Q` | Quit |
 
+Settings, High scores and Help are on the menu below the tables. In those, `←` / `→` change a setting or the table, and `Esc` goes back.
+
 ### In Game
 
 | Key | Action |
 |-----|--------|
-| `Space` | Launch ball |
+| `Space` | Launch ball; hold it to pull the plunger back (on terminals that report key releases); start again after game over |
 | `Z` / `←` / Left Shift | Left flipper |
 | `X` / `→` / Right Shift | Right flipper |
-| `Enter` | Continue after ball lost / restart after game over |
-| `Esc` | Return to main menu |
+| `P` | Pause |
+| `H` | Help and this table's rules |
+| `Esc` / `Q` | Return to main menu |
 
 ## Tips
 
-- The game field is taller than the visible viewport, the camera follows the ball automatically.
+- With Zoom on (the default) the table fills the terminal's width and the view follows the ball up and down; with Zoom off the whole table is shown at once, which suits a wide terminal.
 - The flippers respond to letter keys (`Z`/`X`), arrow keys, and Left/Right Shift, so you can use whichever feels more natural. Shift on its own is only reported by terminals that support the Kitty keyboard protocol (kitty is one); elsewhere use `Z`/`X` or the arrows.
-- Sound, floating score animations and ball trails can each be switched on or off from the main menu, and so can unlimited balls (the game never ends; no high score is recorded and the score shows a `*`). The choices are remembered.
+- Sound effects, music, floating score animations, ball trails, zoom, game speed and unlimited balls (the game never ends; no high score is recorded and the score shows a `*`) are in Settings. The choices are remembered, and so are the five best scores and the last score on every table.
 - For the smoothest experience, run in a dedicated tmux pane or a full-screen terminal window.
 
 ## Status against the original

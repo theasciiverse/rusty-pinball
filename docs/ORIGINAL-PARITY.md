@@ -37,14 +37,14 @@ These were the building blocks; the status column is current.
 | C4 | Game messages | Timed text with a message sound | DONE |
 | C5 | Element control | `setRetracted`, `setVisible`, `setNewColor`, rollover setters, drop target make-visible, spinner score | DONE |
 | C6 | Sensors by id | `ballInSensorRange` with each ball's most recent sensor id | DONE |
-| C7 | Per-ball state | Runtime ball colours, per-ball forces | DONE (colours, forces; the secondary colour spin dot is not drawn) |
-| C8 | Full layer model | Layers as separate collision worlds | DONE except the 250 ms fade (an element with no layer is layer 0; a ball only touches and triggers elements of its own layer; pieces of an idle layer are drawn faintly in `inactiveLayerColor`, lifted to a minimum brightness so a terminal shows them, and hidden when the table gives none) |
+| C7 | Per-ball state | Runtime ball colours, per-ball forces | DONE (colours, forces; the spin dot is cut out of the ball, see C14) |
+| C8 | Full layer model | Layers as separate collision worlds | DONE (an element with no layer is layer 0; a ball only touches and triggers elements of its own layer; pieces of an idle layer are drawn faintly in `inactiveLayerColor`, lifted to a minimum brightness so a terminal shows them, and hidden when the table gives none; a layer fades between the two over 0.25 s of game time as a ball arrives or leaves, as in `FieldElement.tick`) |
 | C9 | Shape renderer | `setShapes`: coloured circles and lines each frame (table 7 star map) | DONE |
 | C10 | Multiplier and rollover rules | Fractional unbounded multiplier, carry-over rules, original rollover scoring | DONE (every table has a script) |
 | C11 | Score animations | Floating score text at the ball, coloured by value | DONE |
 | C12 | Ball and game flow | Extra ball, mercy ball, multiball saver, stuck-ball bump, unlimited balls, "Ball N" | DONE |
 | C13 | Audio parity | Rollover, message and start sounds, non-repeating dings, score-driven music | DONE (unverified by ear) |
-| C14 | App features | Ball trails, spin dot, zoom, game speed, top 5 high scores plus last score, help screen | Ball trails DONE; spin dot, zoom, game speed, top 5 scores and a help screen are open |
+| C14 | App features | Ball trails, spin dot, zoom, game speed, top 5 high scores plus last score, help screen | DONE in 0.9.0. Top 5 scores plus the last per table, recorded when a game ends (or is left for the menu, as the original's End Game), with the original's after-game cycle on the DMD and a High scores screen. Settings: sound effects and music apart, game speed (0.85, 1, 1.2 on the time ratio), zoom. Zoom is adapted to a terminal: on (default) the table fills the width and the view follows the ball, as before; off shows the whole table, which suits wide terminals; the original's 1.5x ease-in is not done. The help screen gives the controls and each table's rules from the original's strings. The spin dot is cut out of the ball as a gap (a braille cell has one colour, so a grey dot would not show), drawn once the ball is at least 3 dots across; the ball is drawn at the table's `ballradius` |
 
 ### Which table needs what
 
@@ -163,14 +163,12 @@ shrinking towards the tail); unlimited balls and menu switches for score animati
 
 **Still open, roughly in order of how much a player would notice:**
 
-- One high score per table (original keeps the top 5 plus last score); settings are sound (music and effects together), score animations, ball trails and unlimited balls (the original also has separate music, game speed and zoom).
 - A table without a script would still get the invented drop-bank clear bonus (2000) and rollover completion bonus; no table is without one since table 9 was removed.
-- Inactive layers switch to their faint colour at once; the original fades between the two over 250 ms.
-- No 750 ms input lockout after a ball loss; no variable plunger (`plunger_ticks` exists but is unused).
+- A plunger, which the original does not have: where the terminal reports key releases, holding Space pulls it back and the release launches at 0.85 to 1.15 of the table's launch speed; a tap launches at the table's own speed, as everywhere else.
 - **Documented exception:** tables 6 and 7 use `ballradius` 0.46 (original 0.5 and 0.49), set in commit `81c7c1a` so the ball does not stick at the
   launch ramps. Checked on 2026-10-03 by 40 random launches per table with the original radii: only 5 of 40 balls (table 6) and 0 of 40
   (table 7) entered a ramp or loop, against 17 and 3 with 0.46, so the exception stays. Every other table JSON is identical to the original.
-- Ball drawn at a fixed size ignoring `ballradius`; no secondary ball colour spin dot; ball density not rescaled for radius.
+- Ball density not rescaled for radius.
 
 ## 7. Per-table notes
 

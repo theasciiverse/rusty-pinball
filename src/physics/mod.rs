@@ -34,6 +34,22 @@ fn parse_inactive_color(v: &Option<serde_json::Value>) -> Option<(u8, u8, u8)> {
 /// The dimmest an inactive layer is drawn (its brightest channel), so it shows in a terminal.
 const MIN_FAINT_BRIGHTNESS: u32 = 60;
 
+/// Game seconds a layer takes to fade between its inactive and its own colours,
+/// as in the original's `FieldElement.tick`.
+const LAYER_FADE_SECS: f32 = 0.25;
+
+/// `from` to `to` by `t` in 0..1.
+pub fn blend(from: (u8, u8, u8), to: (u8, u8, u8), t: f32) -> (u8, u8, u8) {
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t.clamp(0.0, 1.0)).round() as u8;
+    (mix(from.0, to.0), mix(from.1, to.1), mix(from.2, to.2))
+}
+
+/// The renderer's own colours for elements a table gives none, as RGB, for a fade.
+const DEFAULT_FLIPPER_RGB: (u8, u8, u8) = (0, 205, 205);
+const DEFAULT_BUMPER_RGB:  (u8, u8, u8) = (0, 0, 238);
+const DEFAULT_TARGET_RGB:  (u8, u8, u8) = (205, 205, 0);
+const DEFAULT_ROLLOVER_RGB: (u8, u8, u8) = (0, 205, 205);
+
 fn parse_color(v: &Option<serde_json::Value>) -> Option<(u8, u8, u8)> {
     let arr = v.as_ref()?.as_array()?;
     let at = |i: usize| -> Option<u8> { arr.get(i)?.as_u64().map(|n| n as u8) };
@@ -79,6 +95,8 @@ pub struct BallSnapshot {
     pub color: Option<(u8, u8, u8)>,
     /// Where it has been over the last frames, oldest first.
     pub trail: Vec<(f32, f32)>,
+    /// How far the ball has turned (radians), shown by the original's spin dot.
+    pub angle: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -162,7 +180,10 @@ pub struct FieldSnapshot {
     pub ball_layer: u8,
     /// Bit n set when a ball is on layer n; layered walls are drawn only then.
     pub occupied_layers: u32,
+    /// How far each layer has faded in, 0 (idle) to 1 (a ball is on it).
+    pub layer_fade: [f32; 32],
     pub ball_color: Option<(u8, u8, u8)>,
+    pub ball_radius: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -521,6 +542,10 @@ pub struct PhysicsWorld {
     balls:              Vec<BallState>,
     ball_radius:        f32,
     time_ratio:         f32,
+    /// The table's own time ratio, before the game speed setting.
+    base_time_ratio:    f32,
+    /// See `FieldSnapshot::layer_fade`.
+    layer_fade:         [f32; 32],
     ball_color:         Option<(u8, u8, u8)>,
     flippers:           Vec<FlipperInfo>,
     bumpers:            Vec<BumperInfo>,
@@ -857,6 +882,8 @@ impl PhysicsWorld {
             soft_bodies: SoftBodySet::new(),
             gravity,
             time_ratio: table.time_ratio(),
+            base_time_ratio: table.time_ratio(),
+            layer_fade: { let mut f = [0.0; 32]; f[0] = 1.0; f },
             balls,
             ball_radius,
             ball_color,
@@ -1293,7 +1320,12 @@ impl PhysicsWorld {
 
     /// Fires the waiting ball (the primary ball) up the shooter lane.
     pub fn launch_ball(&mut self) {
-        let v = self.jittered_launch_velocity();
+        self.launch_ball_with(1.0);
+    }
+
+    /// Launches with the plunger pulled to `strength` (1.0 is the table's own launch).
+    pub fn launch_ball_with(&mut self, strength: f32) {
+        let v = self.jittered_launch_velocity().map(|c| c * strength);
         let [lx, ly] = self.launch_pos;
         if let Some(first) = self.balls.first() {
             let h = first.body;
@@ -1379,6 +1411,7 @@ impl PhysicsWorld {
         self.left_held = input.left_flipper;
         self.right_held = input.right_flipper;
         self.game_time += dt;
+        self.fade_layers(dt);
         // Deferred collider disable for retractWhenHit walls.
         // We set retract_pending in the previous sub-step so that the kick
         // impulse has one full integration step to move the ball away before
@@ -2521,6 +2554,21 @@ impl PhysicsWorld {
         self.record_trails();
     }
 
+    /// Fades each layer towards its own colours while a ball is on it, and back
+    /// to its inactive ones while none is.
+    fn fade_layers(&mut self, game_secs: f32) {
+        let occupied = self.balls.iter().fold(1u32, |m, b| m | (1u32 << b.layer.min(31)));
+        let step = game_secs / LAYER_FADE_SECS;
+        for (n, f) in self.layer_fade.iter_mut().enumerate() {
+            *f = if occupied & (1u32 << n) != 0 { (*f + step).min(1.0) } else { (*f - step).max(0.0) };
+        }
+    }
+
+    /// The game speed setting: a factor on the table's time ratio, as in the original.
+    pub fn set_game_speed(&mut self, factor: f32) {
+        self.time_ratio = self.base_time_ratio * factor;
+    }
+
     /// Remembers where each ball is, for the trail drawn behind it. A ball that
     /// jumped (launched, relocated by a script) starts a new trail.
     fn record_trails(&mut self) {
@@ -2581,14 +2629,22 @@ impl PhysicsWorld {
 
     pub fn snapshot(&self) -> FieldSnapshot {
         let balls: Vec<BallSnapshot> = self.live_balls().into_iter()
-            .map(|(i, t, v)| BallSnapshot { x: t.x, y: t.y, vx: v.x, vy: v.y, color: self.balls[i].color, trail: self.balls[i].trail.clone() })
+            .map(|(i, t, v)| BallSnapshot {
+                x: t.x, y: t.y, vx: v.x, vy: v.y, color: self.balls[i].color, trail: self.balls[i].trail.clone(),
+                angle: self.bodies.get(self.balls[i].body).map_or(0.0, |b| b.rotation().angle()),
+            })
             .collect();
         // Elements on another layer (table 7's mini table) show only while a ball is on it.
         let occupied_layers = self.balls.iter().fold(0u32, |m, b| m | (1u32 << b.layer.min(31)));
         let on = |layer: u8| layer == 0 || occupied_layers & (1u32 << layer.min(31)) != 0;
-        // Elements of an idle layer show faintly in their inactive colour, or not at all without one.
-        let shown = |layer: u8, inactive: Option<(u8, u8, u8)>| on(layer) || inactive.is_some();
-        let faint = |layer: u8, inactive: Option<(u8, u8, u8)>| if on(layer) { None } else { inactive };
+        let fade = |layer: u8| if layer == 0 { 1.0 } else { self.layer_fade[layer.min(31) as usize] };
+        // Elements of an idle layer show faintly in their inactive colour, or not at all without
+        // one, and fade between that and their own colour as a ball comes and goes.
+        let shown = |layer: u8, inactive: Option<(u8, u8, u8)>| fade(layer) > 0.0 || inactive.is_some();
+        let tint = |layer: u8, inactive: Option<(u8, u8, u8)>, own: Option<(u8, u8, u8)>, default: (u8, u8, u8)| {
+            let f = fade(layer);
+            if f >= 1.0 { own } else { Some(blend(inactive.unwrap_or((0, 0, 0)), own.unwrap_or(default), f)) }
+        };
 
         // Read the tip position straight from the physics body's actual
         // transform (translation + rotation) rather than a separately
@@ -2597,7 +2653,7 @@ impl PhysicsWorld {
             let body = self.bodies.get(fl.body_handle)?;
             let local_tip_x = if fl.is_right { -fl.half_len } else { fl.half_len };
             let tip = body.position() * Vector::new(local_tip_x, 0.0);
-            Some(FlipperSnapshot { x1: fl.pivot[0], y1: fl.pivot[1], x2: tip.x, y2: tip.y, label: fl.label.clone(), color: faint(fl.layer, fl.inactive) })
+            Some(FlipperSnapshot { x1: fl.pivot[0], y1: fl.pivot[1], x2: tip.x, y2: tip.y, label: fl.label.clone(), color: tint(fl.layer, fl.inactive, None, DEFAULT_FLIPPER_RGB) })
         }).collect();
 
         let bumpers = self.bumpers.iter().filter(|b| shown(b.layer, b.inactive)).map(|b| BumperSnapshot {
@@ -2606,8 +2662,8 @@ impl PhysicsWorld {
             outer_radius: b.outer_radius,
             lit: b.lit_ticks > 0,
             label: b.label.clone(),
-            color: faint(b.layer, b.inactive).or(b.color_override).or(b.color),
-            outer_color: faint(b.layer, b.inactive).or(b.outer_override).or(b.outer_color),
+            color: tint(b.layer, b.inactive, b.color_override.or(b.color), DEFAULT_BUMPER_RGB),
+            outer_color: tint(b.layer, b.inactive, b.outer_override.or(b.outer_color).or(b.color_override).or(b.color), DEFAULT_BUMPER_RGB),
         }).collect();
 
         let kick_walls = self.kick_walls.iter()
@@ -2617,7 +2673,7 @@ impl PhysicsWorld {
 
         let drop_targets: Vec<WallSnapshot> = self.drop_target_groups.iter().filter(|g| shown(g.layer, g.inactive))
             .flat_map(|g| g.targets.iter().enumerate().filter(|(_, t)| t.active)
-                .map(move |(i, t)| (g.label.clone(), faint(g.layer, g.inactive).or(g.color), i, t)))
+                .map(move |(i, t)| (g.label.clone(), tint(g.layer, g.inactive, g.color, DEFAULT_TARGET_RGB), i, t)))
             .map(|(glabel, color, i, t)| WallSnapshot {
                 x1: t.x1, y1: t.y1, x2: t.x2, y2: t.y2, layer: None,
                 label: Some(format!("{glabel}.{i}")),
@@ -2636,13 +2692,13 @@ impl PhysicsWorld {
             } else {
                 None
             };
-            let idle = faint(g.layer, g.inactive).is_some();
+            let idle = fade(g.layer) < 1.0;
             RolloverGroupSnapshot {
                 rollovers: g.rollovers.iter().enumerate().filter(|_| g.visible).map(|(i, rv)| RolloverSnapshot {
                     x: rv.x, y: rv.y, radius: rv.radius,
                     lit: !idle && flash_override.unwrap_or(rv.lit),
                     label: format!("{}.{}", g.label, i),
-                    color: faint(g.layer, g.inactive).or(rv.color),
+                    color: tint(g.layer, g.inactive, rv.color, DEFAULT_ROLLOVER_RGB),
                 }).collect(),
             }
         }).collect();
@@ -2672,7 +2728,9 @@ impl PhysicsWorld {
             popups: Vec::new(),
             ball_layer: self.balls.first().map_or(0, |b| b.layer),
             occupied_layers,
+            layer_fade: self.layer_fade,
             ball_color: self.ball_color,
+            ball_radius: self.ball_radius,
         }
     }
 }
@@ -5451,8 +5509,8 @@ mod table_7_tests {
         let mut bare = snap.clone();
         bare.shapes.clear();
         let renderer = crate::renderer::FieldRenderer::new();
-        let with = renderer.render(&snap, 0.0, 100, 70, false);
-        let without = renderer.render(&bare, 0.0, 100, 70, false);
+        let with = renderer.render(&snap, 0.0, false, 100, 70, false);
+        let without = renderer.render(&bare, 0.0, false, 100, 70, false);
         assert_eq!(with.chars.len(), without.chars.len());
         let changed = with.chars.iter().zip(&without.chars).filter(|(a, b)| a != b).count();
         assert!(changed >= 15, "the stars add dots to the picture, changed cells: {changed}");
@@ -5465,14 +5523,14 @@ mod table_7_tests {
         let mut snap = w.snapshot();
         snap.popups.push(ScorePopup { text: "5000".into(), x: 10.0, y: 12.0, progress: 0.0, color: (0xFF, 0xFF, 0x00) });
         let renderer = crate::renderer::FieldRenderer::new();
-        let frame = renderer.render(&snap, 0.0, 100, 70, false);
+        let frame = renderer.render(&snap, 0.0, false, 100, 70, false);
         let text: String = frame.chars.chunks(100).map(|row| row.iter().collect::<String>()).collect::<Vec<_>>().join("\n");
         assert!(text.contains("5000"), "the digits are on the screen");
         let idx = frame.chars.iter().position(|&c| c == '5').unwrap();
         assert_eq!(frame.colors[idx], ratatui::style::Color::Rgb(0xFF, 0xFF, 0x00), "in the full colour at first");
 
         snap.popups[0].progress = 0.75;
-        let frame = renderer.render(&snap, 0.0, 100, 70, false);
+        let frame = renderer.render(&snap, 0.0, false, 100, 70, false);
         let idx = frame.chars.iter().position(|&c| c == '5').unwrap();
         assert_eq!(frame.colors[idx], ratatui::style::Color::Rgb(0x7F, 0x7F, 0x00), "half faded three quarters through");
     }
@@ -6523,6 +6581,8 @@ mod table_7_lock_tests {
         place(&mut w, x, y);
         for _ in 0..16 { step(&mut w); place(&mut w, x, y); }
         assert!(w.drain_score_events().contains(&1000), "a mini table ball does");
+        // the layer fades in over a quarter of a second of game time
+        for _ in 0..60 { step(&mut w); place(&mut w, x, y); }
         let full = w.snapshot().bumpers.iter().find(|s| (s.x - x).abs() < 0.01).and_then(|s| s.color).expect("drawn");
         assert!(full.0.max(full.1).max(full.2) > 100, "and in its full colour: {full:?}");
     }
@@ -6776,8 +6836,8 @@ mod engine_rule_tests {
         let mut bare = snap.clone();
         for b in &mut bare.balls { b.trail.clear(); }
         let renderer = crate::renderer::FieldRenderer::new();
-        let with = renderer.render(&snap, 0.0, 100, 70, false);
-        let without = renderer.render(&bare, 0.0, 100, 70, false);
+        let with = renderer.render(&snap, 0.0, false, 100, 70, false);
+        let without = renderer.render(&bare, 0.0, false, 100, 70, false);
         let changed = with.chars.iter().zip(&without.chars).filter(|(a, b)| a != b).count();
         assert!(changed >= 3, "the trail adds dots: {changed}");
     }
@@ -6791,7 +6851,7 @@ mod engine_rule_tests {
         assert!(snap.walls.iter().all(|s| s.layer != Some(4) || s.inactive.map_or(true, |c| c != (0, 0, 0))),
             "a fully transparent colour means hidden");
         let renderer = crate::renderer::FieldRenderer::new();
-        let frame = renderer.render(&snap, 0.0, 100, 70, false);
+        let frame = renderer.render(&snap, 0.0, false, 100, 70, false);
         let faint = |f: &crate::renderer::ColoredFrame| f.colors.iter().filter(|&&c| c == ratatui::style::Color::Rgb(0, 60, 35)).count();
         let idle = faint(&frame);
         assert!(idle > 20, "and the renderer draws it: {idle} cells");
@@ -6799,8 +6859,35 @@ mod engine_rule_tests {
         // A ball on that layer draws it in its full colour instead (the right orbit stays faint).
         let mut w = world(7);
         w.set_ball_layer(0, 2);
-        let active = faint(&renderer.render(&w.snapshot(), 0.0, 100, 70, false));
+        let half = faint(&renderer.render(&w.snapshot(), 0.0, false, 100, 70, false));
+        assert_eq!(half, idle, "it fades in, so at first it is still faint");
+        for _ in 0..60 { w.step(1.0 / 240.0, &InputState::default()); }
+        let active = faint(&renderer.render(&w.snapshot(), 0.0, false, 100, 70, false));
         assert!(active < idle, "the left orbit is no longer faint: {active} against {idle}");
+    }
+
+    #[test]
+    fn a_layer_fades_in_and_out_over_a_quarter_second_of_game_time() {
+        let mut w = world(7);
+        // the fade alone, so nothing on the table moves the ball meanwhile
+        let tick = |w: &mut PhysicsWorld, secs: f32| for _ in 0..(secs * 240.0).round() as usize { w.fade_layers(1.0 / 240.0); };
+        assert_eq!(w.layer_fade[0], 1.0, "the main layer is always on");
+        assert_eq!(w.layer_fade[2], 0.0);
+        w.set_ball_layer(0, 2);
+        tick(&mut w, 0.125);
+        assert!((w.layer_fade[2] - 0.5).abs() < 0.02, "half way: {}", w.layer_fade[2]);
+        tick(&mut w, 0.15);
+        assert_eq!(w.layer_fade[2], 1.0);
+        w.set_ball_layer(0, 0);
+        tick(&mut w, 0.1);
+        assert!(w.layer_fade[2] > 0.5 && w.layer_fade[2] < 0.7, "fading out: {}", w.layer_fade[2]);
+        assert_eq!(w.layer_fade[0], 1.0);
+        let mid = w.snapshot().walls.iter().filter(|s| s.layer == Some(2)).count();
+        assert!(mid > 0);
+        tick(&mut w, 0.2);
+        assert_eq!(w.layer_fade[2], 0.0);
+        // in between, the colour is a blend of the two
+        assert_eq!(blend((0, 60, 35), (0, 170, 102), 0.5), (0, 115, 69));
     }
 
     fn sounds(w: &PhysicsWorld) -> (usize, usize, usize) {
@@ -6878,7 +6965,7 @@ mod engine_rule_tests {
         w.step(1.0 / 240.0, &InputState::default());
         let snap = w.snapshot();
         assert!(snap.bumpers.iter().any(|s| s.lit), "the bumper is lit");
-        let frame = crate::renderer::FieldRenderer::new().render(&snap, 0.0, 100, 70, false);
+        let frame = crate::renderer::FieldRenderer::new().render(&snap, 0.0, false, 100, 70, false);
         assert!(frame.colors.contains(&ratatui::style::Color::Rgb(255 - r, 255 - g, 255 - b)), "drawn inverted");
     }
 
@@ -6904,5 +6991,35 @@ mod engine_rule_tests {
         w.balls[0].last_sensor = Some("X".into());
         w.launch_ball();
         assert_eq!((w.balls[0].color, w.balls[0].last_sensor.clone()), (None, None));
+    }
+}
+
+#[cfg(test)]
+mod plunger_tests {
+    use super::*;
+    use crate::table::load_table;
+
+    /// The plunger launches at 0.85 to 1.15 of the table's speed (`app.rs`). The
+    /// hardest shot must stay on the table, and the softest must not lose a ball:
+    /// it gets into play or rolls back into the lane to be launched again.
+    #[test]
+    fn the_hardest_plunge_stays_on_the_table_and_the_softest_loses_no_ball() {
+        for n in 1..=8u8 {
+            let table = load_table(n).unwrap();
+            for strength in [0.85f32, 1.15] {
+                for _ in 0..10 {
+                    let mut w = PhysicsWorld::from_table(&table);
+                    w.launch_ball_with(strength);
+                    for _ in 0..90 {
+                        w.step_frame(0.033, &InputState::default());
+                        let p = w.ball_position().unwrap();
+                        assert!(p.x > -1.0 && p.x < table.width + 1.0 && p.y > -3.0 && p.y < table.height + 1.0,
+                            "table {n} at {strength}: the ball left the field at ({:.2}, {:.2})", p.x, p.y);
+                        if w.is_ball_in_dead_zone() { break; }
+                        assert!(!w.is_ball_drained(), "table {n} at {strength}: drained straight from the launch");
+                    }
+                }
+            }
+        }
     }
 }

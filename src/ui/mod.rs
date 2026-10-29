@@ -1,5 +1,6 @@
 mod dmd;
 pub mod menu;
+pub mod screens;
 
 use ratatui::{
     Frame,
@@ -11,9 +12,9 @@ use ratatui::{
 
 use crate::{game::GameState, physics::{FieldSnapshot, PhysicsWorld}, renderer::FieldRenderer};
 
-pub fn draw_menu(frame: &mut Frame, state: &menu::MenuState, settings: &menu::MenuSettings, high_scores: &[u64; 9]) {
+pub fn draw_menu(frame: &mut Frame, state: &menu::MenuState, high_scores: &[u64; 9]) {
     let area = frame.area();
-    menu::draw_menu(frame, area, state, settings, high_scores);
+    menu::draw_menu(frame, area, state, high_scores);
 }
 
 /// What the play screen shows beyond the table itself.
@@ -21,6 +22,17 @@ pub fn draw_menu(frame: &mut Frame, state: &menu::MenuState, settings: &menu::Me
 pub struct ViewOptions {
     pub score_animations: bool,
     pub ball_trails: bool,
+    /// Zoom off: the whole table at once instead of following the ball.
+    pub whole_table: bool,
+}
+
+/// What the DMD shows beyond the game state.
+#[derive(Clone, Default)]
+pub struct DmdExtra {
+    /// How far the plunger is pulled, 0..1, while Space is held before a launch.
+    pub plunger: Option<f32>,
+    /// After a game: the line the status cycles to (last score, the high scores).
+    pub idle: Option<String>,
 }
 
 const DMD_HEIGHT: u16 = 6;
@@ -34,6 +46,7 @@ pub fn draw(
     paused: bool,
     debug_ids: bool,
     view: ViewOptions,
+    extra: &DmdExtra,
 ) {
     let area = frame.area();
 
@@ -48,8 +61,8 @@ pub fn draw(
     let mut snap = physics.snapshot();
     if view.score_animations { snap.popups = game.popup_snapshots(); }
     if !view.ball_trails { for b in &mut snap.balls { b.trail.clear(); } }
-    draw_play_area(frame, chunks[0], &snap, renderer, camera_y, debug_ids);
-    dmd::draw_dmd(frame, chunks[1], game);
+    draw_play_area(frame, chunks[0], &snap, renderer, camera_y, view.whole_table, debug_ids);
+    dmd::draw_dmd(frame, chunks[1], game, extra);
 
     if paused {
         draw_pause_overlay(frame, area);
@@ -76,7 +89,7 @@ fn draw_pause_overlay(frame: &mut Frame, area: Rect) {
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "  Press P to resume",
+            "  P resume   H help",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(""),
@@ -97,6 +110,7 @@ fn draw_play_area(
     snap: &FieldSnapshot,
     renderer: &FieldRenderer,
     camera_y: f32,
+    whole_table: bool,
     debug_ids: bool,
 ) {
     let title = if debug_ids { " RUSTY PINBALL [IDs] " } else { " RUSTY PINBALL " };
@@ -108,7 +122,7 @@ fn draw_play_area(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let rendered = renderer.render(snap, camera_y, inner.width, inner.height, debug_ids);
+    let rendered = renderer.render(snap, camera_y, whole_table, inner.width, inner.height, debug_ids);
 
     let cols = rendered.char_cols as usize;
     let rows = rendered.char_rows as usize;
