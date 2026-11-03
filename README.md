@@ -4,7 +4,7 @@ A terminal pinball game written in Rust, rendered entirely in braille-pixel vect
 
 ## Inspiration
 
-Rusty Pinball is inspired by [Vector Pinball](https://github.com/dozingcat/VectorPinball) by Brian Nenninger, an open-source Android pinball game with a clean physics-driven design and eight great tables. Tables 1-8's layouts and game logic in Rusty Pinball are derived from Vector Pinball's JSON table definitions.
+Rusty Pinball is inspired by [Vector Pinball](https://github.com/dozingcat/Vector-Pinball) by Brian Nenninger, an open-source Android pinball game with a clean physics-driven design and eight great tables. Tables 1-8's layouts and game logic in Rusty Pinball are derived from Vector Pinball's JSON table definitions.
 
 ## Features
 
@@ -95,5 +95,5 @@ listed in [docs/ORIGINAL-PARITY.md](docs/ORIGINAL-PARITY.md); every change is in
 Rusty Pinball is released under the [GNU General Public License v3.0](LICENCE.txt).
 
 Tables 1-8 in `assets/tables/` are derived from
-[Vector Pinball](https://github.com/dozingcat/VectorPinball) by Brian Nenninger,
+[Vector Pinball](https://github.com/dozingcat/Vector-Pinball) by Brian Nenninger,
 also licensed under GPL-3.0.

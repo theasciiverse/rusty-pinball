@@ -64,6 +64,7 @@ jobs:
           # the binary sits at the top of the archive, where av looks for it
           mkdir -p stage dist
           cp target/release/$BIN README.md $LICENCE_FILE stage/
+          cp -r assets stage/   # the tables, sounds and star map, read from beside the binary
           tar -czf "dist/$ID-${{ matrix.target }}.tar.gz" -C stage .
 
       - uses: actions/upload-artifact@v4
@@ -96,6 +97,7 @@ jobs:
         run: |
           mkdir -p stage dist
           cp target/${{ matrix.target }}/release/$BIN README.md $LICENCE_FILE stage/
+          cp -r assets stage/
           tar -czf "dist/$ID-${{ matrix.target }}.tar.gz" -C stage .
 
       - uses: actions/upload-artifact@v4
@@ -126,6 +128,7 @@ jobs:
         run: |
           mkdir -p stage dist
           cp target/${{ matrix.target }}/release/$BIN.exe README.md $LICENCE_FILE stage/
+          cp -r assets stage/
           (cd stage && 7z a -tzip "../dist/$ID-${{ matrix.target }}.zip" .)
 
       - uses: actions/upload-artifact@v4
